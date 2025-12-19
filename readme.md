@@ -1,4 +1,4 @@
-# Storj Interface
+YRAL VIDEO STORAGE SERVICE
 
 Storj interface is a rest interface to upload objects to storj via the uplink cli.
 
