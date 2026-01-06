@@ -14,16 +14,48 @@ use consts::{
 };
 use once_cell::sync::Lazy;
 use reqwest::{header::AUTHORIZATION, StatusCode};
+use sentry_tower::{NewSentryLayer, SentryHttpLayer};
 use std::sync::Arc;
 use tokio::{signal, sync::Notify};
+use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 
 pub(crate) mod consts;
 mod routes;
 mod s3_client;
+pub(crate) mod sentry_utils;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() {
+    // Initialize Sentry
+    let _guard = sentry::init((
+        "https://9ce8dcaeb2b87f8603bbd6f5b7e8ac2a@apm.yral.com/16",
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            environment: Some(
+                std::env::var("ENVIRONMENT")
+                    .unwrap_or_else(|_| "production".to_string())
+                    .into(),
+            ),
+            send_default_pii: true,
+            traces_sample_rate: 0.1,
+            attach_stacktrace: true,
+            ..Default::default()
+        },
+    ));
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            if let Err(err) = run_server().await {
+                eprintln!("Server error: {err:#}");
+                sentry::capture_error(&*err);
+            }
+        });
+}
+
+async fn run_server() -> anyhow::Result<()> {
     // Force loading of Storj configuration
     Lazy::force(&ACCESS_GRANT_SFW);
     Lazy::force(&ACCESS_GRANT_NSFW);
@@ -45,6 +77,11 @@ async fn main() -> anyhow::Result<()> {
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers(Any);
+
+    // Sentry middleware for request tracking
+    let sentry_layer = ServiceBuilder::new()
+        .layer(NewSentryLayer::new_from_top())
+        .layer(SentryHttpLayer::default());
 
     let app = Router::new()
         .route(
@@ -78,7 +115,9 @@ async fn main() -> anyhow::Result<()> {
                 .layer(middleware::from_fn(authorize)),
         )
         .route("/health", get(health))
-        .layer(cors);
+        .layer(middleware::from_fn(sentry_utils::sentry_request_logger))
+        .layer(cors)
+        .layer(sentry_layer);
 
     let addr = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
 

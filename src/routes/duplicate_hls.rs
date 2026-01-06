@@ -17,6 +17,7 @@ use tokio::process::Command;
 
 use crate::consts::{ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, YRAL_NSFW_VIDEOS, YRAL_VIDEOS};
 use crate::s3_client::S3Client;
+use crate::breadcrumb;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -79,6 +80,9 @@ async fn upload_hls_to_storj(
         (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
     };
     let dest = format!("sj://{bucket}/{video_id}/hls/{hls_file_name}");
+    let key = format!("{video_id}/hls/{hls_file_name}");
+
+    breadcrumb!("storj", "upload_hls", key, true, "starting upload");
 
     let metadata_str = serde_json::to_string(metadata)
         .expect("serialization to go through as we are guaranteed utf-8");
@@ -107,11 +111,13 @@ async fn upload_hls_to_storj(
 
     let status = child.wait().await?;
     if !status.success() {
+        breadcrumb!("storj", "upload_hls", key, false, format!("status: {}", status));
         return Err(Error::Io(std::io::Error::other(format!(
             "uplink command failed with status: {status}"
         ))));
     }
 
+    breadcrumb!("storj", "upload_hls", key, true, "completed");
     Ok(())
 }
 
@@ -124,6 +130,8 @@ async fn upload_hls_to_s3(
 ) -> Result<(), Error> {
     let key = format!("{video_id}/hls/{hls_file_name}");
 
+    breadcrumb!("s3", "upload_hls", key, true, "starting upload");
+
     // Convert metadata to HashMap for S3
     let mut s3_metadata = HashMap::new();
     for (k, v) in metadata.iter() {
@@ -135,9 +143,11 @@ async fn upload_hls_to_s3(
         .await
         .map_err(|e| {
             eprintln!("S3 HLS upload error for {video_id}/{hls_file_name}: {e:?}",);
+            breadcrumb!("s3", "upload_hls", key, false, format!("{e:?}"));
             Error::S3(format!("{e:?}"))
         })?;
 
+    breadcrumb!("s3", "upload_hls", key, true, "completed");
     Ok(())
 }
 

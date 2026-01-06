@@ -12,6 +12,7 @@ use tokio::process::Command;
 
 use crate::consts::{ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, YRAL_NSFW_VIDEOS, YRAL_VIDEOS};
 use crate::s3_client::S3Client;
+use crate::breadcrumb;
 
 // TTL for pending uploads (in hours)
 const PENDING_UPLOAD_TTL_HOURS: u32 = 1;
@@ -267,6 +268,9 @@ async fn upload_to_storj(
         (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
     };
     let dest = format!("sj://{bucket}/{publisher_user_id}/{video_id}.mp4");
+    let key = format!("{publisher_user_id}/{video_id}.mp4");
+
+    breadcrumb!("storj", "upload_video", key, true, "starting upload");
 
     let metadata_str = serde_json::to_string(metadata)
         .expect("serialization to go through as we are guaranteed utf-8");
@@ -297,11 +301,13 @@ async fn upload_to_storj(
     drop(pipe);
     let status = child.wait().await?;
     if !status.success() {
+        breadcrumb!("storj", "upload_video", key, false, format!("status: {}", status));
         return Err(Error::Io(std::io::Error::other(format!(
             "uplink command failed with status: {status}"
         ))));
     }
 
+    breadcrumb!("storj", "upload_video", key, true, "completed");
     Ok(())
 }
 
@@ -314,6 +320,8 @@ async fn upload_to_s3(
 ) -> Result<(), Error> {
     let key = format!("{publisher_user_id}/{video_id}.mp4");
 
+    breadcrumb!("s3", "upload_video", key, true, "starting upload");
+
     // Convert metadata to HashMap for S3
     let mut s3_metadata = HashMap::new();
     for (k, v) in metadata.iter() {
@@ -325,9 +333,11 @@ async fn upload_to_s3(
         .await
         .map_err(|e| {
             eprintln!("S3 upload error for {publisher_user_id}/{video_id}: {e:?}",);
+            breadcrumb!("s3", "upload_video", key, false, format!("{e:?}"));
             Error::S3(format!("{e:?}"))
         })?;
 
+    breadcrumb!("s3", "upload_video", key, true, "completed");
     Ok(())
 }
 
@@ -344,18 +354,32 @@ pub async fn handler(
         "https://customer-2p3jflss4r4hmpnz.cloudflarestream.com/{video_id}/downloads/default.mp4",
     );
 
-    let req = reqwest::get(source).await?;
+    // Download video from Cloudflare
+    breadcrumb!("http", "download", source, true, "starting download");
+    let req = reqwest::get(&source).await?;
     let status = req.status();
 
     if status != StatusCode::OK {
+        breadcrumb!("http", "download", source, false, format!("status: {}", status));
         return Err(Error::Clouflare(status));
     }
 
     // Collect all bytes into memory to extract thumbnail and upload
     let body = req.bytes().await?;
+    breadcrumb!("http", "download", source, true, format!("downloaded {} bytes", body.len()));
 
     // Extract thumbnail from video
-    let thumbnail_data = extract_thumbnail(&body).await?;
+    breadcrumb!("ffmpeg", "extract_thumbnail", video_id, true, "starting extraction");
+    let thumbnail_data = match extract_thumbnail(&body).await {
+        Ok(data) => {
+            breadcrumb!("ffmpeg", "extract_thumbnail", video_id, true, format!("extracted {} bytes", data.len()));
+            data
+        }
+        Err(e) => {
+            breadcrumb!("ffmpeg", "extract_thumbnail", video_id, false, format!("{}", e));
+            return Err(e);
+        }
+    };
 
     if !is_nsfw {
         // For SFW videos, upload to both Storj and S3

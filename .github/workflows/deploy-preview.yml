@@ -67,6 +67,7 @@ jobs:
             HETZNER_S3_SECRET_KEY=${{ secrets.HETZNER_S3_SECRET_KEY }}
             HETZNER_S3_BUCKET=${{ secrets.HETZNER_S3_BUCKET }}
             HETZNER_S3_REGION=${{ secrets.HETZNER_S3_REGION }}
+            ENVIRONMENT=development
       - name: Clean up GitHub environment
         uses: strumwolf/delete-deployment-environment@v2
         if: ${{ github.event.action == 'closed' }}
