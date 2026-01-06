@@ -18,7 +18,11 @@ macro_rules! breadcrumb {
             ty: "default".into(),
             category: Some($category.into()),
             message: Some(format!("{} {}: {}", $category, $operation, $target)),
-            level: if $success { sentry::Level::Info } else { sentry::Level::Error },
+            level: if $success {
+                sentry::Level::Info
+            } else {
+                sentry::Level::Error
+            },
             data: {
                 let mut map = std::collections::BTreeMap::new();
                 map.insert("operation".to_string(), ($operation).to_string().into());
@@ -35,7 +39,11 @@ macro_rules! breadcrumb {
             ty: "default".into(),
             category: Some($category.into()),
             message: Some(format!("{} {}: {}", $category, $operation, $target)),
-            level: if $success { sentry::Level::Info } else { sentry::Level::Error },
+            level: if $success {
+                sentry::Level::Info
+            } else {
+                sentry::Level::Error
+            },
             data: {
                 let mut map = std::collections::BTreeMap::new();
                 map.insert("operation".to_string(), ($operation).to_string().into());
@@ -97,12 +105,21 @@ pub async fn sentry_request_logger(request: Request<Body>, next: Next) -> Respon
     sentry::add_breadcrumb(Breadcrumb {
         ty: "http".into(),
         category: Some("http.response".into()),
-        message: Some(format!("{} {} -> {} ({}ms)", method, path, status.as_u16(), duration.as_millis())),
+        message: Some(format!(
+            "{} {} -> {} ({}ms)",
+            method,
+            path,
+            status.as_u16(),
+            duration.as_millis()
+        )),
         level,
         data: {
             let mut map = BTreeMap::new();
             map.insert("status_code".to_string(), (status.as_u16() as i64).into());
-            map.insert("duration_ms".to_string(), (duration.as_millis() as i64).into());
+            map.insert(
+                "duration_ms".to_string(),
+                (duration.as_millis() as i64).into(),
+            );
             map
         },
         ..Default::default()

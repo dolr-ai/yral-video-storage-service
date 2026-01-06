@@ -6,9 +6,9 @@ use storj_interface::move2nsfw::Args;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+use crate::breadcrumb;
 use crate::consts::{ACCESS_GRANT_NSFW, YRAL_NSFW_VIDEOS};
 use crate::s3_client::S3Client;
-use crate::breadcrumb;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -57,24 +57,54 @@ pub async fn handler(
     println!("Moving video and thumbnail from S3 to Storj NSFW bucket: {s3_video_key}");
 
     // Download video from S3
-    breadcrumb!("s3", "download_video", s3_video_key, true, "starting download");
+    breadcrumb!(
+        "s3",
+        "download_video",
+        s3_video_key,
+        true,
+        "starting download"
+    );
     let video_data = s3_client.download_video(&s3_video_key).await.map_err(|e| {
         eprintln!("S3 video download error for {s3_video_key}: {e}");
         breadcrumb!("s3", "download_video", s3_video_key, false, e.clone());
         Error::S3(e)
     })?;
-    breadcrumb!("s3", "download_video", s3_video_key, true, format!("downloaded {} bytes", video_data.len()));
+    breadcrumb!(
+        "s3",
+        "download_video",
+        s3_video_key,
+        true,
+        format!("downloaded {} bytes", video_data.len())
+    );
 
     // Download thumbnail from S3 (optional - may not exist for older videos)
-    breadcrumb!("s3", "download_thumbnail", s3_thumbnail_key, true, "starting download");
+    breadcrumb!(
+        "s3",
+        "download_thumbnail",
+        s3_thumbnail_key,
+        true,
+        "starting download"
+    );
     let thumbnail_data = match s3_client.download_thumbnail(&s3_thumbnail_key).await {
         Ok(data) => {
-            breadcrumb!("s3", "download_thumbnail", s3_thumbnail_key, true, format!("downloaded {} bytes", data.len()));
+            breadcrumb!(
+                "s3",
+                "download_thumbnail",
+                s3_thumbnail_key,
+                true,
+                format!("downloaded {} bytes", data.len())
+            );
             Some(data)
         }
         Err(e) => {
             eprintln!("S3 thumbnail download failed (may not exist): {s3_thumbnail_key}: {e}");
-            breadcrumb!("s3", "download_thumbnail", s3_thumbnail_key, false, "not found (ok for old videos)");
+            breadcrumb!(
+                "s3",
+                "download_thumbnail",
+                s3_thumbnail_key,
+                false,
+                "not found (ok for old videos)"
+            );
             None
         }
     };
@@ -88,7 +118,13 @@ pub async fn handler(
         request.video_id
     );
 
-    breadcrumb!("storj", "upload_video_nsfw", storj_video_key, true, "starting upload");
+    breadcrumb!(
+        "storj",
+        "upload_video_nsfw",
+        storj_video_key,
+        true,
+        "starting upload"
+    );
 
     let mut child = Command::new("uplink")
         .args([
@@ -113,7 +149,13 @@ pub async fn handler(
     let status = child.wait().await?;
 
     if !status.success() {
-        breadcrumb!("storj", "upload_video_nsfw", storj_video_key, false, format!("status: {}", status));
+        breadcrumb!(
+            "storj",
+            "upload_video_nsfw",
+            storj_video_key,
+            false,
+            format!("status: {}", status)
+        );
         return Ok((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -121,11 +163,20 @@ pub async fn handler(
             })),
         ));
     }
-    breadcrumb!("storj", "upload_video_nsfw", storj_video_key, true, "completed");
+    breadcrumb!(
+        "storj",
+        "upload_video_nsfw",
+        storj_video_key,
+        true,
+        "completed"
+    );
 
     // Upload thumbnail to Storj NSFW bucket (if it exists)
     if let Some(ref thumbnail_data) = thumbnail_data {
-        let storj_thumbnail_key = format!("{}/{}_thumbnail.png", request.publisher_user_id, request.video_id);
+        let storj_thumbnail_key = format!(
+            "{}/{}_thumbnail.png",
+            request.publisher_user_id, request.video_id
+        );
         let thumbnail_dest = format!(
             "sj://{}/{}/{}_thumbnail.png",
             YRAL_NSFW_VIDEOS.as_str(),
@@ -133,7 +184,13 @@ pub async fn handler(
             request.video_id
         );
 
-        breadcrumb!("storj", "upload_thumbnail_nsfw", storj_thumbnail_key, true, "starting upload");
+        breadcrumb!(
+            "storj",
+            "upload_thumbnail_nsfw",
+            storj_thumbnail_key,
+            true,
+            "starting upload"
+        );
 
         let mut child = Command::new("uplink")
             .args([
@@ -159,9 +216,21 @@ pub async fn handler(
 
         if !status.success() {
             eprintln!("Failed to upload thumbnail to Storj NSFW bucket, continuing anyway");
-            breadcrumb!("storj", "upload_thumbnail_nsfw", storj_thumbnail_key, false, "failed but continuing");
+            breadcrumb!(
+                "storj",
+                "upload_thumbnail_nsfw",
+                storj_thumbnail_key,
+                false,
+                "failed but continuing"
+            );
         } else {
-            breadcrumb!("storj", "upload_thumbnail_nsfw", storj_thumbnail_key, true, "completed");
+            breadcrumb!(
+                "storj",
+                "upload_thumbnail_nsfw",
+                storj_thumbnail_key,
+                true,
+                "completed"
+            );
         }
     }
 
@@ -176,12 +245,30 @@ pub async fn handler(
 
     // Delete thumbnail from S3 if it existed
     if thumbnail_data.is_some() {
-        breadcrumb!("s3", "delete_thumbnail", s3_thumbnail_key, true, "starting delete");
+        breadcrumb!(
+            "s3",
+            "delete_thumbnail",
+            s3_thumbnail_key,
+            true,
+            "starting delete"
+        );
         if let Err(e) = s3_client.delete_thumbnail(&s3_thumbnail_key).await {
             eprintln!("S3 thumbnail delete error (non-fatal): {s3_thumbnail_key}: {e:?}");
-            breadcrumb!("s3", "delete_thumbnail", s3_thumbnail_key, false, "failed (non-fatal)");
+            breadcrumb!(
+                "s3",
+                "delete_thumbnail",
+                s3_thumbnail_key,
+                false,
+                "failed (non-fatal)"
+            );
         } else {
-            breadcrumb!("s3", "delete_thumbnail", s3_thumbnail_key, true, "completed");
+            breadcrumb!(
+                "s3",
+                "delete_thumbnail",
+                s3_thumbnail_key,
+                true,
+                "completed"
+            );
         }
     }
 

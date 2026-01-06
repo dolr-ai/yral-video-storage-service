@@ -10,9 +10,9 @@ use storj_interface::duplicate::Args;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+use crate::breadcrumb;
 use crate::consts::{ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, YRAL_NSFW_VIDEOS, YRAL_VIDEOS};
 use crate::s3_client::S3Client;
-use crate::breadcrumb;
 
 // TTL for pending uploads (in hours)
 const PENDING_UPLOAD_TTL_HOURS: u32 = 1;
@@ -301,7 +301,13 @@ async fn upload_to_storj(
     drop(pipe);
     let status = child.wait().await?;
     if !status.success() {
-        breadcrumb!("storj", "upload_video", key, false, format!("status: {}", status));
+        breadcrumb!(
+            "storj",
+            "upload_video",
+            key,
+            false,
+            format!("status: {}", status)
+        );
         return Err(Error::Io(std::io::Error::other(format!(
             "uplink command failed with status: {status}"
         ))));
@@ -360,23 +366,53 @@ pub async fn handler(
     let status = req.status();
 
     if status != StatusCode::OK {
-        breadcrumb!("http", "download", source, false, format!("status: {}", status));
+        breadcrumb!(
+            "http",
+            "download",
+            source,
+            false,
+            format!("status: {}", status)
+        );
         return Err(Error::Clouflare(status));
     }
 
     // Collect all bytes into memory to extract thumbnail and upload
     let body = req.bytes().await?;
-    breadcrumb!("http", "download", source, true, format!("downloaded {} bytes", body.len()));
+    breadcrumb!(
+        "http",
+        "download",
+        source,
+        true,
+        format!("downloaded {} bytes", body.len())
+    );
 
     // Extract thumbnail from video
-    breadcrumb!("ffmpeg", "extract_thumbnail", video_id, true, "starting extraction");
+    breadcrumb!(
+        "ffmpeg",
+        "extract_thumbnail",
+        video_id,
+        true,
+        "starting extraction"
+    );
     let thumbnail_data = match extract_thumbnail(&body).await {
         Ok(data) => {
-            breadcrumb!("ffmpeg", "extract_thumbnail", video_id, true, format!("extracted {} bytes", data.len()));
+            breadcrumb!(
+                "ffmpeg",
+                "extract_thumbnail",
+                video_id,
+                true,
+                format!("extracted {} bytes", data.len())
+            );
             data
         }
         Err(e) => {
-            breadcrumb!("ffmpeg", "extract_thumbnail", video_id, false, format!("{}", e));
+            breadcrumb!(
+                "ffmpeg",
+                "extract_thumbnail",
+                video_id,
+                false,
+                format!("{}", e)
+            );
             return Err(e);
         }
     };

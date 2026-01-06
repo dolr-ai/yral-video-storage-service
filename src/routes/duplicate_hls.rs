@@ -15,9 +15,9 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+use crate::breadcrumb;
 use crate::consts::{ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, YRAL_NSFW_VIDEOS, YRAL_VIDEOS};
 use crate::s3_client::S3Client;
-use crate::breadcrumb;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -111,7 +111,13 @@ async fn upload_hls_to_storj(
 
     let status = child.wait().await?;
     if !status.success() {
-        breadcrumb!("storj", "upload_hls", key, false, format!("status: {}", status));
+        breadcrumb!(
+            "storj",
+            "upload_hls",
+            key,
+            false,
+            format!("status: {}", status)
+        );
         return Err(Error::Io(std::io::Error::other(format!(
             "uplink command failed with status: {status}"
         ))));
