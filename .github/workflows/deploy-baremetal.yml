@@ -1,0 +1,199 @@
+name: Deploy to Bare Metal Servers
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: deploy-baremetal-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOCKER_REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build_binary:
+    uses: ./.github/workflows/build-binary.yml
+    with:
+      publish-artifact: true
+
+  build-and-push:
+    name: Build and Push Docker Image
+    needs: build_binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_tag: ${{ github.sha }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: built-binary
+
+      - name: Place binary in expected path
+        run: |
+          mkdir -p target/x86_64-unknown-linux-musl/release
+          mv storj-interface target/x86_64-unknown-linux-musl/release/storj-interface
+          chmod +x target/x86_64-unknown-linux-musl/release/storj-interface
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=raw,value=latest
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./deploy/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Server
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    environment: Deployment
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          ssh-keyscan -H ${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }} >> ~/.ssh/known_hosts
+
+      - name: Check server connectivity
+        run: |
+          ssh -o ConnectTimeout=10 root@${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }} "echo 'Server connection successful'"
+
+      - name: Sync deployment files to server
+        run: |
+          rsync -avz --delete \
+            ./deploy/ \
+            root@${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }}:/home/storj-interface/
+
+      - name: Log in to GHCR on server
+        run: |
+          ssh root@${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }} "
+            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          "
+
+      - name: Stop old system services
+        run: |
+          ssh root@${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }} "
+            echo 'Stopping old system caddy and storj-interface services...'
+            systemctl stop caddy 2>/dev/null || true
+            systemctl disable caddy 2>/dev/null || true
+            systemctl stop storj-interface 2>/dev/null || true
+            systemctl disable storj-interface 2>/dev/null || true
+            echo 'Old services stopped'
+          "
+
+      - name: Deploy with Docker Compose
+        run: |
+          ssh root@${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }} "
+            cd /home/storj-interface
+
+            echo 'Pulling latest images...'
+            APP_IMAGE=ghcr.io/${{ github.repository }} \
+            IMAGE_TAG=${{ github.sha }} \
+            docker compose pull
+
+            echo 'Stopping existing containers...'
+            docker compose down --remove-orphans || true
+
+            echo 'Starting services...'
+            APP_IMAGE=ghcr.io/${{ github.repository }} \
+            IMAGE_TAG=${{ github.sha }} \
+            STORJ_ACCESS_GRANT_SFW='${{ secrets.STORJ_ACCESS_GRANT }}' \
+            STORJ_ACCESS_GRANT_NSFW='${{ secrets.STORJ_ACCESS_GRANT }}' \
+            SFW_BUCKET='yral-videos' \
+            NSFW_BUCKET='yral-nsfw-videos' \
+            HETZNER_S3_ENDPOINT='${{ secrets.HETZNER_S3_ENDPOINT }}' \
+            HETZNER_S3_BUCKET='${{ secrets.HETZNER_S3_BUCKET }}' \
+            HETZNER_S3_ACCESS_KEY='${{ secrets.HETZNER_S3_ACCESS_KEY }}' \
+            HETZNER_S3_SECRET_KEY='${{ secrets.HETZNER_S3_SECRET_KEY }}' \
+            HETZNER_S3_REGION='${{ secrets.HETZNER_S3_REGION }}' \
+            SERVICE_SECRET_TOKEN='${{ secrets.SERVICE_SECRET_TOKEN }}' \
+            ENVIRONMENT='production' \
+            docker compose up -d
+
+            echo 'Waiting for services to start...'
+            sleep 10
+
+            echo 'Services status:'
+            docker compose ps
+          "
+
+      - name: Verify deployment
+        run: |
+          ssh root@${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }} "
+            cd /home/storj-interface
+            echo '=== Container Status ==='
+            docker compose ps
+            echo ''
+            echo '=== Container Logs (last 20 lines) ==='
+            docker compose logs --tail=20 storj-interface 2>/dev/null || echo 'Logs not yet available'
+          "
+
+      - name: Run health check
+        run: |
+          sleep 5
+          curl --fail --retry 3 --retry-delay 5 https://storj-interface.yral.com/health
+
+  deployment-summary:
+    name: Deployment Summary
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    permissions: {}
+    if: always()
+
+    steps:
+      - name: Deployment summary
+        run: |
+          echo "## Bare Metal Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployment Status: ${{ needs.deploy.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Image" >> $GITHUB_STEP_SUMMARY
+          echo "- ghcr.io/${{ github.repository }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Services" >> $GITHUB_STEP_SUMMARY
+          echo "- storj-interface (HTTP service on port 3000)" >> $GITHUB_STEP_SUMMARY
+          echo "- caddy (TLS termination + reverse proxy)" >> $GITHUB_STEP_SUMMARY

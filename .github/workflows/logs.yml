@@ -26,4 +26,4 @@ jobs:
       - name: Fetch logs from server
         run: |
           echo "=== Last ${{ inputs.lines }} lines of storj-interface logs ==="
-          ssh root@${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }} "journalctl -u storj-interface -n ${{ inputs.lines }} --no-pager"
+          ssh root@${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }} "cd /home/storj-interface && docker compose logs --tail=${{ inputs.lines }} storj-interface"
