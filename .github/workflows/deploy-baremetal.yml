@@ -113,6 +113,17 @@ jobs:
             echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           "
 
+      - name: Stop old system services
+        run: |
+          ssh root@${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }} "
+            echo 'Stopping old system caddy and storj-interface services...'
+            systemctl stop caddy 2>/dev/null || true
+            systemctl disable caddy 2>/dev/null || true
+            systemctl stop storj-interface 2>/dev/null || true
+            systemctl disable storj-interface 2>/dev/null || true
+            echo 'Old services stopped'
+          "
+
       - name: Deploy with Docker Compose
         run: |
           ssh root@${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }} "
