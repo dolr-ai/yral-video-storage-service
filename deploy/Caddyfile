@@ -1,0 +1,51 @@
+{
+    # Global options
+    email joel@gobazzinga.io
+
+    servers {
+        protocols h1 h2 h2c
+    }
+}
+
+storj-interface.yral.com {
+    reverse_proxy storj-interface:3000 {
+        # Health checking
+        health_uri /health
+        health_interval 30s
+        health_timeout 10s
+
+        transport http {
+            read_timeout 120s
+            write_timeout 120s
+            dial_timeout 10s
+        }
+
+        # Headers
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # Logging
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+}
+
+# Health check endpoint on HTTP (for load balancer health checks)
+:80 {
+    respond /health "OK" 200
+    respond "Service available at https://storj-interface.yral.com" 200
+}
