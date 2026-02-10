@@ -80,6 +80,9 @@ jobs:
     name: Deploy to Server
     needs: [build-and-push]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
 
     steps:
       - name: Checkout repository
@@ -166,6 +169,7 @@ jobs:
     name: Deployment Summary
     needs: [deploy]
     runs-on: ubuntu-latest
+    permissions: {}
     if: always()
 
     steps:
