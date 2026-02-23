@@ -198,7 +198,7 @@ async fn upload_thumbnail_to_s3(
         .upload_thumbnail(&key, thumbnail_data)
         .await
         .map_err(|e| {
-            eprintln!("S3 thumbnail upload error for {publisher_user_id}/{video_id}: {e:?}");
+            tracing::warn!("S3 thumbnail upload error for {publisher_user_id}/{video_id}: {e:?}");
             Error::S3(format!("{e:?}"))
         })?;
 
@@ -225,7 +225,7 @@ pub enum Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
-        println!("err: {self}");
+        tracing::error!("request error: {self}");
         let (status, message) = match self {
             Error::Network(_) | Error::Io(_) | Error::Hyper(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -338,7 +338,7 @@ async fn upload_to_s3(
         .upload_video_stream(&key, stream, &s3_metadata)
         .await
         .map_err(|e| {
-            eprintln!("S3 upload error for {publisher_user_id}/{video_id}: {e:?}",);
+            tracing::warn!("S3 upload error for {publisher_user_id}/{video_id}: {e:?}");
             breadcrumb!("s3", "upload_video", key, false, format!("{e:?}"));
             Error::S3(format!("{e:?}"))
         })?;
@@ -347,6 +347,7 @@ async fn upload_to_s3(
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn handler(
     State(s3_client): State<S3Client>,
     Json(Args {
@@ -491,6 +492,7 @@ pub struct RawFinalizeBody {
     metadata: BTreeMap<String, String>,
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn handler_raw_upload_initial(
     State(s3_client): State<S3Client>,
     axum::extract::Query(params): axum::extract::Query<RawUploadInitialParams>,
@@ -580,6 +582,7 @@ pub async fn handler_raw_upload_initial(
     })))
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn handler_raw_finalize(
     State(s3_client): State<S3Client>,
     axum::extract::Query(params): axum::extract::Query<RawFinalizeParams>,
@@ -641,9 +644,11 @@ pub async fn handler_raw_finalize(
 
         let stderr = String::from_utf8_lossy(&output.stderr);
         last_error = stderr.to_string();
-        eprintln!(
+        tracing::warn!(
             "Uplink video download attempt {}/{} failed: {}",
-            attempt, max_retries, stderr
+            attempt,
+            max_retries,
+            stderr
         );
 
         if attempt < max_retries {
@@ -688,9 +693,11 @@ pub async fn handler_raw_finalize(
 
         let stderr = String::from_utf8_lossy(&output.stderr);
         last_error = stderr.to_string();
-        eprintln!(
+        tracing::warn!(
             "Uplink thumbnail download attempt {}/{} failed: {}",
-            attempt, max_retries, stderr
+            attempt,
+            max_retries,
+            stderr
         );
 
         if attempt < max_retries {

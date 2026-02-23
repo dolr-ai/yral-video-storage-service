@@ -21,7 +21,7 @@ pub enum Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
-        println!("err: {self}");
+        tracing::error!("request error: {self}");
         let (status, message) = match self {
             Error::Io(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -43,6 +43,7 @@ impl IntoResponse for Error {
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn handler(
     State(s3_client): State<S3Client>,
     Json(request): Json<Args>,
@@ -54,7 +55,7 @@ pub async fn handler(
         request.publisher_user_id, request.video_id
     );
 
-    println!("Moving video and thumbnail from S3 to Storj NSFW bucket: {s3_video_key}");
+    tracing::info!("Moving video and thumbnail from S3 to Storj NSFW bucket: {s3_video_key}");
 
     // Download video from S3
     breadcrumb!(
@@ -65,7 +66,7 @@ pub async fn handler(
         "starting download"
     );
     let video_data = s3_client.download_video(&s3_video_key).await.map_err(|e| {
-        eprintln!("S3 video download error for {s3_video_key}: {e}");
+        tracing::warn!("S3 video download error for {s3_video_key}: {e}");
         breadcrumb!("s3", "download_video", s3_video_key, false, e.clone());
         Error::S3(e)
     })?;
@@ -97,7 +98,7 @@ pub async fn handler(
             Some(data)
         }
         Err(e) => {
-            eprintln!("S3 thumbnail download failed (may not exist): {s3_thumbnail_key}: {e}");
+            tracing::warn!("S3 thumbnail download failed (may not exist): {s3_thumbnail_key}: {e}");
             breadcrumb!(
                 "s3",
                 "download_thumbnail",
@@ -215,7 +216,7 @@ pub async fn handler(
         let status = child.wait().await?;
 
         if !status.success() {
-            eprintln!("Failed to upload thumbnail to Storj NSFW bucket, continuing anyway");
+            tracing::warn!("Failed to upload thumbnail to Storj NSFW bucket, continuing anyway");
             breadcrumb!(
                 "storj",
                 "upload_thumbnail_nsfw",
@@ -237,7 +238,7 @@ pub async fn handler(
     // Delete video from S3 after successful move
     breadcrumb!("s3", "delete_video", s3_video_key, true, "starting delete");
     s3_client.delete_video(&s3_video_key).await.map_err(|e| {
-        eprintln!("S3 video delete error for {s3_video_key}: {e:?}");
+        tracing::warn!("S3 video delete error for {s3_video_key}: {e:?}");
         breadcrumb!("s3", "delete_video", s3_video_key, false, format!("{e:?}"));
         Error::S3(format!("{e:?}"))
     })?;
@@ -253,7 +254,7 @@ pub async fn handler(
             "starting delete"
         );
         if let Err(e) = s3_client.delete_thumbnail(&s3_thumbnail_key).await {
-            eprintln!("S3 thumbnail delete error (non-fatal): {s3_thumbnail_key}: {e:?}");
+            tracing::warn!("S3 thumbnail delete error (non-fatal): {s3_thumbnail_key}: {e:?}");
             breadcrumb!(
                 "s3",
                 "delete_thumbnail",

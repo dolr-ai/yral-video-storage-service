@@ -19,6 +19,8 @@ use std::sync::Arc;
 use tokio::{signal, sync::Notify};
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 pub(crate) mod consts;
 mod routes;
@@ -43,13 +45,34 @@ fn main() {
         },
     ));
 
+    // Configure sentry-tracing: ERROR -> Sentry Event, WARN -> Breadcrumb, rest -> Ignore
+    let sentry_layer = sentry_tracing::layer().event_filter(|metadata| match *metadata.level() {
+        tracing::Level::ERROR => sentry_tracing::EventFilter::Event,
+        tracing::Level::WARN => sentry_tracing::EventFilter::Breadcrumb,
+        _ => sentry_tracing::EventFilter::Ignore,
+    });
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                format!(
+                    "{}=info,tower_http=warn,axum::rejection=warn,hyper=warn,reqwest=warn",
+                    env!("CARGO_CRATE_NAME")
+                )
+                .into()
+            }),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .with(sentry_layer)
+        .init();
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
             if let Err(err) = run_server().await {
-                eprintln!("Server error: {err:#}");
+                tracing::error!("Server error: {err:#}");
                 sentry::capture_error(&*err);
             }
         });
@@ -128,17 +151,17 @@ async fn run_server() -> anyhow::Result<()> {
 
     tokio::spawn(async move {
         if let Err(err) = signal::ctrl_c().await {
-            eprintln!("Failed to listen for shutdown signal: {err:#}");
+            tracing::error!("Failed to listen for shutdown signal: {err:#}");
         }
         notify_clone.notify_one();
     });
 
-    println!("Starting to listen on http://localhost:3000");
+    tracing::info!("Starting to listen on http://localhost:3000");
 
     server
         .with_graceful_shutdown(async move {
             notify.notified().await;
-            println!("Shutting down gracefully...");
+            tracing::info!("Shutting down gracefully...");
         })
         .await
         .context("Server error")
