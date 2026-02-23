@@ -3,7 +3,6 @@ use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, Config};
 use bytes::Bytes;
-use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -139,21 +138,16 @@ impl S3Client {
         }
     }
 
-    pub async fn upload_video_stream(
+    pub async fn upload_video(
         &self,
         key: &str,
-        stream: impl futures_util::Stream<Item = Result<Bytes, reqwest::Error>>,
+        video_data: &[u8],
         metadata: &HashMap<String, String>,
     ) -> Result<(), aws_sdk_s3::Error> {
-        let chunks: Vec<Bytes> = stream
-            .filter_map(|chunk| async move { chunk.ok() })
-            .collect()
-            .await;
-
-        let body_bytes = chunks.concat();
+        let body_bytes = video_data.to_vec();
         let metadata = metadata.clone();
 
-        retry_s3_op("upload_video_stream", key, || {
+        retry_s3_op("upload_video", key, || {
             let body = ByteStream::from(body_bytes.clone());
             let mut request = self
                 .client

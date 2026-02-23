@@ -1,7 +1,6 @@
-use axum::extract::{FromRequest, Multipart};
-use axum::{body::Body, extract::State, response::IntoResponse, Json};
-use futures_util::StreamExt;
-use http_body_util::BodyExt;
+use axum::extract::{Multipart, State};
+use axum::response::IntoResponse;
+use axum::Json;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::json;
@@ -257,7 +256,7 @@ async fn upload_to_storj(
     publisher_user_id: &str,
     video_id: &str,
     metadata: &BTreeMap<String, String>,
-    mut stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+    video_data: &[u8],
     is_nsfw: bool,
 ) -> Result<(), Error> {
     let (bucket, grant) = if is_nsfw {
@@ -290,13 +289,9 @@ async fn upload_to_storj(
         .spawn()?;
 
     let mut pipe = child.stdin.take().expect("Stdin pipe to be opened for us");
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        pipe.write_all(&chunk).await?;
-    }
-
+    pipe.write_all(video_data).await?;
     drop(pipe);
+
     let status = child.wait().await?;
     if !status.success() {
         breadcrumb!(
@@ -320,20 +315,19 @@ async fn upload_to_s3(
     publisher_user_id: &str,
     video_id: &str,
     metadata: &BTreeMap<String, String>,
-    stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>>,
+    video_data: &[u8],
 ) -> Result<(), Error> {
     let key = format!("{publisher_user_id}/{video_id}.mp4");
 
     breadcrumb!("s3", "upload_video", key, true, "starting upload");
 
-    // Convert metadata to HashMap for S3
     let mut s3_metadata = HashMap::new();
     for (k, v) in metadata.iter() {
         s3_metadata.insert(k.clone(), v.clone());
     }
 
     s3_client
-        .upload_video_stream(&key, stream, &s3_metadata)
+        .upload_video(&key, video_data, &s3_metadata)
         .await
         .map_err(|e| {
             tracing::warn!("S3 upload error for {publisher_user_id}/{video_id}: {e:?}");
@@ -417,30 +411,14 @@ pub async fn handler(
     };
 
     if !is_nsfw {
-        // For SFW videos, upload to both Storj and S3
-        let body_clone = body.clone();
         let thumbnail_clone = thumbnail_data.clone();
 
-        // Create streams from the collected bytes
-        let storj_stream = futures_util::stream::once(async move { Ok(body) });
-        let s3_stream = futures_util::stream::once(async move { Ok(body_clone) });
-
-        let storj_video_upload = upload_to_storj(
-            &publisher_user_id,
-            &video_id,
-            &metadata,
-            Box::pin(storj_stream),
-            is_nsfw,
-        );
+        let storj_video_upload =
+            upload_to_storj(&publisher_user_id, &video_id, &metadata, &body, is_nsfw);
         let storj_thumbnail_upload =
             upload_thumbnail_to_storj(&publisher_user_id, &video_id, &thumbnail_data, is_nsfw);
-        let s3_video_upload = upload_to_s3(
-            &s3_client,
-            &publisher_user_id,
-            &video_id,
-            &metadata,
-            s3_stream,
-        );
+        let s3_video_upload =
+            upload_to_s3(&s3_client, &publisher_user_id, &video_id, &metadata, &body);
         let s3_thumbnail_upload =
             upload_thumbnail_to_s3(&s3_client, &publisher_user_id, &video_id, thumbnail_clone);
 
@@ -451,16 +429,8 @@ pub async fn handler(
             s3_thumbnail_upload
         )?;
     } else {
-        // For NSFW videos, only upload to Storj
-        let storj_stream = futures_util::stream::once(async move { Ok::<_, reqwest::Error>(body) });
-
-        let storj_video_upload = upload_to_storj(
-            &publisher_user_id,
-            &video_id,
-            &metadata,
-            Box::pin(storj_stream),
-            is_nsfw,
-        );
+        let storj_video_upload =
+            upload_to_storj(&publisher_user_id, &video_id, &metadata, &body, is_nsfw);
         let storj_thumbnail_upload =
             upload_thumbnail_to_storj(&publisher_user_id, &video_id, &thumbnail_data, is_nsfw);
 
@@ -494,44 +464,27 @@ pub struct RawFinalizeBody {
 pub async fn handler_raw_upload_initial(
     State(s3_client): State<S3Client>,
     axum::extract::Query(params): axum::extract::Query<RawUploadInitialParams>,
-    request: axum::extract::Request,
+    mut multipart: Multipart,
 ) -> Result<impl IntoResponse, Error> {
-    // Collect body data — supports both multipart/form-data and raw byte stream
-    let is_multipart = request
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.contains("multipart/form-data"));
-
-    let body_data =
-        if is_multipart {
-            let mut multipart = Multipart::from_request(request, &()).await.map_err(|e| {
-                Error::Io(std::io::Error::other(format!("multipart parse error: {e}")))
-            })?;
-
-            let mut file_data = None;
-            while let Some(field) = multipart.next_field().await.map_err(|e| {
-                Error::Io(std::io::Error::other(format!("multipart field error: {e}")))
-            })? {
-                if field.name() == Some("file") {
-                    file_data = Some(field.bytes().await.map_err(|e| {
-                        Error::Io(std::io::Error::other(format!("multipart read error: {e}")))
-                    })?);
-                    break;
-                }
-            }
-            file_data.ok_or_else(|| {
-                Error::Io(std::io::Error::other(
-                    "missing 'file' field in multipart upload",
-                ))
-            })?
-        } else {
-            Body::new(request.into_body())
-                .collect()
-                .await
-                .map_err(Error::Hyper)?
-                .to_bytes()
-        };
+    // Extract the "file" field from the multipart upload
+    let mut file_data = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| Error::Io(std::io::Error::other(format!("multipart field error: {e}"))))?
+    {
+        if field.name() == Some("file") {
+            file_data = Some(field.bytes().await.map_err(|e| {
+                Error::Io(std::io::Error::other(format!("multipart read error: {e}")))
+            })?);
+            break;
+        }
+    }
+    let body_data = file_data.ok_or_else(|| {
+        Error::Io(std::io::Error::other(
+            "missing 'file' field in multipart upload",
+        ))
+    })?;
 
     // Extract thumbnail from video
     let thumbnail_data = extract_thumbnail(&body_data).await?;
@@ -543,8 +496,6 @@ pub async fn handler_raw_upload_initial(
     let expires = format!("+{}h", PENDING_UPLOAD_TTL_HOURS);
 
     if !params.is_nsfw {
-        // For SFW videos, upload to both Storj (with TTL) and S3 (without TTL)
-        let body_clone = body_data.clone();
         let thumbnail_clone = thumbnail_data.clone();
 
         let storj_video_upload = upload_to_storj_with_ttl(
@@ -555,7 +506,6 @@ pub async fn handler_raw_upload_initial(
             &expires,
             params.is_nsfw,
         );
-
         let storj_thumbnail_upload = upload_thumbnail_to_storj_with_ttl(
             &params.publisher_user_id,
             &params.video_id,
@@ -563,16 +513,13 @@ pub async fn handler_raw_upload_initial(
             &expires,
             params.is_nsfw,
         );
-
-        let s3_stream = futures_util::stream::once(async move { Ok(body_clone) });
         let s3_video_upload = upload_to_s3(
             &s3_client,
             &params.publisher_user_id,
             &params.video_id,
             &pending_metadata,
-            s3_stream,
+            &body_data,
         );
-
         let s3_thumbnail_upload = upload_thumbnail_to_s3(
             &s3_client,
             &params.publisher_user_id,
@@ -595,7 +542,6 @@ pub async fn handler_raw_upload_initial(
             &expires,
             params.is_nsfw,
         );
-
         let storj_thumbnail_upload = upload_thumbnail_to_storj_with_ttl(
             &params.publisher_user_id,
             &params.video_id,
@@ -754,40 +700,28 @@ pub async fn handler_raw_finalize(
 
     // Re-upload with final metadata (no TTL)
     if !params.is_nsfw {
-        // For SFW videos, upload to both Storj and S3
-        let file_data_clone = file_data.clone();
         let thumbnail_clone = thumbnail_data.clone();
-
-        let storj_stream =
-            futures_util::stream::once(async move { Ok::<_, reqwest::Error>(file_data.into()) });
-        let s3_stream =
-            futures_util::stream::once(
-                async move { Ok::<_, reqwest::Error>(file_data_clone.into()) },
-            );
 
         let storj_video_upload = upload_to_storj(
             &params.publisher_user_id,
             &params.video_id,
             &metadata,
-            Box::pin(storj_stream),
+            &file_data,
             params.is_nsfw,
         );
-
         let storj_thumbnail_upload = upload_thumbnail_to_storj(
             &params.publisher_user_id,
             &params.video_id,
             &thumbnail_data,
             params.is_nsfw,
         );
-
         let s3_video_upload = upload_to_s3(
             &s3_client,
             &params.publisher_user_id,
             &params.video_id,
             &metadata,
-            s3_stream,
+            &file_data,
         );
-
         let s3_thumbnail_upload = upload_thumbnail_to_s3(
             &s3_client,
             &params.publisher_user_id,
@@ -802,18 +736,13 @@ pub async fn handler_raw_finalize(
             s3_thumbnail_upload
         )?;
     } else {
-        // For NSFW videos, only upload to Storj
-        let storj_stream =
-            futures_util::stream::once(async move { Ok::<_, reqwest::Error>(file_data.into()) });
-
         let storj_video_upload = upload_to_storj(
             &params.publisher_user_id,
             &params.video_id,
             &metadata,
-            Box::pin(storj_stream),
+            &file_data,
             params.is_nsfw,
         );
-
         let storj_thumbnail_upload = upload_thumbnail_to_storj(
             &params.publisher_user_id,
             &params.video_id,
