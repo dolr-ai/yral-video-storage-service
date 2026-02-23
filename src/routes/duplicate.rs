@@ -20,29 +20,35 @@ const PENDING_UPLOAD_TTL_HOURS: u32 = 1;
 /// Extract a thumbnail from video data using ffmpeg
 /// Uses a temp file so ffmpeg can seek (pipe input fails for videos with moov atom at end)
 async fn extract_thumbnail(video_data: &[u8]) -> Result<Vec<u8>, Error> {
-    let temp_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temp_input = format!("/tmp/thumb-in-{temp_id}.mp4");
-    let temp_output = format!("/tmp/thumb-out-{temp_id}.png");
+    use std::io::Write;
 
-    // Write video data to temp file so ffmpeg can seek
-    tokio::fs::write(&temp_input, video_data).await?;
+    // Create temp files — NamedTempFile auto-cleans on drop
+    let mut temp_input = tempfile::Builder::new()
+        .suffix(".mp4")
+        .tempfile()
+        .map_err(Error::Io)?;
+    temp_input.write_all(video_data).map_err(Error::Io)?;
+    let input_path = temp_input.path().to_owned();
+
+    let temp_output = tempfile::Builder::new()
+        .suffix(".png")
+        .tempfile()
+        .map_err(Error::Io)?;
+    let output_path = temp_output.path().to_owned();
 
     // Try extracting at 1 second first
     let output = Command::new("ffmpeg")
         .args([
             "-y",
             "-i",
-            &temp_input,
+            input_path.to_str().unwrap(),
             "-ss",
             "00:00:01",
             "-vframes",
             "1",
             "-f",
             "image2",
-            &temp_output,
+            output_path.to_str().unwrap(),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -51,7 +57,7 @@ async fn extract_thumbnail(video_data: &[u8]) -> Result<Vec<u8>, Error> {
         .await?;
 
     // If that failed, try frame 0 for very short videos
-    if !output.status.success() || !tokio::fs::try_exists(&temp_output).await.unwrap_or(false) {
+    if !output.status.success() || !tokio::fs::try_exists(&output_path).await.unwrap_or(false) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::warn!("ffmpeg thumbnail at 1s failed, retrying at frame 0: {stderr}");
 
@@ -59,12 +65,12 @@ async fn extract_thumbnail(video_data: &[u8]) -> Result<Vec<u8>, Error> {
             .args([
                 "-y",
                 "-i",
-                &temp_input,
+                input_path.to_str().unwrap(),
                 "-vframes",
                 "1",
                 "-f",
                 "image2",
-                &temp_output,
+                output_path.to_str().unwrap(),
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -72,22 +78,16 @@ async fn extract_thumbnail(video_data: &[u8]) -> Result<Vec<u8>, Error> {
             .wait_with_output()
             .await?;
 
-        if !output.status.success() || !tokio::fs::try_exists(&temp_output).await.unwrap_or(false) {
+        if !output.status.success() || !tokio::fs::try_exists(&output_path).await.unwrap_or(false) {
             let stderr = String::from_utf8_lossy(&output.stderr);
             tracing::error!("ffmpeg thumbnail extraction failed: {stderr}");
-            tokio::fs::remove_file(&temp_input).await.ok();
-            tokio::fs::remove_file(&temp_output).await.ok();
             return Err(Error::Io(std::io::Error::other(
                 "Failed to extract thumbnail from video",
             )));
         }
     }
 
-    let thumbnail = tokio::fs::read(&temp_output).await?;
-
-    // Clean up temp files
-    tokio::fs::remove_file(&temp_input).await.ok();
-    tokio::fs::remove_file(&temp_output).await.ok();
+    let thumbnail = tokio::fs::read(&output_path).await?;
 
     Ok(thumbnail)
 }
