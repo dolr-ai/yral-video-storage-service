@@ -1,5 +1,4 @@
 use axum::{body::Body, extract::State, response::IntoResponse, Json};
-use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -93,6 +92,78 @@ async fn extract_thumbnail(video_data: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 /// Upload a thumbnail to Storj
+const UPLINK_MAX_RETRIES: u32 = 3;
+const UPLINK_BASE_DELAY_MS: u64 = 500;
+
+/// Run an uplink command with exponential backoff retries.
+/// `build_command` is called on each attempt to create a fresh Command.
+/// For stdin-based uploads, `stdin_data` provides the bytes to pipe in.
+async fn retry_uplink_op<F>(
+    operation_name: &str,
+    key: &str,
+    stdin_data: Option<&[u8]>,
+    build_command: F,
+) -> Result<(), Error>
+where
+    F: Fn() -> Command,
+{
+    let mut last_err = String::new();
+    for attempt in 0..=UPLINK_MAX_RETRIES {
+        let mut child = build_command()
+            .stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        if let Some(data) = stdin_data {
+            let mut pipe = child.stdin.take().expect("Stdin pipe to be opened");
+            pipe.write_all(data).await?;
+            pipe.flush().await?;
+            drop(pipe);
+        }
+
+        let output = child.wait_with_output().await?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if attempt == UPLINK_MAX_RETRIES {
+            tracing::error!(
+                operation = operation_name,
+                key = key,
+                attempts = attempt + 1,
+                error = %stderr,
+                "Uplink operation failed after all retries"
+            );
+            last_err = stderr.to_string();
+            break;
+        }
+
+        let delay_ms = UPLINK_BASE_DELAY_MS * 2u64.pow(attempt);
+        let jitter = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+            % 250) as u64;
+        let total_delay = std::time::Duration::from_millis(delay_ms + jitter);
+        tracing::warn!(
+            operation = operation_name,
+            key = key,
+            attempt = attempt + 1,
+            max_retries = UPLINK_MAX_RETRIES,
+            delay_ms = total_delay.as_millis() as u64,
+            error = %stderr,
+            "Uplink operation failed, retrying"
+        );
+        tokio::time::sleep(total_delay).await;
+    }
+    Err(Error::Io(std::io::Error::other(format!(
+        "uplink {operation_name} failed after {} retries: {last_err}",
+        UPLINK_MAX_RETRIES + 1
+    ))))
+}
+
 async fn upload_thumbnail_to_storj(
     publisher_user_id: &str,
     video_id: &str,
@@ -105,36 +176,24 @@ async fn upload_thumbnail_to_storj(
         (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
     };
     let dest = format!("sj://{bucket}/{publisher_user_id}/{video_id}_thumbnail.png");
+    let grant = grant.to_string();
+    let key = format!("{publisher_user_id}/{video_id}_thumbnail.png");
 
-    let mut child = Command::new("uplink")
-        .args([
+    retry_uplink_op("upload_thumbnail", &key, Some(thumbnail_data), || {
+        let mut cmd = Command::new("uplink");
+        cmd.args([
             "cp",
             "--interactive=false",
             "--analytics=false",
             "--progress=false",
             "--access",
-            grant,
+            &grant,
             "-",
-            dest.as_str(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-
-    let mut pipe = child.stdin.take().expect("Stdin pipe to be opened for us");
-    pipe.write_all(thumbnail_data).await?;
-    pipe.flush().await?;
-    drop(pipe);
-
-    let status = child.wait().await?;
-    if !status.success() {
-        return Err(Error::Io(std::io::Error::other(format!(
-            "uplink command failed with status: {status}"
-        ))));
-    }
-
-    Ok(())
+            &dest,
+        ]);
+        cmd
+    })
+    .await
 }
 
 /// Upload a thumbnail to Storj with TTL
@@ -151,38 +210,27 @@ async fn upload_thumbnail_to_storj_with_ttl(
         (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
     };
     let dest = format!("sj://{bucket}/{publisher_user_id}/{video_id}_thumbnail.png");
+    let grant = grant.to_string();
+    let expires = expires.to_string();
+    let key = format!("{publisher_user_id}/{video_id}_thumbnail.png");
 
-    let mut child = Command::new("uplink")
-        .args([
+    retry_uplink_op("upload_thumbnail_ttl", &key, Some(thumbnail_data), || {
+        let mut cmd = Command::new("uplink");
+        cmd.args([
             "cp",
             "--interactive=false",
             "--analytics=false",
             "--progress=false",
             "--expires",
-            expires,
+            &expires,
             "--access",
-            grant,
+            &grant,
             "-",
-            dest.as_str(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-
-    let mut pipe = child.stdin.take().expect("Stdin pipe to be opened for us");
-    pipe.write_all(thumbnail_data).await?;
-    pipe.flush().await?;
-    drop(pipe);
-
-    let status = child.wait().await?;
-    if !status.success() {
-        return Err(Error::Io(std::io::Error::other(format!(
-            "uplink command failed with status: {status}"
-        ))));
-    }
-
-    Ok(())
+            &dest,
+        ]);
+        cmd
+    })
+    .await
 }
 
 /// Upload a thumbnail to S3
@@ -259,7 +307,7 @@ async fn upload_to_storj(
     publisher_user_id: &str,
     video_id: &str,
     metadata: &BTreeMap<String, String>,
-    mut stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+    video_data: &[u8],
     is_nsfw: bool,
 ) -> Result<(), Error> {
     let (bucket, grant) = if is_nsfw {
@@ -269,52 +317,36 @@ async fn upload_to_storj(
     };
     let dest = format!("sj://{bucket}/{publisher_user_id}/{video_id}.mp4");
     let key = format!("{publisher_user_id}/{video_id}.mp4");
+    let grant = grant.to_string();
 
     breadcrumb!("storj", "upload_video", key, true, "starting upload");
 
     let metadata_str = serde_json::to_string(metadata)
         .expect("serialization to go through as we are guaranteed utf-8");
 
-    let mut child = Command::new("uplink")
-        .args([
+    let result = retry_uplink_op("upload_video", &key, Some(video_data), || {
+        let mut cmd = Command::new("uplink");
+        cmd.args([
             "cp",
             "--interactive=false",
             "--analytics=false",
             "--progress=false",
-            format!("--metadata={metadata_str}").as_str(),
+            &format!("--metadata={metadata_str}"),
             "--access",
-            grant,
+            &grant,
             "-",
-            dest.as_str(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()?;
+            &dest,
+        ]);
+        cmd
+    })
+    .await;
 
-    let mut pipe = child.stdin.take().expect("Stdin pipe to be opened for us");
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        pipe.write_all(&chunk).await?;
+    if result.is_err() {
+        breadcrumb!("storj", "upload_video", key, false, "failed after retries");
+    } else {
+        breadcrumb!("storj", "upload_video", key, true, "completed");
     }
-
-    drop(pipe);
-    let status = child.wait().await?;
-    if !status.success() {
-        breadcrumb!(
-            "storj",
-            "upload_video",
-            key,
-            false,
-            format!("status: {}", status)
-        );
-        return Err(Error::Io(std::io::Error::other(format!(
-            "uplink command failed with status: {status}"
-        ))));
-    }
-
-    breadcrumb!("storj", "upload_video", key, true, "completed");
-    Ok(())
+    result
 }
 
 async fn upload_to_s3(
@@ -387,55 +419,22 @@ pub async fn handler(
         format!("downloaded {} bytes", body.len())
     );
 
-    // Extract thumbnail from video
-    breadcrumb!(
-        "ffmpeg",
-        "extract_thumbnail",
-        video_id,
-        true,
-        "starting extraction"
-    );
-    let thumbnail_data = match extract_thumbnail(&body).await {
-        Ok(data) => {
-            breadcrumb!(
-                "ffmpeg",
-                "extract_thumbnail",
-                video_id,
-                true,
-                format!("extracted {} bytes", data.len())
-            );
-            data
-        }
-        Err(e) => {
-            breadcrumb!(
-                "ffmpeg",
-                "extract_thumbnail",
-                video_id,
-                false,
-                format!("{}", e)
-            );
-            return Err(e);
-        }
-    };
+    // Keep a copy for background thumbnail extraction
+    let body_for_thumb = body.clone();
 
+    // Critical path: upload videos to storage backends
     if !is_nsfw {
         // For SFW videos, upload to both Storj and S3
-        let body_clone = body.clone();
-        let thumbnail_clone = thumbnail_data.clone();
-
-        // Create streams from the collected bytes
-        let storj_stream = futures_util::stream::once(async move { Ok(body) });
-        let s3_stream = futures_util::stream::once(async move { Ok(body_clone) });
+        let body_for_s3 = body.clone();
+        let s3_stream = futures_util::stream::once(async move { Ok(body_for_s3) });
 
         let storj_video_upload = upload_to_storj(
             &publisher_user_id,
             &video_id,
             &metadata,
-            Box::pin(storj_stream),
+            &body,
             is_nsfw,
         );
-        let storj_thumbnail_upload =
-            upload_thumbnail_to_storj(&publisher_user_id, &video_id, &thumbnail_data, is_nsfw);
         let s3_video_upload = upload_to_s3(
             &s3_client,
             &publisher_user_id,
@@ -443,31 +442,48 @@ pub async fn handler(
             &metadata,
             s3_stream,
         );
-        let s3_thumbnail_upload =
-            upload_thumbnail_to_s3(&s3_client, &publisher_user_id, &video_id, thumbnail_clone);
 
-        tokio::try_join!(
-            storj_video_upload,
-            storj_thumbnail_upload,
-            s3_video_upload,
-            s3_thumbnail_upload
-        )?;
+        tokio::try_join!(storj_video_upload, s3_video_upload)?;
     } else {
         // For NSFW videos, only upload to Storj
-        let storj_stream = futures_util::stream::once(async move { Ok::<_, reqwest::Error>(body) });
-
-        let storj_video_upload = upload_to_storj(
+        upload_to_storj(
             &publisher_user_id,
             &video_id,
             &metadata,
-            Box::pin(storj_stream),
+            &body,
             is_nsfw,
-        );
-        let storj_thumbnail_upload =
-            upload_thumbnail_to_storj(&publisher_user_id, &video_id, &thumbnail_data, is_nsfw);
-
-        tokio::try_join!(storj_video_upload, storj_thumbnail_upload)?;
+        )
+        .await?;
     }
+
+    // Background: extract thumbnail and upload it (don't block the response)
+    let publisher = publisher_user_id.clone();
+    let vid = video_id.clone();
+
+    tokio::spawn(async move {
+        let thumbnail_data = match extract_thumbnail(&body_for_thumb).await {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::error!(
+                    "Background thumbnail extraction failed for {publisher}/{vid}: {e}"
+                );
+                return;
+            }
+        };
+
+        if !is_nsfw {
+            let storj_thumb = upload_thumbnail_to_storj(&publisher, &vid, &thumbnail_data, is_nsfw);
+            let s3_thumb =
+                upload_thumbnail_to_s3(&s3_client, &publisher, &vid, thumbnail_data.clone());
+            if let Err(e) = tokio::try_join!(storj_thumb, s3_thumb) {
+                tracing::error!("Background thumbnail upload failed for {publisher}/{vid}: {e}");
+            }
+        } else if let Err(e) =
+            upload_thumbnail_to_storj(&publisher, &vid, &thumbnail_data, is_nsfw).await
+        {
+            tracing::error!("Background thumbnail upload failed for {publisher}/{vid}: {e}");
+        }
+    });
 
     Ok(())
 }
@@ -501,79 +517,85 @@ pub async fn handler_raw_upload_initial(
     // Collect the body data
     let body_data = body.collect().await.map_err(Error::Hyper)?.to_bytes();
 
-    // Extract thumbnail from video
-    let thumbnail_data = extract_thumbnail(&body_data).await?;
-
     let mut pending_metadata = BTreeMap::new();
     pending_metadata.insert("_pending".to_string(), "true".to_string());
     pending_metadata.insert("_uploaded_at".to_string(), chrono::Utc::now().to_rfc3339());
 
     let expires = format!("+{}h", PENDING_UPLOAD_TTL_HOURS);
 
-    if !params.is_nsfw {
-        // For SFW videos, upload to both Storj (with TTL) and S3 (without TTL)
-        let body_clone = body_data.clone();
-        let thumbnail_clone = thumbnail_data.clone();
+    // Critical path: only Storj video upload must complete before responding
+    // (finalize downloads from Storj, so the video must be there)
+    upload_to_storj_with_ttl(
+        &params.publisher_user_id,
+        &params.video_id,
+        &pending_metadata,
+        &body_data,
+        &expires,
+        params.is_nsfw,
+    )
+    .await?;
 
-        let storj_video_upload = upload_to_storj_with_ttl(
-            &params.publisher_user_id,
-            &params.video_id,
-            &pending_metadata,
-            &body_data,
-            &expires,
-            params.is_nsfw,
-        );
+    // Background: thumbnail extraction + uploads, S3 uploads
+    // These don't block the response — finalize re-uploads to S3 anyway
+    let publisher = params.publisher_user_id.clone();
+    let video_id = params.video_id.clone();
+    let is_nsfw = params.is_nsfw;
+    let metadata = pending_metadata.clone();
+    let expires_bg = expires.clone();
+    let body_bg = body_data.clone();
 
-        let storj_thumbnail_upload = upload_thumbnail_to_storj_with_ttl(
-            &params.publisher_user_id,
-            &params.video_id,
-            &thumbnail_data,
-            &expires,
-            params.is_nsfw,
-        );
+    tokio::spawn(async move {
+        // Extract thumbnail
+        let thumbnail_data = match extract_thumbnail(&body_bg).await {
+            Ok(data) => Some(data),
+            Err(e) => {
+                tracing::error!(
+                    "Background thumbnail extraction failed for {publisher}/{video_id}: {e}"
+                );
+                None
+            }
+        };
 
-        let s3_stream = futures_util::stream::once(async move { Ok(body_clone) });
-        let s3_video_upload = upload_to_s3(
-            &s3_client,
-            &params.publisher_user_id,
-            &params.video_id,
-            &pending_metadata,
-            s3_stream,
-        );
+        // Upload thumbnail to Storj if extracted
+        if let Some(ref thumb) = thumbnail_data {
+            if let Err(e) = upload_thumbnail_to_storj_with_ttl(
+                &publisher,
+                &video_id,
+                thumb,
+                &expires_bg,
+                is_nsfw,
+            )
+            .await
+            {
+                tracing::error!(
+                    "Background Storj thumbnail upload failed for {publisher}/{video_id}: {e}"
+                );
+            }
+        }
 
-        let s3_thumbnail_upload = upload_thumbnail_to_s3(
-            &s3_client,
-            &params.publisher_user_id,
-            &params.video_id,
-            thumbnail_clone,
-        );
+        // S3 uploads for SFW videos (finalize re-uploads, so failure here is non-fatal)
+        if !is_nsfw {
+            let s3_stream =
+                futures_util::stream::once(async { Ok::<_, reqwest::Error>(body_bg.clone()) });
+            if let Err(e) =
+                upload_to_s3(&s3_client, &publisher, &video_id, &metadata, s3_stream).await
+            {
+                tracing::error!(
+                    "Background S3 video upload failed for {publisher}/{video_id}: {e}"
+                );
+            }
 
-        tokio::try_join!(
-            storj_video_upload,
-            storj_thumbnail_upload,
-            s3_video_upload,
-            s3_thumbnail_upload
-        )?;
-    } else {
-        let storj_video_upload = upload_to_storj_with_ttl(
-            &params.publisher_user_id,
-            &params.video_id,
-            &pending_metadata,
-            &body_data,
-            &expires,
-            params.is_nsfw,
-        );
-
-        let storj_thumbnail_upload = upload_thumbnail_to_storj_with_ttl(
-            &params.publisher_user_id,
-            &params.video_id,
-            &thumbnail_data,
-            &expires,
-            params.is_nsfw,
-        );
-
-        tokio::try_join!(storj_video_upload, storj_thumbnail_upload)?;
-    }
+            if let Some(thumb) = thumbnail_data {
+                if let Err(e) =
+                    upload_thumbnail_to_s3(&s3_client, &publisher, &video_id, thumb).await
+                {
+                    tracing::error!(
+                        "Background S3 thumbnail upload failed for {publisher}/{video_id}: {e}"
+                    );
+                }
+            }
+        }
+    });
 
     Ok(Json(json!({
         "status": "pending",
@@ -605,7 +627,7 @@ pub async fn handler_raw_finalize(
         bucket, params.publisher_user_id, params.video_id
     );
 
-    // Download video to temporary file with retry logic
+    // Download video and thumbnail from Storj with retries
     let temp_video_file = format!(
         "/tmp/storj-finalize-{}-{}.mp4",
         params.publisher_user_id, params.video_id
@@ -615,106 +637,41 @@ pub async fn handler_raw_finalize(
         params.publisher_user_id, params.video_id
     );
 
-    let max_retries = 3;
-    let retry_delay = std::time::Duration::from_secs(2);
+    let grant = grant.to_string();
+    let video_key = format!("{}/{}.mp4", params.publisher_user_id, params.video_id);
+    let thumb_key = format!("{}/{}_thumbnail.png", params.publisher_user_id, params.video_id);
 
-    // Download video
-    let mut last_error = String::new();
-    for attempt in 1..=max_retries {
-        let download_child = Command::new("uplink")
-            .args([
-                "cp",
-                "--interactive=false",
-                "--analytics=false",
-                "--progress=false",
-                "--access",
-                grant,
-                src_video_path.as_str(),
-                temp_video_file.as_str(),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
+    retry_uplink_op("download_video", &video_key, None, || {
+        let mut cmd = Command::new("uplink");
+        cmd.args([
+            "cp",
+            "--interactive=false",
+            "--analytics=false",
+            "--progress=false",
+            "--access",
+            &grant,
+            &src_video_path,
+            &temp_video_file,
+        ]);
+        cmd
+    })
+    .await?;
 
-        let output = download_child.wait_with_output().await?;
-
-        if output.status.success() {
-            break;
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        last_error = stderr.to_string();
-        tracing::warn!(
-            "Uplink video download attempt {}/{} failed: {}",
-            attempt,
-            max_retries,
-            stderr
-        );
-
-        if attempt < max_retries {
-            tokio::time::sleep(retry_delay).await;
-        }
-    }
-
-    // Check if video file exists after retries
-    if !tokio::fs::try_exists(&temp_video_file)
-        .await
-        .unwrap_or(false)
-    {
-        return Err(Error::Io(std::io::Error::other(format!(
-            "Failed to download video from Storj after {} retries. Last error: {}",
-            max_retries, last_error
-        ))));
-    }
-
-    // Download thumbnail
-    let mut last_error = String::new();
-    for attempt in 1..=max_retries {
-        let download_child = Command::new("uplink")
-            .args([
-                "cp",
-                "--interactive=false",
-                "--analytics=false",
-                "--progress=false",
-                "--access",
-                grant,
-                src_thumbnail_path.as_str(),
-                temp_thumbnail_file.as_str(),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        let output = download_child.wait_with_output().await?;
-
-        if output.status.success() {
-            break;
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        last_error = stderr.to_string();
-        tracing::warn!(
-            "Uplink thumbnail download attempt {}/{} failed: {}",
-            attempt,
-            max_retries,
-            stderr
-        );
-
-        if attempt < max_retries {
-            tokio::time::sleep(retry_delay).await;
-        }
-    }
-
-    // Check if thumbnail file exists after retries
-    if !tokio::fs::try_exists(&temp_thumbnail_file)
-        .await
-        .unwrap_or(false)
-    {
-        return Err(Error::Io(std::io::Error::other(format!(
-            "Failed to download thumbnail from Storj after {} retries. Last error: {}",
-            max_retries, last_error
-        ))));
-    }
+    retry_uplink_op("download_thumbnail", &thumb_key, None, || {
+        let mut cmd = Command::new("uplink");
+        cmd.args([
+            "cp",
+            "--interactive=false",
+            "--analytics=false",
+            "--progress=false",
+            "--access",
+            &grant,
+            &src_thumbnail_path,
+            &temp_thumbnail_file,
+        ]);
+        cmd
+    })
+    .await?;
 
     // Read the file data
     let file_data = tokio::fs::read(&temp_video_file).await?;
@@ -723,21 +680,17 @@ pub async fn handler_raw_finalize(
     // Re-upload with final metadata (no TTL)
     if !params.is_nsfw {
         // For SFW videos, upload to both Storj and S3
-        let file_data_clone = file_data.clone();
-        let thumbnail_clone = thumbnail_data.clone();
-
-        let storj_stream =
-            futures_util::stream::once(async move { Ok::<_, reqwest::Error>(file_data.into()) });
+        let file_data_for_s3 = file_data.clone();
         let s3_stream =
             futures_util::stream::once(
-                async move { Ok::<_, reqwest::Error>(file_data_clone.into()) },
+                async move { Ok::<_, reqwest::Error>(file_data_for_s3.into()) },
             );
 
         let storj_video_upload = upload_to_storj(
             &params.publisher_user_id,
             &params.video_id,
             &metadata,
-            Box::pin(storj_stream),
+            &file_data,
             params.is_nsfw,
         );
 
@@ -760,7 +713,7 @@ pub async fn handler_raw_finalize(
             &s3_client,
             &params.publisher_user_id,
             &params.video_id,
-            thumbnail_clone,
+            thumbnail_data.clone(),
         );
 
         tokio::try_join!(
@@ -771,14 +724,11 @@ pub async fn handler_raw_finalize(
         )?;
     } else {
         // For NSFW videos, only upload to Storj
-        let storj_stream =
-            futures_util::stream::once(async move { Ok::<_, reqwest::Error>(file_data.into()) });
-
         let storj_video_upload = upload_to_storj(
             &params.publisher_user_id,
             &params.video_id,
             &metadata,
-            Box::pin(storj_stream),
+            &file_data,
             params.is_nsfw,
         );
 
@@ -816,40 +766,29 @@ async fn upload_to_storj_with_ttl(
         (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
     };
     let dest = format!("sj://{bucket}/{publisher_user_id}/{video_id}.mp4");
+    let grant = grant.to_string();
+    let expires = expires.to_string();
+    let key = format!("{publisher_user_id}/{video_id}.mp4");
 
     let metadata_str = serde_json::to_string(metadata)
         .expect("serialization to go through as we are guaranteed utf-8");
 
-    let mut child = Command::new("uplink")
-        .args([
+    retry_uplink_op("upload_video_ttl", &key, Some(body_data), || {
+        let mut cmd = Command::new("uplink");
+        cmd.args([
             "cp",
             "--interactive=false",
             "--analytics=false",
             "--progress=false",
-            format!("--metadata={metadata_str}").as_str(),
+            &format!("--metadata={metadata_str}"),
             "--expires",
-            expires,
+            &expires,
             "--access",
-            grant,
+            &grant,
             "-",
-            dest.as_str(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-
-    let mut pipe = child.stdin.take().expect("Stdin pipe to be opened for us");
-    pipe.write_all(body_data).await?;
-    pipe.flush().await?;
-    drop(pipe);
-
-    let status = child.wait().await?;
-    if !status.success() {
-        return Err(Error::Io(std::io::Error::other(format!(
-            "uplink command failed with status: {status}"
-        ))));
-    }
-
-    Ok(())
+            &dest,
+        ]);
+        cmd
+    })
+    .await
 }
