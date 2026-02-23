@@ -515,30 +515,26 @@ pub async fn handler_raw_upload_initial(
 
     let expires = format!("+{}h", PENDING_UPLOAD_TTL_HOURS);
 
-    // Critical path: only Storj video upload must complete before responding
-    // (finalize downloads from Storj, so the video must be there)
-    upload_to_storj_with_ttl(
-        &params.publisher_user_id,
-        &params.video_id,
-        &pending_metadata,
-        &body_data,
-        &expires,
-        params.is_nsfw,
-    )
-    .await?;
-
-    // Background: thumbnail extraction + uploads, S3 uploads
-    // These don't block the response — finalize re-uploads to S3 anyway
+    // Background ALL uploads — return 200 immediately after receiving the body.
+    // Finalize handler retries Storj downloads, so it naturally waits if upload isn't done yet.
     let publisher = params.publisher_user_id.clone();
     let video_id = params.video_id.clone();
     let is_nsfw = params.is_nsfw;
     let metadata = pending_metadata.clone();
-    let expires_bg = expires.clone();
-    let body_bg = body_data.clone();
 
     tokio::spawn(async move {
+        // Upload video to Storj (with TTL) — if this fails after all retries, skip the rest
+        if let Err(e) = upload_to_storj_with_ttl(
+            &publisher, &video_id, &metadata, &body_data, &expires, is_nsfw,
+        )
+        .await
+        {
+            tracing::error!("Background Storj video upload failed for {publisher}/{video_id}: {e}");
+            return;
+        }
+
         // Extract thumbnail
-        let thumbnail_data = match extract_thumbnail(&body_bg).await {
+        let thumbnail_data = match extract_thumbnail(&body_data).await {
             Ok(data) => Some(data),
             Err(e) => {
                 tracing::error!(
@@ -550,14 +546,9 @@ pub async fn handler_raw_upload_initial(
 
         // Upload thumbnail to Storj if extracted
         if let Some(ref thumb) = thumbnail_data {
-            if let Err(e) = upload_thumbnail_to_storj_with_ttl(
-                &publisher,
-                &video_id,
-                thumb,
-                &expires_bg,
-                is_nsfw,
-            )
-            .await
+            if let Err(e) =
+                upload_thumbnail_to_storj_with_ttl(&publisher, &video_id, thumb, &expires, is_nsfw)
+                    .await
             {
                 tracing::error!(
                     "Background Storj thumbnail upload failed for {publisher}/{video_id}: {e}"
@@ -568,7 +559,7 @@ pub async fn handler_raw_upload_initial(
         // S3 uploads for SFW videos (finalize re-uploads, so failure here is non-fatal)
         if !is_nsfw {
             let s3_stream =
-                futures_util::stream::once(async { Ok::<_, reqwest::Error>(body_bg.clone()) });
+                futures_util::stream::once(async { Ok::<_, reqwest::Error>(body_data.clone()) });
             if let Err(e) =
                 upload_to_s3(&s3_client, &publisher, &video_id, &metadata, s3_stream).await
             {
