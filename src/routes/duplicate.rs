@@ -1,3 +1,4 @@
+use axum::extract::{FromRequest, Multipart};
 use axum::{body::Body, extract::State, response::IntoResponse, Json};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
@@ -18,78 +19,75 @@ use crate::s3_client::S3Client;
 const PENDING_UPLOAD_TTL_HOURS: u32 = 1;
 
 /// Extract a thumbnail from video data using ffmpeg
-/// Returns the PNG thumbnail bytes
+/// Uses a temp file so ffmpeg can seek (pipe input fails for videos with moov atom at end)
 async fn extract_thumbnail(video_data: &[u8]) -> Result<Vec<u8>, Error> {
-    let mut child = Command::new("ffmpeg")
+    use std::io::Write;
+
+    let mut temp_input = tempfile::Builder::new()
+        .suffix(".mp4")
+        .tempfile()
+        .map_err(Error::Io)?;
+    temp_input.write_all(video_data).map_err(Error::Io)?;
+    let input_path = temp_input.path().to_owned();
+
+    let temp_output = tempfile::Builder::new()
+        .suffix(".png")
+        .tempfile()
+        .map_err(Error::Io)?;
+    let output_path = temp_output.path().to_owned();
+
+    // Try extracting at 1 second first
+    let output = Command::new("ffmpeg")
         .args([
+            "-y",
             "-i",
-            "pipe:0", // Read from stdin
+            input_path.to_str().unwrap(),
             "-ss",
-            "00:00:01", // Seek to 1 second (or first frame if shorter)
+            "00:00:01",
             "-vframes",
-            "1", // Extract 1 frame
+            "1",
             "-f",
-            "image2pipe", // Output as image pipe
-            "-vcodec",
-            "png",    // PNG format
-            "pipe:1", // Write to stdout
+            "image2",
+            output_path.to_str().unwrap(),
         ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?
+        .wait_with_output()
+        .await?;
 
-    let mut stdin = child.stdin.take().expect("Stdin pipe to be opened");
-    let video_data_clone = video_data.to_vec();
+    if !output.status.success() || !tokio::fs::try_exists(&output_path).await.unwrap_or(false) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("ffmpeg thumbnail at 1s failed, retrying at frame 0: {stderr}");
 
-    // Write video data to stdin in a separate task to avoid deadlock
-    let write_task = tokio::spawn(async move {
-        stdin.write_all(&video_data_clone).await.ok();
-        drop(stdin);
-    });
-
-    let output = child.wait_with_output().await?;
-    write_task.await.ok();
-
-    if !output.status.success() || output.stdout.is_empty() {
-        // Try again with frame 0 for very short videos
-        let mut child = Command::new("ffmpeg")
+        let output = Command::new("ffmpeg")
             .args([
+                "-y",
                 "-i",
-                "pipe:0",
+                input_path.to_str().unwrap(),
                 "-vframes",
                 "1",
                 "-f",
-                "image2pipe",
-                "-vcodec",
-                "png",
-                "pipe:1",
+                "image2",
+                output_path.to_str().unwrap(),
             ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?
+            .wait_with_output()
+            .await?;
 
-        let mut stdin = child.stdin.take().expect("Stdin pipe to be opened");
-        let video_data_clone = video_data.to_vec();
-
-        let write_task = tokio::spawn(async move {
-            stdin.write_all(&video_data_clone).await.ok();
-            drop(stdin);
-        });
-
-        let output = child.wait_with_output().await?;
-        write_task.await.ok();
-
-        if output.stdout.is_empty() {
+        if !output.status.success() || !tokio::fs::try_exists(&output_path).await.unwrap_or(false) {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::error!("ffmpeg thumbnail extraction failed: {stderr}");
             return Err(Error::Io(std::io::Error::other(
                 "Failed to extract thumbnail from video",
             )));
         }
-        return Ok(output.stdout);
     }
 
-    Ok(output.stdout)
+    let thumbnail = tokio::fs::read(&output_path).await?;
+    Ok(thumbnail)
 }
 
 /// Upload a thumbnail to Storj
@@ -496,10 +494,44 @@ pub struct RawFinalizeBody {
 pub async fn handler_raw_upload_initial(
     State(s3_client): State<S3Client>,
     axum::extract::Query(params): axum::extract::Query<RawUploadInitialParams>,
-    body: Body,
+    request: axum::extract::Request,
 ) -> Result<impl IntoResponse, Error> {
-    // Collect the body data
-    let body_data = body.collect().await.map_err(Error::Hyper)?.to_bytes();
+    // Collect body data — supports both multipart/form-data and raw byte stream
+    let is_multipart = request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("multipart/form-data"));
+
+    let body_data =
+        if is_multipart {
+            let mut multipart = Multipart::from_request(request, &()).await.map_err(|e| {
+                Error::Io(std::io::Error::other(format!("multipart parse error: {e}")))
+            })?;
+
+            let mut file_data = None;
+            while let Some(field) = multipart.next_field().await.map_err(|e| {
+                Error::Io(std::io::Error::other(format!("multipart field error: {e}")))
+            })? {
+                if field.name() == Some("file") {
+                    file_data = Some(field.bytes().await.map_err(|e| {
+                        Error::Io(std::io::Error::other(format!("multipart read error: {e}")))
+                    })?);
+                    break;
+                }
+            }
+            file_data.ok_or_else(|| {
+                Error::Io(std::io::Error::other(
+                    "missing 'file' field in multipart upload",
+                ))
+            })?
+        } else {
+            Body::new(request.into_body())
+                .collect()
+                .await
+                .map_err(Error::Hyper)?
+                .to_bytes()
+        };
 
     // Extract thumbnail from video
     let thumbnail_data = extract_thumbnail(&body_data).await?;

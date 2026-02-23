@@ -46,6 +46,7 @@ jobs:
         run: |
           hurl --test test/duplicate.hurl
           hurl --test test/duplicate_raw.hurl
+          hurl --test test/duplicate_raw_multipart.hurl
           hurl --test test/confirm_duplicate.hurl
 
       - name: Ensure metadata exists
@@ -64,6 +65,12 @@ jobs:
           uplink meta get --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_nsfw.mp4"
           uplink meta get --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_nsfw.mp4" | jq -e 'select(.test == "value")'
 
+          # Verify raw multipart uploaded videos exist and check metadata
+          uplink meta get --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp.mp4"
+          uplink meta get --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp.mp4" | jq -e 'select(.test == "multipart")'
+          uplink meta get --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw.mp4"
+          uplink meta get --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw.mp4" | jq -e 'select(.test == "multipart")'
+
           # Verify thumbnails were created for /duplicate endpoint
           echo "Checking thumbnails exist for /duplicate endpoint..."
           uplink ls --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_thumbnail.png"
@@ -73,6 +80,11 @@ jobs:
           echo "Checking thumbnails exist for raw uploads..."
           uplink ls --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_thumbnail.png"
           uplink ls --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_nsfw_thumbnail.png"
+
+          # Verify thumbnails were created for multipart uploads
+          echo "Checking thumbnails exist for multipart uploads..."
+          uplink ls --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp_thumbnail.png"
+          uplink ls --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw_thumbnail.png"
 
       - name: Setup for move2nsfw tests
         run: |
@@ -100,6 +112,14 @@ jobs:
           # Clean up raw upload thumbnails
           uplink rm --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_thumbnail.png" || true
           uplink rm --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_nsfw_thumbnail.png" || true
+
+          # Clean up multipart uploaded videos
+          uplink rm --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp.mp4" || true
+          uplink rm --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw.mp4" || true
+
+          # Clean up multipart upload thumbnails
+          uplink rm --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp_thumbnail.png" || true
+          uplink rm --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw_thumbnail.png" || true
 
       # HLS Tests
       - name: Clean up any existing HLS test files
