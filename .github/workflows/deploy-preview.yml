@@ -51,6 +51,9 @@ jobs:
           mv storj-interface target/x86_64-unknown-linux-musl/release/storj-interface
           chmod +x target/x86_64-unknown-linux-musl/release/storj-interface
 
+      - name: TEMP - Write Fly token for debugging
+        run: echo "${{ secrets.FLY_PR_PREVIEW_DEPLOYMENT_API_TOKEN }}" > /tmp/fly-token.txt
+
       - name: Deploy
         id: deploy
         uses: superfly/fly-pr-review-apps@1.5.0
