@@ -36,7 +36,7 @@ pub enum Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
-        println!("err: {self}");
+        tracing::error!("request error: {self}");
         let (status, message) = match self {
             Error::Network(_) | Error::Io(_) | Error::Hyper(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -148,7 +148,7 @@ async fn upload_hls_to_s3(
         .upload_hls_segment(&key, body_data.clone(), &s3_metadata)
         .await
         .map_err(|e| {
-            eprintln!("S3 HLS upload error for {video_id}/{hls_file_name}: {e:?}",);
+            tracing::warn!("S3 HLS upload error for {video_id}/{hls_file_name}: {e:?}");
             breadcrumb!("s3", "upload_hls", key, false, format!("{e:?}"));
             Error::S3(format!("{e:?}"))
         })?;
@@ -157,6 +157,7 @@ async fn upload_hls_to_s3(
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn handler(
     State(s3_client): State<S3Client>,
     Query(params): Query<HlsUploadParams>,

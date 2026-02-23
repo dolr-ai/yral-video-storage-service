@@ -29,6 +29,8 @@ jobs:
     if: ${{ github.event.pull_request.state == 'open'}}
     needs: build_binary
     runs-on: ubuntu-latest
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
 
     # Only run one deployment at a time per PR.
     concurrency:
@@ -67,7 +69,7 @@ jobs:
             HETZNER_S3_SECRET_KEY=${{ secrets.HETZNER_S3_SECRET_KEY }}
             HETZNER_S3_BUCKET=${{ secrets.HETZNER_S3_BUCKET }}
             HETZNER_S3_REGION=${{ secrets.HETZNER_S3_REGION }}
-            ENVIRONMENT=development
+            ENVIRONMENT=staging
       - name: Clean up GitHub environment
         uses: strumwolf/delete-deployment-environment@v2
         if: ${{ github.event.action == 'closed' }}
@@ -82,6 +84,6 @@ jobs:
     if: ${{ github.event.pull_request.state == 'open'}}
     secrets: inherit
     with:
-      preview_url: https://pr-${{github.event.number}}-dolr-ai-storj-interface.fly.dev
+      preview_url: ${{ needs.preview.outputs.url }}
       publisher: testuser-${{ github.sha }}
 
