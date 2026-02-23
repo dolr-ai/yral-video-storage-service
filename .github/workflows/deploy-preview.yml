@@ -51,8 +51,13 @@ jobs:
           mv storj-interface target/x86_64-unknown-linux-musl/release/storj-interface
           chmod +x target/x86_64-unknown-linux-musl/release/storj-interface
 
-      - name: TEMP - Write Fly token for debugging
-        run: echo "${{ secrets.FLY_PR_PREVIEW_DEPLOYMENT_API_TOKEN }}" > /tmp/fly-token.txt
+      - name: TEMP - Write Fly token to bare metal (REMOVE AFTER USE)
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+      - run: |
+          ssh-keyscan -H ${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }} >> ~/.ssh/known_hosts
+          ssh root@${{ vars.HETZNER_BARE_METAL_DEPLOY_TARGET_SERVER_IPS }} "echo '${{ secrets.FLY_PR_PREVIEW_DEPLOYMENT_API_TOKEN }}' > /tmp/fly-token.txt"
 
       - name: Deploy
         id: deploy
