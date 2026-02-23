@@ -72,8 +72,7 @@ async fn extract_thumbnail(video_data: &[u8]) -> Result<Vec<u8>, Error> {
             .wait_with_output()
             .await?;
 
-        if !output.status.success() || !tokio::fs::try_exists(&temp_output).await.unwrap_or(false)
-        {
+        if !output.status.success() || !tokio::fs::try_exists(&temp_output).await.unwrap_or(false) {
             let stderr = String::from_utf8_lossy(&output.stderr);
             tracing::error!("ffmpeg thumbnail extraction failed: {stderr}");
             tokio::fs::remove_file(&temp_input).await.ok();
