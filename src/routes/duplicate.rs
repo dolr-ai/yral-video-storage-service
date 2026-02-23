@@ -110,7 +110,11 @@ where
     let mut last_err = String::new();
     for attempt in 0..=UPLINK_MAX_RETRIES {
         let mut child = build_command()
-            .stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdin(if stdin_data.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -428,13 +432,8 @@ pub async fn handler(
         let body_for_s3 = body.clone();
         let s3_stream = futures_util::stream::once(async move { Ok(body_for_s3) });
 
-        let storj_video_upload = upload_to_storj(
-            &publisher_user_id,
-            &video_id,
-            &metadata,
-            &body,
-            is_nsfw,
-        );
+        let storj_video_upload =
+            upload_to_storj(&publisher_user_id, &video_id, &metadata, &body, is_nsfw);
         let s3_video_upload = upload_to_s3(
             &s3_client,
             &publisher_user_id,
@@ -446,14 +445,7 @@ pub async fn handler(
         tokio::try_join!(storj_video_upload, s3_video_upload)?;
     } else {
         // For NSFW videos, only upload to Storj
-        upload_to_storj(
-            &publisher_user_id,
-            &video_id,
-            &metadata,
-            &body,
-            is_nsfw,
-        )
-        .await?;
+        upload_to_storj(&publisher_user_id, &video_id, &metadata, &body, is_nsfw).await?;
     }
 
     // Background: extract thumbnail and upload it (don't block the response)
@@ -639,7 +631,10 @@ pub async fn handler_raw_finalize(
 
     let grant = grant.to_string();
     let video_key = format!("{}/{}.mp4", params.publisher_user_id, params.video_id);
-    let thumb_key = format!("{}/{}_thumbnail.png", params.publisher_user_id, params.video_id);
+    let thumb_key = format!(
+        "{}/{}_thumbnail.png",
+        params.publisher_user_id, params.video_id
+    );
 
     retry_uplink_op("download_video", &video_key, None, || {
         let mut cmd = Command::new("uplink");
