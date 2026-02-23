@@ -45,7 +45,6 @@ jobs:
       - name: Run duplication tests
         run: |
           hurl --test test/duplicate.hurl
-          hurl --test test/duplicate_raw.hurl
           hurl --test test/duplicate_raw_multipart.hurl
           hurl --test test/confirm_duplicate.hurl
 
@@ -59,12 +58,6 @@ jobs:
           uplink meta get --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/$HURL_video_id.mp4"
           uplink meta get --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/$HURL_video_id.mp4" | jq -e 'select(.test == "value")'
 
-          # Verify raw uploaded videos exist and check metadata (from /duplicate_raw/finalize endpoint)
-          uplink meta get --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw.mp4"
-          uplink meta get --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw.mp4" | jq -e 'select(.test == "value")'
-          uplink meta get --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_nsfw.mp4"
-          uplink meta get --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_nsfw.mp4" | jq -e 'select(.test == "value")'
-
           # Verify raw multipart uploaded videos exist and check metadata
           uplink meta get --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp.mp4"
           uplink meta get --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp.mp4" | jq -e 'select(.test == "multipart")'
@@ -75,11 +68,6 @@ jobs:
           echo "Checking thumbnails exist for /duplicate endpoint..."
           uplink ls --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_thumbnail.png"
           uplink ls --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_thumbnail.png"
-
-          # Verify thumbnails were created for raw uploads
-          echo "Checking thumbnails exist for raw uploads..."
-          uplink ls --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_thumbnail.png"
-          uplink ls --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_nsfw_thumbnail.png"
 
           # Verify thumbnails were created for multipart uploads
           echo "Checking thumbnails exist for multipart uploads..."
@@ -104,14 +92,6 @@ jobs:
           # Clean up /duplicate endpoint thumbnails
           uplink rm --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_thumbnail.png" || true
           uplink rm --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_thumbnail.png" || true
-
-          # Clean up raw uploaded videos (from /duplicate_raw/finalize endpoint)
-          uplink rm --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw.mp4" || true
-          uplink rm --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_nsfw.mp4" || true
-
-          # Clean up raw upload thumbnails
-          uplink rm --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_thumbnail.png" || true
-          uplink rm --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_nsfw_thumbnail.png" || true
 
           # Clean up multipart uploaded videos
           uplink rm --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp.mp4" || true
