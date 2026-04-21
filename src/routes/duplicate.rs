@@ -19,35 +19,35 @@ const PENDING_UPLOAD_TTL_HOURS: u32 = 1;
 
 /// Extract a thumbnail from video data using ffmpeg
 /// Uses a temp file so ffmpeg can seek (pipe input fails for videos with moov atom at end)
-async fn extract_thumbnail(video_data: &[u8]) -> Result<Vec<u8>, Error> {
-    use std::io::Write;
+pub async fn extract_thumbnail(video_data: &[u8]) -> Result<Vec<u8>, Error> {
+    let temp_dir = tempfile::tempdir().map_err(Error::Io)?;
+    let input_path = temp_dir.path().join("input.mp4");
+    let output_path = temp_dir.path().join("thumbnail.png");
 
-    let mut temp_input = tempfile::Builder::new()
-        .suffix(".mp4")
-        .tempfile()
-        .map_err(Error::Io)?;
-    temp_input.write_all(video_data).map_err(Error::Io)?;
-    let input_path = temp_input.path().to_owned();
+    tokio::fs::write(&input_path, video_data).await?;
 
-    let temp_output = tempfile::Builder::new()
-        .suffix(".png")
-        .tempfile()
-        .map_err(Error::Io)?;
-    let output_path = temp_output.path().to_owned();
+    run_ffmpeg_first_frame(&input_path, &output_path).await?;
 
-    // Try extracting at 1 second first
-    let output = Command::new("ffmpeg")
+    let thumbnail = tokio::fs::read(&output_path).await?;
+    Ok(thumbnail)
+}
+
+async fn run_ffmpeg_first_frame(
+    input: &std::path::Path,
+    output: &std::path::Path,
+) -> Result<(), Error> {
+    let output_proc = Command::new("ffmpeg")
         .args([
             "-y",
             "-i",
-            input_path.to_str().unwrap(),
-            "-ss",
-            "00:00:01",
+            input.to_str().ok_or_else(|| io_err("Invalid input path"))?,
             "-vframes",
             "1",
             "-f",
             "image2",
-            output_path.to_str().unwrap(),
+            output
+                .to_str()
+                .ok_or_else(|| io_err("Invalid output path"))?,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -55,38 +55,17 @@ async fn extract_thumbnail(video_data: &[u8]) -> Result<Vec<u8>, Error> {
         .wait_with_output()
         .await?;
 
-    if !output.status.success() || !tokio::fs::try_exists(&output_path).await.unwrap_or(false) {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!("ffmpeg thumbnail at 1s failed, retrying at frame 0: {stderr}");
-
-        let output = Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-i",
-                input_path.to_str().unwrap(),
-                "-vframes",
-                "1",
-                "-f",
-                "image2",
-                output_path.to_str().unwrap(),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?
-            .wait_with_output()
-            .await?;
-
-        if !output.status.success() || !tokio::fs::try_exists(&output_path).await.unwrap_or(false) {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!("ffmpeg thumbnail extraction failed: {stderr}");
-            return Err(Error::Io(std::io::Error::other(
-                "Failed to extract thumbnail from video",
-            )));
-        }
+    if !output_proc.status.success() || !tokio::fs::try_exists(output).await.unwrap_or(false) {
+        let stderr = String::from_utf8_lossy(&output_proc.stderr);
+        tracing::error!("ffmpeg failed: {stderr}");
+        return Err(Error::Io(io_err("Thumbnail extraction failed")));
     }
 
-    let thumbnail = tokio::fs::read(&output_path).await?;
-    Ok(thumbnail)
+    Ok(())
+}
+
+fn io_err(msg: &str) -> std::io::Error {
+    std::io::Error::other(msg)
 }
 
 /// Upload a thumbnail to Storj
@@ -813,4 +792,134 @@ async fn upload_to_storj_with_ttl(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_thumbnail;
+    use std::path::Path;
+    use std::process::Stdio;
+    use tempfile::tempdir;
+    use tokio::fs;
+    use tokio::process::Command;
+
+    #[tokio::test]
+    #[ignore = "requires ffmpeg installed locally"]
+    async fn extract_thumbnail_uses_the_first_video_frame() {
+        let temp_dir = tempdir().expect("temp dir");
+        let video_path = temp_dir.path().join("two-frame.mp4");
+
+        create_two_frame_video(&video_path)
+            .await
+            .expect("create test video");
+
+        let video_data = fs::read(&video_path).await.expect("read test video");
+        let thumbnail = extract_thumbnail(&video_data)
+            .await
+            .expect("extract thumbnail");
+
+        let rgb = decode_png_to_rgb24(temp_dir.path(), &thumbnail)
+            .await
+            .expect("decode thumbnail");
+
+        let (avg_r, avg_g, avg_b) = average_rgb(&rgb);
+        assert!(
+            avg_r > 200 && avg_g < 40 && avg_b < 40,
+            "expected a red first frame, got average rgb ({avg_r}, {avg_g}, {avg_b})"
+        );
+    }
+
+    async fn create_two_frame_video(output_path: &Path) -> Result<(), String> {
+        let output = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=16x16:d=1:r=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=16x16:d=1:r=1",
+                "-filter_complex",
+                "[0:v][1:v]concat=n=2:v=1:a=0,format=yuv420p",
+                output_path
+                    .to_str()
+                    .expect("test video path should be valid utf-8"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("failed to spawn ffmpeg: {err}"))?
+            .wait_with_output()
+            .await
+            .map_err(|err| format!("failed to wait for ffmpeg: {err}"))?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).into_owned())
+        }
+    }
+
+    async fn decode_png_to_rgb24(temp_dir: &Path, png_data: &[u8]) -> Result<Vec<u8>, String> {
+        let png_path = temp_dir.join("thumbnail.png");
+        let rgb_path = temp_dir.join("thumbnail.rgb");
+
+        fs::write(&png_path, png_data)
+            .await
+            .map_err(|err| format!("failed to write thumbnail: {err}"))?;
+
+        let output = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i",
+                png_path
+                    .to_str()
+                    .expect("test png path should be valid utf-8"),
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                rgb_path
+                    .to_str()
+                    .expect("test rgb path should be valid utf-8"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("failed to spawn ffmpeg: {err}"))?
+            .wait_with_output()
+            .await
+            .map_err(|err| format!("failed to wait for ffmpeg: {err}"))?;
+
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+        }
+
+        fs::read(&rgb_path)
+            .await
+            .map_err(|err| format!("failed to read rgb output: {err}"))
+    }
+
+    fn average_rgb(rgb: &[u8]) -> (u8, u8, u8) {
+        assert_eq!(rgb.len() % 3, 0, "rgb24 data should be 3 bytes per pixel");
+
+        let pixel_count = (rgb.len() / 3) as u32;
+        let (sum_r, sum_g, sum_b) =
+            rgb.chunks_exact(3)
+                .fold((0u32, 0u32, 0u32), |(r, g, b), pixel| {
+                    (
+                        r + pixel[0] as u32,
+                        g + pixel[1] as u32,
+                        b + pixel[2] as u32,
+                    )
+                });
+
+        (
+            (sum_r / pixel_count) as u8,
+            (sum_g / pixel_count) as u8,
+            (sum_b / pixel_count) as u8,
+        )
+    }
 }
