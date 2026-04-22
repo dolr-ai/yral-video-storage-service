@@ -30,7 +30,7 @@ jobs:
       cancel-in-progress: true
 
     environment:
-      name: pr-${{ github.event.number }}
+      name: Deployment
       url: ${{ steps.meta.outputs.preview_url }}
 
     steps:
