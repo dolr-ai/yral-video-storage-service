@@ -2,7 +2,7 @@
 
 `backfill-thumbnails` is the operator crate for staged thumbnail backfills.
 
-It generates first-frame thumbnails as `<video_id>-bak-thumbnail.png` for historical videos without touching existing `<video_id>_thumbnail.png` objects. The binary is intended for controlled operational runs, not for request-path use.
+It generates first-frame thumbnails as `<video_id>-thumbnail.png` for historical videos without touching existing `<video_id>_thumbnail.png` objects. The binary is intended for controlled operational runs, not for request-path use.
 
 The CLI is implemented with `clap`, so top-level and subcommand help are generated directly from the command definitions.
 Every operator mode also prints a compact human-readable summary to the terminal after it finishes, while still writing JSON artifacts under the manifest directory.
@@ -30,8 +30,8 @@ Prints the seeded object count to the terminal.
 
 ### `run`
 
-Discovers eligible `.mp4` objects, skips already staged items, extracts the first frame, and uploads `<video_id>-bak-thumbnail.png`.
-Prints dry-run or execute counts to the terminal, including the number of existing staged `-bak-thumbnail.png` objects.
+Discovers eligible `.mp4` objects, skips already staged items, extracts the first frame, and uploads `<video_id>-thumbnail.png`.
+Prints dry-run or execute counts to the terminal, including the number of existing staged `-thumbnail.png` objects.
 
 ### `verify`
 

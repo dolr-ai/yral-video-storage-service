@@ -406,7 +406,7 @@ pub fn build_run_plan(
 
 pub fn staged_thumbnail_key(video_key: &str) -> Option<String> {
     let video_id = video_key.strip_suffix(".mp4")?;
-    Some(format!("{video_id}-bak-thumbnail.png"))
+    Some(format!("{video_id}-thumbnail.png"))
 }
 
 pub fn is_before_cutoff(last_modified: DateTime<Utc>, cutoff: DateTime<Utc>) -> bool {
@@ -486,11 +486,11 @@ mod tests {
     fn derives_staged_thumbnail_key_in_same_directory() {
         assert_eq!(
             staged_thumbnail_key("publisher/video-123.mp4").as_deref(),
-            Some("publisher/video-123-bak-thumbnail.png")
+            Some("publisher/video-123-thumbnail.png")
         );
         assert_eq!(
             staged_thumbnail_key("video-123.mp4").as_deref(),
-            Some("video-123-bak-thumbnail.png")
+            Some("video-123-thumbnail.png")
         );
         assert_eq!(staged_thumbnail_key("video-123.mov"), None);
     }
@@ -518,14 +518,14 @@ mod tests {
                 backend: BackendKind::Storj,
                 bucket: "bucket-a".to_string(),
                 source_video_key: "publisher/video-123.mp4".to_string(),
-                staged_thumbnail_key: "publisher/video-123-bak-thumbnail.png".to_string(),
+                staged_thumbnail_key: "publisher/video-123-thumbnail.png".to_string(),
                 status: ManifestStatus::Completed,
             },
             ManifestEntry {
                 backend: BackendKind::Storj,
                 bucket: "bucket-a".to_string(),
                 source_video_key: "publisher/video-456.mp4".to_string(),
-                staged_thumbnail_key: "publisher/video-456-bak-thumbnail.png".to_string(),
+                staged_thumbnail_key: "publisher/video-456-thumbnail.png".to_string(),
                 status: ManifestStatus::Failed,
             },
         ]);
@@ -533,22 +533,22 @@ mod tests {
         assert!(index.should_skip_completed(
             BackendKind::Storj,
             "bucket-a",
-            "publisher/video-123-bak-thumbnail.png"
+            "publisher/video-123-thumbnail.png"
         ));
         assert!(!index.should_skip_completed(
             BackendKind::Storj,
             "bucket-a",
-            "publisher/video-456-bak-thumbnail.png"
+            "publisher/video-456-thumbnail.png"
         ));
         assert!(!index.should_skip_completed(
             BackendKind::Hetzner,
             "bucket-a",
-            "publisher/video-123-bak-thumbnail.png"
+            "publisher/video-123-thumbnail.png"
         ));
         assert!(!index.should_skip_completed(
             BackendKind::Storj,
             "bucket-b",
-            "publisher/video-123-bak-thumbnail.png"
+            "publisher/video-123-thumbnail.png"
         ));
     }
 
@@ -693,12 +693,12 @@ mod tests {
                 last_modified: cutoff,
             },
         ];
-        let remote = HashSet::from([String::from("publisher/already-remote-bak-thumbnail.png")]);
+        let remote = HashSet::from([String::from("publisher/already-remote-thumbnail.png")]);
         let manifest = ManifestIndex::from_entries(&[ManifestEntry {
             backend: BackendKind::Storj,
             bucket: "test-bucket-a".to_string(),
             source_video_key: "publisher/already-manifest.mp4".to_string(),
-            staged_thumbnail_key: "publisher/already-manifest-bak-thumbnail.png".to_string(),
+            staged_thumbnail_key: "publisher/already-manifest-thumbnail.png".to_string(),
             status: ManifestStatus::Completed,
         }]);
 
@@ -717,16 +717,16 @@ mod tests {
             vec![
                 PlannedAction::SkipRemoteExists {
                     video_key: "publisher/already-remote.mp4".to_string(),
-                    staged_thumbnail_key: "publisher/already-remote-bak-thumbnail.png".to_string(),
+                    staged_thumbnail_key: "publisher/already-remote-thumbnail.png".to_string(),
                 },
                 PlannedAction::SkipManifestDone {
                     video_key: "publisher/already-manifest.mp4".to_string(),
-                    staged_thumbnail_key: "publisher/already-manifest-bak-thumbnail.png"
+                    staged_thumbnail_key: "publisher/already-manifest-thumbnail.png"
                         .to_string(),
                 },
                 PlannedAction::Process {
                     video_key: "publisher/to-process.mp4".to_string(),
-                    staged_thumbnail_key: "publisher/to-process-bak-thumbnail.png".to_string(),
+                    staged_thumbnail_key: "publisher/to-process-thumbnail.png".to_string(),
                 },
             ]
         );
@@ -738,19 +738,19 @@ mod tests {
             backend: BackendKind::Storj,
             bucket: "test-bucket-a".to_string(),
             source_video_key: "publisher/video-123.mp4".to_string(),
-            staged_thumbnail_key: "publisher/video-123-bak-thumbnail.png".to_string(),
+            staged_thumbnail_key: "publisher/video-123-thumbnail.png".to_string(),
             status: ManifestStatus::Completed,
         }]);
 
         assert!(index.should_skip_completed(
             BackendKind::Storj,
             "test-bucket-a",
-            "publisher/video-123-bak-thumbnail.png"
+            "publisher/video-123-thumbnail.png"
         ));
         assert!(!index.should_skip_completed(
             BackendKind::Storj,
             "test-bucket-b",
-            "publisher/video-123-bak-thumbnail.png"
+            "publisher/video-123-thumbnail.png"
         ));
     }
 }
