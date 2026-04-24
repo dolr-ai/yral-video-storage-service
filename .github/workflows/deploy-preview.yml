@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   build_binary:
+    if: ${{ github.event.pull_request.state == 'open' }}
     uses: ./.github/workflows/build-binary.yml
     with:
       publish-artifact: true
