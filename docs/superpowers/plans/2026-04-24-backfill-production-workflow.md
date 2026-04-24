@@ -50,99 +50,39 @@ The `artifacts/backfill/<scope>/<bucket>/manifest.jsonl` is the audit trail. Kee
 - `artifacts/backfill/test-sfw-storj/<bucket>/manifest.jsonl`
 - `artifacts/backfill/test-sfw-storj/<bucket>/runs/<run-id>-*/`
 
-- [ ] **Step 1: Seed test data (if bucket is empty)**
+- [x] **Step 1: Seed test data (if bucket is empty)**
 
-```sh
-cargo run -p backfill-thumbnails -- \
-  seed-test-data \
-  --scope test-sfw-storj \
-  --bucket test-duplicate \
-  --manifest-dir artifacts/backfill
-```
+  Bucket `test-duplicate` was pre-populated. No seed needed.
 
-Expected terminal output: `Seeded: 3` (or higher if re-seeded)
+- [x] **Step 2: Audit — confirm candidate count and 0 remaining**
 
-- [ ] **Step 2: Audit — confirm candidate count and 0 remaining**
+  Candidate videos before cutoff: **9**. Existing staged: **0**. Remaining: **9**.
 
-```sh
-cargo run -p backfill-thumbnails -- \
-  audit \
-  --scope test-sfw-storj \
-  --bucket test-duplicate \
-  --cutoff-before 2026-04-25T03:31:00Z \
-  --manifest-dir artifacts/backfill
-```
+- [x] **Step 3: Dry-run — preview what will be processed**
 
-Expected: `Remaining videos to backfill` matches `Candidate videos before cutoff`. `Existing staged -thumbnail.png: 0` (or 0 minus any already present).
+  Run ID: `20260424T080041Z`. Mode: dry-run. Dry-run candidates: **9**. No uploads.
 
-Record the candidate count here: `______`
+- [x] **Step 4: Execute — generate staged thumbnails**
 
-- [ ] **Step 3: Dry-run — preview what will be processed**
+  Run ID: `20260424T082322Z`. Completed: **9**. Failed: **0**.
 
-```sh
-cargo run -p backfill-thumbnails -- \
-  run \
-  --scope test-sfw-storj \
-  --bucket test-duplicate \
-  --cutoff-before 2026-04-25T03:31:00Z \
-  --manifest-dir artifacts/backfill
-```
+- [x] **Step 5: Verify — confirm staged thumbnails match first frames**
 
-Expected: `Mode: dry-run`, `Dry-run candidates` equals the candidate count above. No uploads occur.
+  Run ID: `20260424T082554Z`. PASS: **9**. FAIL: **0**. SKIP: **0**.
 
-- [ ] **Step 4: Execute — generate staged thumbnails**
+- [x] **Step 6: Final audit — confirm 0 remaining**
 
-```sh
-cargo run -p backfill-thumbnails -- \
-  run \
-  --scope test-sfw-storj \
-  --bucket test-duplicate \
-  --cutoff-before 2026-04-25T03:31:00Z \
-  --manifest-dir artifacts/backfill \
-  --execute
-```
+  Run ID: `20260424T082714Z`. Existing staged: **9**. Remaining: **0**. ✓
 
-Expected: `Completed` equals candidate count. `Failed: 0`.
+- [x] **Step 7: Commit artifacts and mark task done**
 
-- [ ] **Step 5: Verify — confirm staged thumbnails match first frames**
-
-```sh
-cargo run -p backfill-thumbnails -- \
-  verify \
-  --scope test-sfw-storj \
-  --bucket test-duplicate \
-  --cutoff-before 2026-04-25T03:31:00Z \
-  --manifest-dir artifacts/backfill \
-  --verify-sample 10
-```
-
-Expected: `FAIL: 0`. Any `SKIP` entries should be investigated before proceeding.
-
-- [ ] **Step 6: Final audit — confirm 0 remaining**
-
-```sh
-cargo run -p backfill-thumbnails -- \
-  audit \
-  --scope test-sfw-storj \
-  --bucket test-duplicate \
-  --cutoff-before 2026-04-25T03:31:00Z \
-  --manifest-dir artifacts/backfill
-```
-
-Expected: `Remaining videos to backfill: 0`. `Existing staged -thumbnail.png` equals candidate count.
-
-- [ ] **Step 7: Commit artifacts and mark task done**
-
-```sh
-git add artifacts/backfill/test-sfw-storj/
-git commit -m "chore: test-sfw-storj backfill complete — <N> videos staged"
-```
-
-Record evidence: run ID, manifest path, verify output path.
+  Artifacts committed. Evidence: manifest at `artifacts/backfill/test-sfw-storj/test-duplicate/manifest.jsonl`, runs under `artifacts/backfill/test-sfw-storj/test-duplicate/runs/`.
 
 ---
 
 ## Task 2: Test Validation — `test-sfw-hetzner`
+
+> **DEFERRED** — Hetzner test validation will be done in a separate pass after all Storj scopes are complete.
 
 > If Hetzner test bucket access is not yet available, skip to Task 5 and mark that SFW production sign-off is **blocked on Hetzner test**.
 
