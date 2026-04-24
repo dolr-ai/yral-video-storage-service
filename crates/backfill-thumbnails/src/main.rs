@@ -448,16 +448,6 @@ async fn execute_audit(
         state_dir_for_scope_and_bucket(&cli.manifest_dir, cli.scope, backend.bucket_name())
             .join("manifest.jsonl");
     let manifest_entries = load_manifest_entries(manifest_path.as_path()).await?;
-    let manifest = ManifestIndex::from_entries(&manifest_entries);
-    let plan = build_run_plan(
-        backend.kind(),
-        &videos,
-        &remote_staged_keys,
-        &manifest,
-        backend.bucket_name(),
-        cutoff,
-        cli.prefix.as_deref(),
-    );
 
     let completed = manifest_entries
         .iter()
@@ -470,27 +460,39 @@ async fn execute_audit(
         .filter(|entry| entry.status == ManifestStatus::Failed)
         .count();
 
+    let candidates_before_cutoff = videos
+        .iter()
+        .filter(|object| object.last_modified <= cutoff)
+        .filter(|object| {
+            cli.prefix
+                .as_deref()
+                .map(|prefix| object.key.starts_with(prefix))
+                .unwrap_or(true)
+        })
+        .count();
+
+    let remaining_work = videos
+        .iter()
+        .filter(|v| v.last_modified <= cutoff)
+        .filter(|v| {
+            cli.prefix
+                .as_deref()
+                .map(|prefix| v.key.starts_with(prefix))
+                .unwrap_or(true)
+        })
+        .filter_map(|v| staged_thumbnail_key(&v.key))
+        .filter(|staged_key| !remote_staged_keys.contains(staged_key))
+        .count();
+
     let report = AuditReport {
         scope: cli.scope.as_str().to_string(),
         bucket: backend.bucket_name().to_string(),
         total_objects: objects.len(),
-        total_candidates_before_cutoff: videos
-            .iter()
-            .filter(|object| object.last_modified <= cutoff)
-            .filter(|object| {
-                cli.prefix
-                    .as_deref()
-                    .map(|prefix| object.key.starts_with(prefix))
-                    .unwrap_or(true)
-            })
-            .count(),
+        total_candidates_before_cutoff: candidates_before_cutoff,
         total_existing_staged: remote_staged_keys.len(),
         manifest_completed: completed,
         manifest_failed: failed,
-        remaining_work: plan
-            .iter()
-            .filter(|action| matches!(action, PlannedAction::Process { .. }))
-            .count(),
+        remaining_work,
     };
     write_json(audit_path, &report).await?;
 
