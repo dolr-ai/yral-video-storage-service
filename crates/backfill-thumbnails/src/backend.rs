@@ -263,11 +263,8 @@ fn resolve_storj_bucket(scope: Scope, bucket_override: Option<String>) -> Result
 
 fn resolve_storj_access_grant(scope: Scope) -> Result<String> {
     match scope {
-        Scope::TestSfwStorj | Scope::ProdSfwStorj => {
-            std::env::var("STORJ_ACCESS_GRANT_SFW").context("STORJ_ACCESS_GRANT_SFW must be set")
-        }
-        Scope::ProdNsfwStorj => {
-            std::env::var("STORJ_ACCESS_GRANT_NSFW").context("STORJ_ACCESS_GRANT_NSFW must be set")
+        Scope::TestSfwStorj | Scope::ProdSfwStorj | Scope::ProdNsfwStorj => {
+            std::env::var("STORJ_ACCESS_GRANT").context("STORJ_ACCESS_GRANT must be set")
         }
         Scope::TestSfwHetzner | Scope::ProdSfwHetzner => {
             bail!("internal error: non-storj scope passed to storj access-grant resolver")

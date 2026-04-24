@@ -1,0 +1,247 @@
+name: Backfill Thumbnails — Storj
+
+# Generates <video_id>-thumbnail.png for historical videos in a Storj bucket.
+# Execute requires Production environment approval. All other commands are read-only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bucket:
+        description: "Storj bucket name, e.g. yral-videos or yral-nsfw-videos"
+        required: true
+        type: string
+        default: "yral-videos"
+      command:
+        description: "Command to run"
+        required: true
+        type: choice
+        options:
+          - audit
+          - dry-run
+          - verify
+          - execute
+      cutoff_before:
+        description: "Cutoff timestamp, e.g. 2026-04-24T00:00:00Z"
+        required: true
+        type: string
+      prefix:
+        description: "Object prefix filter, e.g. publisher-id/  (optional)"
+        required: false
+        type: string
+        default: ""
+      verify_sample:
+        description: "Thumbnails to sample for verify  (default 50)"
+        required: false
+        type: string
+        default: "50"
+
+concurrency:
+  group: backfill-storj-${{ inputs.bucket }}-${{ inputs.command }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: "test · backfill-thumbnails"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test -p backfill-thumbnails
+
+  readonly:
+    name: "${{ inputs.command }} · ${{ inputs.bucket }}"
+    needs: [test]
+    if: ${{ inputs.command != 'execute' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install ffmpeg
+        run: sudo apt-get install -y ffmpeg
+
+      - name: Install uplink CLI
+        run: |
+          curl -L https://github.com/storj/storj/releases/latest/download/uplink_linux_amd64.zip -o uplink.zip
+          unzip uplink.zip uplink
+          chmod +x uplink
+          sudo mv uplink /usr/local/bin/uplink
+          uplink version
+
+      - name: Build (release)
+        run: cargo build --release -p backfill-thumbnails
+
+      - name: Run ${{ inputs.command }}
+        env:
+          STORJ_ACCESS_GRANT: ${{ secrets.STORJ_ACCESS_GRANT }}
+          RUST_LOG: warn
+        run: |
+          set -euo pipefail
+
+          ARGS=(
+            --scope prod-sfw-storj
+            --bucket "${{ inputs.bucket }}"
+            --cutoff-before "${{ inputs.cutoff_before }}"
+            --manifest-dir artifacts/backfill
+          )
+          [[ -n "${{ inputs.prefix }}" ]] && ARGS+=(--prefix "${{ inputs.prefix }}")
+
+          case "${{ inputs.command }}" in
+            audit)    ./target/release/backfill-thumbnails audit "${ARGS[@]}" ;;
+            dry-run)  ./target/release/backfill-thumbnails run   "${ARGS[@]}" ;;
+            verify)   ./target/release/backfill-thumbnails verify \
+                        --verify-sample "${{ inputs.verify_sample }}" "${ARGS[@]}" ;;
+          esac 2>&1 | tee /tmp/bf-output.txt
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## Backfill Storj — ${{ inputs.command }} on \`${{ inputs.bucket }}\`"
+            echo ""
+            echo "### Inputs"
+            echo "| Input | Value |"
+            echo "|-------|-------|"
+            echo "| Bucket | \`${{ inputs.bucket }}\` |"
+            echo "| Command | \`${{ inputs.command }}\` |"
+            echo "| Cutoff | \`${{ inputs.cutoff_before }}\` |"
+            echo "| Prefix | \`${{ inputs.prefix || '(none)' }}\` |"
+            echo ""
+            if [[ -s /tmp/bf-output.txt ]]; then
+              echo "### Results"
+              echo "| Metric | Value |"
+              echo "|--------|-------|"
+              while IFS= read -r line; do
+                if [[ "$line" =~ ^[A-Z] && "$line" == *": "* ]]; then
+                  key="${line%%: *}"
+                  value="${line#*: }"
+                  echo "| ${key} | \`${value}\` |"
+                fi
+              done < /tmp/bf-output.txt
+              echo ""
+            fi
+            echo "<details><summary>Full output</summary>"
+            echo ""
+            echo '```'
+            cat /tmp/bf-output.txt 2>/dev/null || echo "(no output captured)"
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-storj-${{ inputs.bucket }}-${{ inputs.command }}-${{ github.run_id }}
+          path: artifacts/backfill/
+          retention-days: 90
+          if-no-files-found: ignore
+
+  execute:
+    name: "execute · ${{ inputs.bucket }}"
+    needs: [test]
+    if: ${{ inputs.command == 'execute' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    environment: Production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install ffmpeg
+        run: sudo apt-get install -y ffmpeg
+
+      - name: Install uplink CLI
+        run: |
+          curl -L https://github.com/storj/storj/releases/latest/download/uplink_linux_amd64.zip -o uplink.zip
+          unzip uplink.zip uplink
+          chmod +x uplink
+          sudo mv uplink /usr/local/bin/uplink
+          uplink version
+
+      - name: Build (release)
+        run: cargo build --release -p backfill-thumbnails
+
+      - name: Execute backfill run
+        env:
+          STORJ_ACCESS_GRANT: ${{ secrets.STORJ_ACCESS_GRANT }}
+          RUST_LOG: warn
+        run: |
+          set -euo pipefail
+
+          ARGS=(
+            --scope prod-sfw-storj
+            --bucket "${{ inputs.bucket }}"
+            --cutoff-before "${{ inputs.cutoff_before }}"
+            --manifest-dir artifacts/backfill
+            --execute
+          )
+          [[ -n "${{ inputs.prefix }}" ]] && ARGS+=(--prefix "${{ inputs.prefix }}")
+
+          ./target/release/backfill-thumbnails run "${ARGS[@]}" 2>&1 | tee /tmp/bf-output.txt
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## Backfill Storj — Execute on \`${{ inputs.bucket }}\`"
+            echo ""
+            echo "### Inputs"
+            echo "| Input | Value |"
+            echo "|-------|-------|"
+            echo "| Bucket | \`${{ inputs.bucket }}\` |"
+            echo "| Cutoff | \`${{ inputs.cutoff_before }}\` |"
+            echo "| Prefix | \`${{ inputs.prefix || '(none)' }}\` |"
+            echo ""
+            if [[ -s /tmp/bf-output.txt ]]; then
+              echo "### Results"
+              echo "| Metric | Value |"
+              echo "|--------|-------|"
+              while IFS= read -r line; do
+                if [[ "$line" =~ ^[A-Z] && "$line" == *": "* ]]; then
+                  key="${line%%: *}"
+                  value="${line#*: }"
+                  echo "| ${key} | \`${value}\` |"
+                fi
+              done < /tmp/bf-output.txt
+              echo ""
+            fi
+            echo "<details><summary>Full output</summary>"
+            echo ""
+            echo '```'
+            cat /tmp/bf-output.txt 2>/dev/null || echo "(no output captured)"
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-storj-${{ inputs.bucket }}-execute-${{ github.run_id }}
+          path: artifacts/backfill/
+          retention-days: 90
+          if-no-files-found: ignore

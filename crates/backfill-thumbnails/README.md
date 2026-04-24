@@ -48,7 +48,7 @@ Prints the same high-level counts to the terminal in addition to writing `audit.
 - `ffmpeg` installed and available on `PATH`
 - `uplink` installed and available on `PATH` for Storj scopes
 - Environment configured for the target backend:
-  - Storj: `STORJ_ACCESS_GRANT_SFW`, `STORJ_ACCESS_GRANT_NSFW`, `TEST_BUCKET` as needed
+  - Storj: `STORJ_ACCESS_GRANT`, `TEST_BUCKET` as needed
   - Hetzner: `HETZNER_S3_ENDPOINT`, `HETZNER_S3_BUCKET`, `HETZNER_S3_ACCESS_KEY`, `HETZNER_S3_SECRET_KEY`, `HETZNER_S3_REGION`
 
 ## Supported Scopes
