@@ -1,6 +1,6 @@
 # Thumbnail Backfill Migration Plan
 
-**Goal:** Generate staged first-frame thumbnails as `<video_id>-bak-thumbnail.png` for historical videos, starting with test buckets, then later rolling out to all required buckets only after explicit human approval. Existing `<video_id>_thumbnail.png` objects must remain untouched throughout this plan.
+**Goal:** Generate staged first-frame thumbnails as `<video_id>-thumbnail.png` for historical videos, starting with test buckets, then later rolling out to all required buckets only after explicit human approval. Existing `<video_id>_thumbnail.png` objects must remain untouched throughout this plan.
 
 **Current rollout context:** The new first-frame thumbnail generation was rolled out on **April 22, 2026**. This backfill exists only for objects created before the final rollout cutoff. For test buckets, use `2026-04-22` as the default cutoff. Before any production run, confirm the exact production cutoff timestamp and use that absolute value in the command.
 
@@ -11,7 +11,7 @@
 **Production-safety constraints (non-negotiable):**
 - Never overwrite existing `_thumbnail.png` objects in this plan
 - Never delete any thumbnail or video object in this plan
-- Only create staged thumbnails named `<video_id>-bak-thumbnail.png`
+- Only create staged thumbnails named `<video_id>-thumbnail.png`
 - Dry-run is the default; `--execute` is required to write
 - Test buckets first; production buckets require explicit approval from Saikat before any write run
 - A stopped or partial run must be resumable without duplicating completed work
@@ -25,11 +25,11 @@
 
 | Scope | Backend | Bucket / Destination | Write Key | Notes |
 |------|---------|----------------------|-----------|-------|
-| `test-sfw-storj` | Storj | Test Storj bucket | `<video_id>-bak-thumbnail.png` | Required before any production Storj write |
-| `test-sfw-hetzner` | Hetzner S3 | Test Hetzner bucket | `<video_id>-bak-thumbnail.png` | Required before any production SFW Hetzner write |
-| `prod-sfw-storj` | Storj | `SFW_BUCKET` (`yral-videos`) | `<video_id>-bak-thumbnail.png` | Approval-gated |
-| `prod-sfw-hetzner` | Hetzner S3 | `HETZNER_S3_BUCKET` | `<video_id>-bak-thumbnail.png` | Approval-gated |
-| `prod-nsfw-storj` | Storj | `NSFW_BUCKET` (`yral-nsfw-videos`) | `<video_id>-bak-thumbnail.png` | Approval-gated |
+| `test-sfw-storj` | Storj | Test Storj bucket | `<video_id>-thumbnail.png` | Required before any production Storj write |
+| `test-sfw-hetzner` | Hetzner S3 | Test Hetzner bucket | `<video_id>-thumbnail.png` | Required before any production SFW Hetzner write |
+| `prod-sfw-storj` | Storj | `SFW_BUCKET` (`yral-videos`) | `<video_id>-thumbnail.png` | Approval-gated |
+| `prod-sfw-hetzner` | Hetzner S3 | `HETZNER_S3_BUCKET` | `<video_id>-thumbnail.png` | Approval-gated |
+| `prod-nsfw-storj` | Storj | `NSFW_BUCKET` (`yral-nsfw-videos`) | `<video_id>-thumbnail.png` | Approval-gated |
 
 **Important:** SFW production is not considered validated until both Storj and Hetzner test paths have passed. If Hetzner test access is not yet available, Storj-only testing is useful but does **not** complete the sign-off for SFW production rollout.
 
@@ -76,9 +76,9 @@ The Rust binary should be the only authoritative operator interface for the back
 - `seed-test-data`
   Creates deterministic test videos and intentionally wrong old-style thumbnails in test buckets only.
 - `run`
-  Discovers eligible videos, skips anything already staged, generates `-bak-thumbnail.png`, and uploads it.
+  Discovers eligible videos, skips anything already staged, generates `-thumbnail.png`, and uploads it.
 - `verify`
-  Read-only mode that checks whether staged `-bak-thumbnail.png` matches the first frame of the corresponding video.
+  Read-only mode that checks whether staged `-thumbnail.png` matches the first frame of the corresponding video.
 - `audit`
   Read-only mode that reports candidate counts, staged counts, verified counts, and failed counts per backend.
 
@@ -121,7 +121,7 @@ This needs to be production-grade, not just fast.
 
 ### Work discovery
 
-- List candidate `.mp4` objects and existing `-bak-thumbnail.png` objects per backend
+- List candidate `.mp4` objects and existing `-thumbnail.png` objects per backend
 - Run discovery for independent backends in parallel
 - Filter candidates by:
   - cutoff
@@ -136,7 +136,7 @@ For each backend, process work through a bounded pipeline:
 1. Download video to a unique temp directory
 2. Run `ffmpeg` to extract the first frame
 3. Sanity-check the generated PNG
-4. Upload `<video_id>-bak-thumbnail.png`
+4. Upload `<video_id>-thumbnail.png`
 5. Append a durable manifest row
 
 Recommended defaults:
@@ -230,7 +230,7 @@ This gives a known before/after state:
 For each sampled or requested item:
 
 1. Download the source video
-2. Download the staged `-bak-thumbnail.png`
+2. Download the staged `-thumbnail.png`
 3. Extract the first frame locally
 4. Compare the staged thumbnail to the first frame using a stable comparison method
 
@@ -253,7 +253,7 @@ It should also include backend and object key for each row.
 
 For each backend, report:
 - total `.mp4` candidates before the cutoff
-- total existing staged `-bak-thumbnail.png`
+- total existing staged `-thumbnail.png`
 - total completed in manifest
 - total verification passes
 - total failures
@@ -268,7 +268,7 @@ For SFW rollout, the audit should also make it easy to compare Storj and Hetzner
 After test-bucket validation passes and before any wider rollout:
 
 - [ ] Switch to the branch that reflects the current live consumer/read path
-- [ ] Check whether any code path or operational process actually requires staged `-bak-thumbnail.png` files
+- [ ] Check whether any code path or operational process actually requires staged `-thumbnail.png` files
 - [ ] Record whether staged files are:
   - only validation artifacts for now, or
   - needed temporarily by another branch / workflow
@@ -295,7 +295,7 @@ Evidence: this plan has been updated alongside implementation on branch `backfil
 ## Task 1: Finalize Operator Contract
 
 - [x] Define the `backfill_thumbnails` CLI surface in `crates/backfill-thumbnails/src/main.rs`
-- [x] Lock the staged output naming to `<video_id>-bak-thumbnail.png`
+- [x] Lock the staged output naming to `<video_id>-thumbnail.png`
 - [x] Lock dry-run as the default; only `--execute` enables writes
 - [x] Lock absolute cutoff handling for all non-test runs
 - [x] Define one manifest directory layout for all run modes
@@ -408,7 +408,7 @@ Evidence: verified by `cargo test -p backfill-thumbnails`
 
 ## Task 4E: Clarify Terminal Summary Labels
 
-- [x] Make `run` summaries explicitly call out staged `-bak-thumbnail.png` counts
+- [x] Make `run` summaries explicitly call out staged `-thumbnail.png` counts
 - [x] Make `audit` summaries explicitly distinguish total objects, candidate videos, and remaining videos to backfill
 - [x] Keep README wording aligned with the terminal output
 
@@ -445,7 +445,7 @@ Deliverable: staged thumbnails are proven on test buckets before broader use.
 - [ ] Document the outcome in the run notes
 - [ ] Keep the no-delete rule in force regardless of outcome
 
-Deliverable: we know whether `-bak-thumbnail.png` remains operationally necessary before the rollout expands.
+Deliverable: we know whether `-thumbnail.png` remains operationally necessary before the rollout expands.
 
 ---
 
