@@ -167,7 +167,7 @@ async fn execute_run(
         .context("run command requires cutoff_before")?;
     let remote_staged_keys = objects
         .iter()
-        .filter(|object| object.key.ends_with("-thumbnail.png"))
+        .filter(|object| object.key.ends_with("-thumbnail.png") && !object.key.ends_with("-bak-thumbnail.png"))
         .map(|object| object.key.clone())
         .collect::<std::collections::HashSet<_>>();
     let videos = objects
@@ -322,7 +322,7 @@ async fn execute_verify(
         .context("verify command requires cutoff_before")?;
     let remote_staged_keys = objects
         .iter()
-        .filter(|object| object.key.ends_with("-thumbnail.png"))
+        .filter(|object| object.key.ends_with("-thumbnail.png") && !object.key.ends_with("-bak-thumbnail.png"))
         .map(|object| object.key.clone())
         .collect::<std::collections::HashSet<_>>();
 
@@ -439,7 +439,7 @@ async fn execute_audit(
         .context("audit command requires cutoff_before")?;
     let remote_staged_keys = objects
         .iter()
-        .filter(|object| object.key.ends_with("-thumbnail.png"))
+        .filter(|object| object.key.ends_with("-thumbnail.png") && !object.key.ends_with("-bak-thumbnail.png"))
         .map(|object| object.key.clone())
         .collect::<std::collections::HashSet<_>>();
     let videos = objects

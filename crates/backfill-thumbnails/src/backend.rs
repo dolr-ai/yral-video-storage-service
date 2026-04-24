@@ -310,11 +310,14 @@ fn parse_uplink_ls_json_output(stdout: &str) -> Vec<ObjectInfo> {
                 return None;
             }
             match parse_uplink_ls_json_line(trimmed) {
-                Some(info) => Some(info),
-                None => {
-                    if !trimmed.starts_with('{') {
-                        tracing::warn!(line = trimmed, "unexpected non-JSON line in uplink ls output — object may be missing from listing");
-                    }
+                Ok(Some(info)) => Some(info),
+                Ok(None) => None, // expected non-OBJ entry (e.g. directory prefix)
+                Err(reason) => {
+                    tracing::warn!(
+                        line = trimmed,
+                        reason,
+                        "skipping unparseable uplink ls line — object may be missing from listing"
+                    );
                     None
                 }
             }
@@ -322,20 +325,21 @@ fn parse_uplink_ls_json_output(stdout: &str) -> Vec<ObjectInfo> {
         .collect()
 }
 
-fn parse_uplink_ls_json_line(line: &str) -> Option<ObjectInfo> {
-    let record = serde_json::from_str::<UplinkListRecord>(line).ok()?;
+fn parse_uplink_ls_json_line(line: &str) -> Result<Option<ObjectInfo>, &'static str> {
+    let record = serde_json::from_str::<UplinkListRecord>(line)
+        .map_err(|_| "invalid JSON")?;
     if record.kind != "OBJ" {
-        return None;
+        return Ok(None);
     }
 
     let last_modified = NaiveDateTime::parse_from_str(&record.created, "%Y-%m-%d %H:%M:%S")
-        .ok()
-        .map(|value| DateTime::<Utc>::from_naive_utc_and_offset(value, Utc))?;
+        .map(|value| DateTime::<Utc>::from_naive_utc_and_offset(value, Utc))
+        .map_err(|_| "unparseable timestamp")?;
 
-    Some(ObjectInfo {
+    Ok(Some(ObjectInfo {
         key: record.key,
         last_modified,
-    })
+    }))
 }
 
 #[cfg(test)]
