@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   build_binary:
+    if: ${{ github.event.pull_request.state == 'open' }}
     uses: ./.github/workflows/build-binary.yml
     with:
       publish-artifact: true
@@ -285,7 +286,7 @@ jobs:
         with:
           url: https://vault.yral.com
           method: jwt
-          role: yral-metadata-role
+          role: yral-video-storage-service-role
           jwtGithubAudience: "https://github.com/dolr-ai"
           secrets: |
             secret/data/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
