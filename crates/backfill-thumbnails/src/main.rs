@@ -167,7 +167,9 @@ async fn execute_run(
         .context("run command requires cutoff_before")?;
     let remote_staged_keys = objects
         .iter()
-        .filter(|object| object.key.ends_with("-thumbnail.png") && !object.key.ends_with("-bak-thumbnail.png"))
+        .filter(|object| {
+            object.key.ends_with("-thumbnail.png") && !object.key.ends_with("-bak-thumbnail.png")
+        })
         .map(|object| object.key.clone())
         .collect::<std::collections::HashSet<_>>();
     let videos = objects
@@ -322,7 +324,9 @@ async fn execute_verify(
         .context("verify command requires cutoff_before")?;
     let remote_staged_keys = objects
         .iter()
-        .filter(|object| object.key.ends_with("-thumbnail.png") && !object.key.ends_with("-bak-thumbnail.png"))
+        .filter(|object| {
+            object.key.ends_with("-thumbnail.png") && !object.key.ends_with("-bak-thumbnail.png")
+        })
         .map(|object| object.key.clone())
         .collect::<std::collections::HashSet<_>>();
 
@@ -439,7 +443,9 @@ async fn execute_audit(
         .context("audit command requires cutoff_before")?;
     let remote_staged_keys = objects
         .iter()
-        .filter(|object| object.key.ends_with("-thumbnail.png") && !object.key.ends_with("-bak-thumbnail.png"))
+        .filter(|object| {
+            object.key.ends_with("-thumbnail.png") && !object.key.ends_with("-bak-thumbnail.png")
+        })
         .map(|object| object.key.clone())
         .collect::<std::collections::HashSet<_>>();
     let videos = objects
@@ -525,10 +531,6 @@ async fn execute_seed_test_data(
     run_id: &str,
     summary_path: &Path,
 ) -> Result<CommandSummary> {
-    if !cli.scope.is_test() {
-        bail!("seed-test-data is only allowed for test scopes");
-    }
-
     let video_data = create_seed_video_bytes().await?;
     let old_thumbnail = extract_thumbnail_with_seek(&video_data, Some("00:00:01"))
         .await
@@ -792,9 +794,8 @@ mod tests {
 
     #[test]
     fn state_dir_is_bucket_scoped() {
-        let dir =
-            state_dir_for_scope_and_bucket("artifacts/backfill", Scope::TestSfwStorj, "bucket-a");
-        assert!(dir.ends_with("artifacts/backfill/test-sfw-storj/bucket-a"));
+        let dir = state_dir_for_scope_and_bucket("artifacts/backfill", Scope::Storj, "bucket-a");
+        assert!(dir.ends_with("artifacts/backfill/storj/bucket-a"));
     }
 
     #[tokio::test]
@@ -859,7 +860,7 @@ mod tests {
         let summary = CommandSummary {
             run_id: "20260424T040000Z".to_string(),
             command: "seed-test-data".to_string(),
-            scope: "test-sfw-storj".to_string(),
+            scope: "storj".to_string(),
             bucket: "test-duplicate".to_string(),
             seeded: 3,
             ..Default::default()
@@ -876,7 +877,7 @@ mod tests {
         let summary = CommandSummary {
             run_id: "20260424T040100Z".to_string(),
             command: "run".to_string(),
-            scope: "test-sfw-storj".to_string(),
+            scope: "storj".to_string(),
             bucket: "test-duplicate".to_string(),
             execute: true,
             total_objects: 12,
@@ -903,7 +904,7 @@ mod tests {
         let summary = CommandSummary {
             run_id: "20260424T040200Z".to_string(),
             command: "verify".to_string(),
-            scope: "test-sfw-storj".to_string(),
+            scope: "storj".to_string(),
             bucket: "test-duplicate".to_string(),
             total_objects: 12,
             candidate_videos: 3,
@@ -925,7 +926,7 @@ mod tests {
         let summary = CommandSummary {
             run_id: "20260424T040300Z".to_string(),
             command: "audit".to_string(),
-            scope: "test-sfw-storj".to_string(),
+            scope: "storj".to_string(),
             bucket: "test-duplicate".to_string(),
             total_objects: 12,
             candidate_videos: 5,

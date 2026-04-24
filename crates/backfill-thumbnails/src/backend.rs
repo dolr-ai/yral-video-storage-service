@@ -3,7 +3,6 @@ use backfill_thumbnails::{BackendKind, ObjectInfo, Scope};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Deserialize;
 use std::process::Stdio;
-use storj_interface::consts::{YRAL_NSFW_VIDEOS, YRAL_VIDEOS};
 use storj_interface::s3_client::S3Client;
 use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
@@ -30,12 +29,11 @@ impl Backend {
     pub async fn from_scope(scope: Scope, bucket_override: Option<String>) -> Result<Self> {
         match scope.backend() {
             BackendKind::Storj => Ok(Self::Storj(StorjBackend {
-                bucket: resolve_storj_bucket(scope, bucket_override)?,
-                access_grant: resolve_storj_access_grant(scope)?,
+                bucket: resolve_storj_bucket(bucket_override)?,
+                access_grant: resolve_storj_access_grant()?,
             })),
             BackendKind::Hetzner => Ok(Self::Hetzner(HetznerBackend {
-                client: S3Client::new_with_bucket(resolve_hetzner_bucket(scope, bucket_override)?)
-                    .await,
+                client: S3Client::new_with_bucket(bucket_override).await,
             })),
         }
     }
@@ -245,43 +243,12 @@ impl HetznerBackend {
     }
 }
 
-fn resolve_storj_bucket(scope: Scope, bucket_override: Option<String>) -> Result<String> {
-    if let Some(bucket) = bucket_override {
-        return Ok(bucket);
-    }
-
-    match scope {
-        Scope::TestSfwStorj => std::env::var("TEST_BUCKET")
-            .context("TEST_BUCKET must be set for test-sfw-storj when --bucket is not provided"),
-        Scope::ProdSfwStorj => Ok(YRAL_VIDEOS.clone()),
-        Scope::ProdNsfwStorj => Ok(YRAL_NSFW_VIDEOS.clone()),
-        Scope::TestSfwHetzner | Scope::ProdSfwHetzner => {
-            bail!("internal error: non-storj scope passed to storj bucket resolver")
-        }
-    }
+fn resolve_storj_bucket(bucket_override: Option<String>) -> Result<String> {
+    bucket_override.ok_or_else(|| anyhow::anyhow!("--bucket is required for storj scope"))
 }
 
-fn resolve_storj_access_grant(scope: Scope) -> Result<String> {
-    match scope {
-        Scope::TestSfwStorj | Scope::ProdSfwStorj | Scope::ProdNsfwStorj => {
-            std::env::var("STORJ_ACCESS_GRANT").context("STORJ_ACCESS_GRANT must be set")
-        }
-        Scope::TestSfwHetzner | Scope::ProdSfwHetzner => {
-            bail!("internal error: non-storj scope passed to storj access-grant resolver")
-        }
-    }
-}
-
-fn resolve_hetzner_bucket(scope: Scope, bucket_override: Option<String>) -> Result<Option<String>> {
-    match scope {
-        Scope::TestSfwHetzner => bucket_override
-            .map(Some)
-            .ok_or_else(|| anyhow::anyhow!("--bucket is required for test-sfw-hetzner")),
-        Scope::ProdSfwHetzner => Ok(bucket_override),
-        Scope::TestSfwStorj | Scope::ProdSfwStorj | Scope::ProdNsfwStorj => {
-            bail!("internal error: non-hetzner scope passed to hetzner bucket resolver")
-        }
-    }
+fn resolve_storj_access_grant() -> Result<String> {
+    std::env::var("STORJ_ACCESS_GRANT").context("STORJ_ACCESS_GRANT must be set")
 }
 
 fn storj_target(bucket: &str, prefix: Option<&str>) -> String {
@@ -323,8 +290,7 @@ fn parse_uplink_ls_json_output(stdout: &str) -> Vec<ObjectInfo> {
 }
 
 fn parse_uplink_ls_json_line(line: &str) -> Result<Option<ObjectInfo>, &'static str> {
-    let record = serde_json::from_str::<UplinkListRecord>(line)
-        .map_err(|_| "invalid JSON")?;
+    let record = serde_json::from_str::<UplinkListRecord>(line).map_err(|_| "invalid JSON")?;
     if record.kind != "OBJ" {
         return Ok(None);
     }
@@ -341,8 +307,7 @@ fn parse_uplink_ls_json_line(line: &str) -> Result<Option<ObjectInfo>, &'static 
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_uplink_ls_json_output, resolve_hetzner_bucket};
-    use backfill_thumbnails::Scope;
+    use super::parse_uplink_ls_json_output;
 
     #[test]
     fn parses_standard_uplink_ls_json_output() {
@@ -361,13 +326,5 @@ mod tests {
             "{\"kind\":\"PRE\",\"created\":\"2026-04-21 12:34:56\",\"key\":\"publisher/\"}\n",
         );
         assert!(objects.is_empty());
-    }
-
-    #[test]
-    fn rejects_test_hetzner_scope_without_explicit_bucket() {
-        let error = resolve_hetzner_bucket(Scope::TestSfwHetzner, None)
-            .expect_err("expected missing test bucket to fail");
-
-        assert!(format!("{error:#}").contains("--bucket"));
     }
 }

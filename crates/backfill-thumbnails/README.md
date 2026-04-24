@@ -53,13 +53,8 @@ Prints the same high-level counts to the terminal in addition to writing `audit.
 
 ## Supported Scopes
 
-Scopes are fixed on purpose. They map the currently approved operational surfaces for this migration, let the tool pick the correct backend adapter automatically, and keep safety rules enforceable instead of turning the operator into an unrestricted bucket copier.
-
-- `test-sfw-storj`
-- `test-sfw-hetzner`
-- `prod-sfw-storj`
-- `prod-sfw-hetzner`
-- `prod-nsfw-storj`
+- `storj` — Storj backend; requires `--bucket`
+- `hetzner` — Hetzner S3 backend; bucket is resolved from `HETZNER_S3_BUCKET` env var if `--bucket` is not provided
 
 ## Common Flags
 
@@ -121,7 +116,7 @@ Seed test data into a Storj test bucket:
 ```sh
 cargo run -p backfill-thumbnails -- \
   seed-test-data \
-  --scope test-sfw-storj \
+  --scope storj \
   --bucket your-test-bucket \
   --manifest-dir artifacts/backfill
 ```
@@ -131,7 +126,7 @@ Audit a Storj test bucket (shows remote state, manifest counts, and remaining wo
 ```sh
 cargo run -p backfill-thumbnails -- \
   audit \
-  --scope test-sfw-storj \
+  --scope storj \
   --bucket your-test-bucket \
   --cutoff-before 2026-04-22 \
   --manifest-dir artifacts/backfill
@@ -142,7 +137,7 @@ Audit scoped to a specific folder prefix:
 ```sh
 cargo run -p backfill-thumbnails -- \
   audit \
-  --scope test-sfw-storj \
+  --scope storj \
   --bucket your-test-bucket \
   --cutoff-before 2026-04-22 \
   --manifest-dir artifacts/backfill \
@@ -154,7 +149,7 @@ Dry-run a Storj test bucket:
 ```sh
 cargo run -p backfill-thumbnails -- \
   run \
-  --scope test-sfw-storj \
+  --scope storj \
   --bucket your-test-bucket \
   --cutoff-before 2026-04-22 \
   --manifest-dir artifacts/backfill
@@ -165,7 +160,7 @@ Execute against a Storj test bucket scoped to a folder:
 ```sh
 cargo run -p backfill-thumbnails -- \
   run \
-  --scope test-sfw-storj \
+  --scope storj \
   --bucket your-test-bucket \
   --cutoff-before 2026-04-22 \
   --manifest-dir artifacts/backfill \
@@ -178,7 +173,7 @@ Execute against a Hetzner test bucket:
 ```sh
 cargo run -p backfill-thumbnails -- \
   run \
-  --scope test-sfw-hetzner \
+  --scope hetzner \
   --bucket your-test-bucket \
   --cutoff-before 2026-04-22 \
   --manifest-dir artifacts/backfill \
@@ -190,7 +185,7 @@ Verify a sample after a run:
 ```sh
 cargo run -p backfill-thumbnails -- \
   verify \
-  --scope test-sfw-storj \
+  --scope storj \
   --bucket your-test-bucket \
   --cutoff-before 2026-04-22 \
   --manifest-dir artifacts/backfill \

@@ -12,42 +12,25 @@ pub enum BackendKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Scope {
-    #[value(name = "test-sfw-storj")]
-    TestSfwStorj,
-    #[value(name = "test-sfw-hetzner")]
-    TestSfwHetzner,
-    #[value(name = "prod-sfw-storj")]
-    ProdSfwStorj,
-    #[value(name = "prod-sfw-hetzner")]
-    ProdSfwHetzner,
-    #[value(name = "prod-nsfw-storj")]
-    ProdNsfwStorj,
+    #[value(name = "storj")]
+    Storj,
+    #[value(name = "hetzner")]
+    Hetzner,
 }
 
 impl Scope {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::TestSfwStorj => "test-sfw-storj",
-            Self::TestSfwHetzner => "test-sfw-hetzner",
-            Self::ProdSfwStorj => "prod-sfw-storj",
-            Self::ProdSfwHetzner => "prod-sfw-hetzner",
-            Self::ProdNsfwStorj => "prod-nsfw-storj",
+            Self::Storj => "storj",
+            Self::Hetzner => "hetzner",
         }
     }
 
     pub fn backend(self) -> BackendKind {
         match self {
-            Self::TestSfwStorj | Self::ProdSfwStorj | Self::ProdNsfwStorj => BackendKind::Storj,
-            Self::TestSfwHetzner | Self::ProdSfwHetzner => BackendKind::Hetzner,
+            Self::Storj => BackendKind::Storj,
+            Self::Hetzner => BackendKind::Hetzner,
         }
-    }
-
-    pub fn is_test(self) -> bool {
-        matches!(self, Self::TestSfwStorj | Self::TestSfwHetzner)
-    }
-
-    pub fn requires_explicit_bucket(self) -> bool {
-        matches!(self, Self::TestSfwHetzner)
     }
 }
 
@@ -197,11 +180,8 @@ impl FromStr for Scope {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "test-sfw-storj" => Ok(Self::TestSfwStorj),
-            "test-sfw-hetzner" => Ok(Self::TestSfwHetzner),
-            "prod-sfw-storj" => Ok(Self::ProdSfwStorj),
-            "prod-sfw-hetzner" => Ok(Self::ProdSfwHetzner),
-            "prod-nsfw-storj" => Ok(Self::ProdNsfwStorj),
+            "storj" => Ok(Self::Storj),
+            "hetzner" => Ok(Self::Hetzner),
             other => Err(format!("unsupported scope: {other}")),
         }
     }
@@ -240,18 +220,6 @@ impl RawCommand {
             }
             Self::Run(args) => {
                 validate_scope_bucket(args.common.scope, args.common.bucket_override.as_deref())?;
-                if !args.common.scope.is_test()
-                    && args
-                        .thumbnail_seek
-                        .as_deref()
-                        .map(seek_is_non_zero)
-                        .unwrap_or(false)
-                {
-                    return Err(value_validation_error(
-                        "thumbnail-seek must be the first frame for production run",
-                    ));
-                }
-
                 Ok(CliOptions {
                     command: CommandKind::Run,
                     scope: args.common.scope,
@@ -309,11 +277,10 @@ impl RawCommand {
 }
 
 fn validate_scope_bucket(scope: Scope, bucket_override: Option<&str>) -> Result<(), clap::Error> {
-    if scope.requires_explicit_bucket() && bucket_override.is_none() {
-        return Err(missing_required_argument_error(format!(
-            "--bucket is required for {} to avoid accidentally targeting the production bucket",
-            scope.as_str()
-        )));
+    if scope == Scope::Storj && bucket_override.is_none() {
+        return Err(missing_required_argument_error(
+            "--bucket is required for storj scope".to_string(),
+        ));
     }
 
     Ok(())
@@ -342,13 +309,6 @@ fn parse_cutoff(value: &str) -> Result<DateTime<Utc>, String> {
         .and_hms_opt(23, 59, 59)
         .ok_or_else(|| "invalid cutoff time".to_string())?;
     Ok(DateTime::<Utc>::from_naive_utc_and_offset(date_time, Utc))
-}
-
-fn seek_is_non_zero(value: &str) -> bool {
-    !matches!(
-        value.trim(),
-        "0" | "0s" | "0.0" | "00:00:00" | "00:00:00.0" | "00:00:00.000"
-    )
 }
 
 pub fn build_run_plan(
@@ -474,12 +434,11 @@ mod tests {
     #[test]
     fn parses_scope_and_backend_shape() {
         assert_eq!(
-            <Scope as FromStr>::from_str("test-sfw-storj").expect("scope parse"),
-            Scope::TestSfwStorj
+            <Scope as FromStr>::from_str("storj").expect("scope parse"),
+            Scope::Storj
         );
-        assert_eq!(Scope::TestSfwStorj.backend(), BackendKind::Storj);
-        assert!(Scope::TestSfwStorj.is_test());
-        assert_eq!(Scope::ProdSfwHetzner.backend(), BackendKind::Hetzner);
+        assert_eq!(Scope::Storj.backend(), BackendKind::Storj);
+        assert_eq!(Scope::Hetzner.backend(), BackendKind::Hetzner);
     }
 
     #[test]
@@ -558,14 +517,16 @@ mod tests {
             "backfill-thumbnails".to_string(),
             "run".to_string(),
             "--scope".to_string(),
-            "test-sfw-storj".to_string(),
+            "storj".to_string(),
+            "--bucket".to_string(),
+            "yral-videos".to_string(),
             "--cutoff-before".to_string(),
             "2026-04-22T00:00:00Z".to_string(),
         ])
         .expect("cli parse");
 
         assert_eq!(cli.command, CommandKind::Run);
-        assert_eq!(cli.scope, Scope::TestSfwStorj);
+        assert_eq!(cli.scope, Scope::Storj);
         assert_eq!(cli.manifest_dir, "artifacts/backfill");
         assert!(!cli.execute);
         assert_eq!(cli.download_concurrency, 8);
@@ -582,30 +543,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_zero_thumbnail_seek_for_production_run() {
-        let error = parse_cli_args(&[
-            "backfill-thumbnails".to_string(),
-            "run".to_string(),
-            "--scope".to_string(),
-            "prod-sfw-storj".to_string(),
-            "--cutoff-before".to_string(),
-            "2026-04-22T00:00:00Z".to_string(),
-            "--thumbnail-seek".to_string(),
-            "00:00:01".to_string(),
-        ])
-        .expect_err("expected parse rejection");
-
-        assert_eq!(error.kind(), ErrorKind::ValueValidation);
-        assert!(error.to_string().contains("thumbnail-seek"));
-    }
-
-    #[test]
     fn parses_seed_test_data_command_with_count_override() {
         let cli = parse_cli_args(&[
             "backfill-thumbnails".to_string(),
             "seed-test-data".to_string(),
             "--scope".to_string(),
-            "test-sfw-hetzner".to_string(),
+            "hetzner".to_string(),
             "--seed-count".to_string(),
             "5".to_string(),
             "--bucket".to_string(),
@@ -614,19 +557,19 @@ mod tests {
         .expect("cli parse");
 
         assert_eq!(cli.command, CommandKind::SeedTestData);
-        assert_eq!(cli.scope, Scope::TestSfwHetzner);
+        assert_eq!(cli.scope, Scope::Hetzner);
         assert_eq!(cli.seed_count, 5);
         assert_eq!(cli.bucket_override.as_deref(), Some("test-bucket"));
         assert_eq!(cli.thumbnail_seek, None);
     }
 
     #[test]
-    fn requires_explicit_bucket_for_test_hetzner_scope() {
+    fn requires_explicit_bucket_for_storj_scope() {
         let error = parse_cli_args(&[
             "backfill-thumbnails".to_string(),
             "run".to_string(),
             "--scope".to_string(),
-            "test-sfw-hetzner".to_string(),
+            "storj".to_string(),
             "--cutoff-before".to_string(),
             "2026-04-22T00:00:00Z".to_string(),
         ])
@@ -721,8 +664,7 @@ mod tests {
                 },
                 PlannedAction::SkipManifestDone {
                     video_key: "publisher/already-manifest.mp4".to_string(),
-                    staged_thumbnail_key: "publisher/already-manifest-thumbnail.png"
-                        .to_string(),
+                    staged_thumbnail_key: "publisher/already-manifest-thumbnail.png".to_string(),
                 },
                 PlannedAction::Process {
                     video_key: "publisher/to-process.mp4".to_string(),

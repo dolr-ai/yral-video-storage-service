@@ -86,7 +86,7 @@ jobs:
           set -euo pipefail
 
           ARGS=(
-            --scope prod-sfw-hetzner
+            --scope hetzner
             --cutoff-before "${{ inputs.cutoff_before }}"
             --manifest-dir artifacts/backfill
           )
@@ -178,7 +178,7 @@ jobs:
           set -euo pipefail
 
           ARGS=(
-            --scope prod-sfw-hetzner
+            --scope hetzner
             --cutoff-before "${{ inputs.cutoff_before }}"
             --manifest-dir artifacts/backfill
             --execute
