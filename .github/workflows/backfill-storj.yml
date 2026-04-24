@@ -39,6 +39,9 @@ concurrency:
   group: backfill-storj-${{ inputs.bucket }}-${{ inputs.command }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: "test · backfill-thumbnails"
