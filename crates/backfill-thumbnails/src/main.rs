@@ -27,6 +27,8 @@ struct CommandSummary {
     command: String,
     scope: String,
     bucket: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    cutoff: String,
     execute: bool,
     total_objects: usize,
     candidate_videos: usize,
@@ -165,7 +167,7 @@ async fn execute_run(
         .context("run command requires cutoff_before")?;
     let remote_staged_keys = objects
         .iter()
-        .filter(|object| object.key.ends_with("-bak-thumbnail.png"))
+        .filter(|object| object.key.ends_with("-thumbnail.png"))
         .map(|object| object.key.clone())
         .collect::<std::collections::HashSet<_>>();
     let videos = objects
@@ -191,6 +193,7 @@ async fn execute_run(
         command: cli.command.as_str().to_string(),
         scope: cli.scope.as_str().to_string(),
         bucket: backend.bucket_name().to_string(),
+        cutoff: cutoff.to_rfc3339(),
         execute: cli.execute,
         total_objects: objects.len(),
         candidate_videos: videos.len(),
@@ -319,7 +322,7 @@ async fn execute_verify(
         .context("verify command requires cutoff_before")?;
     let remote_staged_keys = objects
         .iter()
-        .filter(|object| object.key.ends_with("-bak-thumbnail.png"))
+        .filter(|object| object.key.ends_with("-thumbnail.png"))
         .map(|object| object.key.clone())
         .collect::<std::collections::HashSet<_>>();
 
@@ -354,6 +357,7 @@ async fn execute_verify(
         command: cli.command.as_str().to_string(),
         scope: cli.scope.as_str().to_string(),
         bucket: backend.bucket_name().to_string(),
+        cutoff: cutoff.to_rfc3339(),
         execute: false,
         total_objects: objects.len(),
         candidate_videos: candidates.len(),
@@ -435,7 +439,7 @@ async fn execute_audit(
         .context("audit command requires cutoff_before")?;
     let remote_staged_keys = objects
         .iter()
-        .filter(|object| object.key.ends_with("-bak-thumbnail.png"))
+        .filter(|object| object.key.ends_with("-thumbnail.png"))
         .map(|object| object.key.clone())
         .collect::<std::collections::HashSet<_>>();
     let videos = objects
@@ -501,6 +505,7 @@ async fn execute_audit(
         command: cli.command.as_str().to_string(),
         scope: cli.scope.as_str().to_string(),
         bucket: backend.bucket_name().to_string(),
+        cutoff: cutoff.to_rfc3339(),
         execute: false,
         total_objects: report.total_objects,
         candidate_videos: report.total_candidates_before_cutoff,
@@ -664,11 +669,12 @@ fn render_terminal_summary(summary: &CommandSummary) -> String {
             } else {
                 "dry-run"
             };
+            lines.push(format!("Cutoff: {}", summary.cutoff));
             lines.push(format!("Mode: {mode}"));
             lines.push(format!("Total objects: {}", summary.total_objects));
             lines.push(format!("Candidate videos: {}", summary.candidate_videos));
             lines.push(format!(
-                "Existing staged -bak-thumbnail.png: {}",
+                "Existing staged -thumbnail.png: {}",
                 summary.existing_staged_objects
             ));
             lines.push(format!("Planned process: {}", summary.planned_process));
@@ -688,20 +694,23 @@ fn render_terminal_summary(summary: &CommandSummary) -> String {
             }
         }
         "verify" => {
+            lines.push(format!("Cutoff: {}", summary.cutoff));
             lines.push(format!("Total objects: {}", summary.total_objects));
             lines.push(format!("Candidates checked: {}", summary.candidate_videos));
             lines.push(format!("PASS: {}", summary.verified_pass));
             lines.push(format!("FAIL: {}", summary.verified_fail));
             lines.push(format!("SKIP: {}", summary.verified_skip));
+            lines.push("Note: verify only checks videos that already have a staged thumbnail. Run audit to confirm remaining count.".to_string());
         }
         "audit" => {
+            lines.push(format!("Cutoff: {}", summary.cutoff));
             lines.push(format!("Total objects: {}", summary.total_objects));
             lines.push(format!(
                 "Candidate videos before cutoff: {}",
                 summary.candidate_videos
             ));
             lines.push(format!(
-                "Existing staged -bak-thumbnail.png: {}",
+                "Existing staged -thumbnail.png: {}",
                 summary.existing_staged_objects
             ));
             lines.push(format!("Manifest completed: {}", summary.completed));
@@ -796,7 +805,7 @@ mod tests {
             backend: BackendKind::Storj,
             bucket: "bucket-a".to_string(),
             source_video_key: "publisher/video-1.mp4".to_string(),
-            staged_thumbnail_key: "publisher/video-1-bak-thumbnail.png".to_string(),
+            staged_thumbnail_key: "publisher/video-1-thumbnail.png".to_string(),
             status: ManifestStatus::Completed,
         })
         .expect("serialize manifest entry");
@@ -886,7 +895,7 @@ mod tests {
         assert!(rendered.contains("Mode: execute"));
         assert!(rendered.contains("Completed: 4"));
         assert!(rendered.contains("Failed: 0"));
-        assert!(rendered.contains("Existing staged -bak-thumbnail.png: 1"));
+        assert!(rendered.contains("Existing staged -thumbnail.png: 1"));
     }
 
     #[test]
@@ -930,7 +939,7 @@ mod tests {
         let rendered = render_terminal_summary(&summary);
 
         assert!(rendered.contains("Candidate videos before cutoff: 5"));
-        assert!(rendered.contains("Existing staged -bak-thumbnail.png: 1"));
+        assert!(rendered.contains("Existing staged -thumbnail.png: 1"));
         assert!(rendered.contains("Manifest completed: 1"));
         assert!(rendered.contains("Remaining videos to backfill: 4"));
     }

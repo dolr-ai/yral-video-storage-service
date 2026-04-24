@@ -304,7 +304,21 @@ struct UplinkListRecord {
 fn parse_uplink_ls_json_output(stdout: &str) -> Vec<ObjectInfo> {
     stdout
         .lines()
-        .filter_map(parse_uplink_ls_json_line)
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            match parse_uplink_ls_json_line(trimmed) {
+                Some(info) => Some(info),
+                None => {
+                    if !trimmed.starts_with('{') {
+                        tracing::warn!(line = trimmed, "unexpected non-JSON line in uplink ls output — object may be missing from listing");
+                    }
+                    None
+                }
+            }
+        })
         .collect()
 }
 
@@ -332,12 +346,12 @@ mod tests {
     #[test]
     fn parses_standard_uplink_ls_json_output() {
         let objects = parse_uplink_ls_json_output(
-            "{\"kind\":\"OBJ\",\"created\":\"2026-04-21 12:34:56\",\"size\":123,\"key\":\"publisher/video-1.mp4\"}\n{\"kind\":\"OBJ\",\"created\":\"2026-04-21 12:34:57\",\"size\":456,\"key\":\"publisher/video-1-bak-thumbnail.png\"}\n",
+            "{\"kind\":\"OBJ\",\"created\":\"2026-04-21 12:34:56\",\"size\":123,\"key\":\"publisher/video-1.mp4\"}\n{\"kind\":\"OBJ\",\"created\":\"2026-04-21 12:34:57\",\"size\":456,\"key\":\"publisher/video-1-thumbnail.png\"}\n",
         );
 
         assert_eq!(objects.len(), 2);
         assert_eq!(objects[0].key, "publisher/video-1.mp4");
-        assert_eq!(objects[1].key, "publisher/video-1-bak-thumbnail.png");
+        assert_eq!(objects[1].key, "publisher/video-1-thumbnail.png");
     }
 
     #[test]
