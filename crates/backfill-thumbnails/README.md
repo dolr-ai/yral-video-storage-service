@@ -116,14 +116,61 @@ The manifest is append-only JSONL. A torn final line is ignored on reload, but i
 
 ## Examples
 
+Seed test data into a Storj test bucket:
+
+```sh
+cargo run -p backfill-thumbnails -- \
+  seed-test-data \
+  --scope test-sfw-storj \
+  --bucket your-test-bucket \
+  --manifest-dir artifacts/backfill
+```
+
+Audit a Storj test bucket (shows remote state, manifest counts, and remaining work):
+
+```sh
+cargo run -p backfill-thumbnails -- \
+  audit \
+  --scope test-sfw-storj \
+  --bucket your-test-bucket \
+  --cutoff-before 2026-04-22 \
+  --manifest-dir artifacts/backfill
+```
+
+Audit scoped to a specific folder prefix:
+
+```sh
+cargo run -p backfill-thumbnails -- \
+  audit \
+  --scope test-sfw-storj \
+  --bucket your-test-bucket \
+  --cutoff-before 2026-04-22 \
+  --manifest-dir artifacts/backfill \
+  --prefix some-user/
+```
+
 Dry-run a Storj test bucket:
 
 ```sh
 cargo run -p backfill-thumbnails -- \
   run \
   --scope test-sfw-storj \
+  --bucket your-test-bucket \
   --cutoff-before 2026-04-22 \
   --manifest-dir artifacts/backfill
+```
+
+Execute against a Storj test bucket scoped to a folder:
+
+```sh
+cargo run -p backfill-thumbnails -- \
+  run \
+  --scope test-sfw-storj \
+  --bucket your-test-bucket \
+  --cutoff-before 2026-04-22 \
+  --manifest-dir artifacts/backfill \
+  --prefix some-user/ \
+  --execute
 ```
 
 Execute against a Hetzner test bucket:
@@ -144,6 +191,7 @@ Verify a sample after a run:
 cargo run -p backfill-thumbnails -- \
   verify \
   --scope test-sfw-storj \
+  --bucket your-test-bucket \
   --cutoff-before 2026-04-22 \
   --manifest-dir artifacts/backfill \
   --verify-sample 25
