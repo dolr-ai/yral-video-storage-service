@@ -1,3 +1,4 @@
+pub mod consts;
 pub mod duplicate {
     use std::collections::BTreeMap;
 
@@ -22,6 +23,9 @@ pub mod duplicate {
         pub metadata: BTreeMap<String, String>,
     }
 }
+
+pub mod s3_client;
+pub mod thumbnail;
 
 pub mod move2nsfw {
     use serde::{Deserialize, Serialize};

@@ -3,6 +3,7 @@ use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, Config};
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -112,8 +113,20 @@ pub struct S3Client {
     bucket: String,
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct S3ObjectInfo {
+    pub key: String,
+    pub last_modified: Option<DateTime<Utc>>,
+    pub size: Option<i64>,
+}
+
 impl S3Client {
     pub async fn new() -> Self {
+        Self::new_with_bucket(None).await
+    }
+
+    pub async fn new_with_bucket(bucket_override: Option<String>) -> Self {
         let creds = Credentials::new(
             HETZNER_S3_ACCESS_KEY.as_str(),
             HETZNER_S3_SECRET_KEY.as_str(),
@@ -134,7 +147,7 @@ impl S3Client {
 
         Self {
             client,
-            bucket: HETZNER_S3_BUCKET.clone(),
+            bucket: bucket_override.unwrap_or_else(|| HETZNER_S3_BUCKET.clone()),
         }
     }
 
@@ -252,6 +265,110 @@ impl S3Client {
                     .content_type("image/png")
                     .send()
                     .await?;
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    #[allow(dead_code)]
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    #[allow(dead_code)]
+    pub async fn list_objects(&self, prefix: Option<&str>) -> Result<Vec<S3ObjectInfo>, String> {
+        let mut items = Vec::new();
+        let mut continuation_token = None;
+
+        loop {
+            let mut request = self.client.list_objects_v2().bucket(&self.bucket);
+            if let Some(prefix) = prefix {
+                request = request.prefix(prefix);
+            }
+            if let Some(token) = continuation_token.as_deref() {
+                request = request.continuation_token(token);
+            }
+
+            let response = request.send().await.map_err(|err| err.to_string())?;
+
+            for object in response.contents() {
+                let Some(key) = object.key() else {
+                    continue;
+                };
+                let last_modified = object
+                    .last_modified()
+                    .and_then(|value| DateTime::<Utc>::from_timestamp(value.secs(), 0));
+                items.push(S3ObjectInfo {
+                    key: key.to_string(),
+                    last_modified,
+                    size: object.size(),
+                });
+            }
+
+            continuation_token = response.next_continuation_token().map(ToOwned::to_owned);
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+
+        Ok(items)
+    }
+
+    #[allow(dead_code)]
+    pub async fn object_exists(&self, key: &str) -> Result<bool, String> {
+        match self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(err) => {
+                let message = err.to_string();
+                if message.contains("NotFound") || message.contains("404") {
+                    Ok(false)
+                } else {
+                    Err(message)
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub async fn download_object(&self, key: &str) -> Result<Vec<u8>, String> {
+        retry_s3_op_string("download_object", key, || async {
+            let resp = self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let data = resp.body.collect().await.map_err(|e| e.to_string())?;
+            Ok(data.into_bytes().to_vec())
+        })
+        .await
+    }
+
+    #[allow(dead_code)]
+    pub async fn upload_png_object(&self, key: &str, data: Vec<u8>) -> Result<(), String> {
+        retry_s3_op_string("upload_png_object", key, || {
+            let body = ByteStream::from(data.clone());
+            async move {
+                self.client
+                    .put_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .body(body)
+                    .content_type("image/png")
+                    .send()
+                    .await
+                    .map_err(|err| err.to_string())?;
                 Ok(())
             }
         })
