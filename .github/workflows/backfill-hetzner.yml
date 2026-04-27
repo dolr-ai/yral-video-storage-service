@@ -1,12 +1,17 @@
 name: Backfill Thumbnails — Hetzner
 
-# Generates <video_id>-thumbnail.png for historical videos in the Hetzner SFW bucket.
-# Bucket is resolved from the HETZNER_S3_BUCKET secret.
+# Generates <video_id>-thumbnail.png for historical videos in a Hetzner S3 bucket.
+# Bucket is resolved from the optional input, falling back to HETZNER_S3_BUCKET secret.
 # Execute requires Production environment approval. All other commands are read-only.
 
 on:
   workflow_dispatch:
     inputs:
+      bucket:
+        description: "Hetzner S3 bucket name (optional — defaults to HETZNER_S3_BUCKET secret)"
+        required: false
+        type: string
+        default: ""
       command:
         description: "Command to run"
         required: true
@@ -32,7 +37,7 @@ on:
         default: "50"
 
 concurrency:
-  group: backfill-hetzner-${{ inputs.command }}
+  group: backfill-hetzner-${{ inputs.bucket || 'default' }}-${{ inputs.command }}
   cancel-in-progress: false
 
 permissions:
@@ -80,7 +85,7 @@ jobs:
       - name: Run ${{ inputs.command }}
         env:
           HETZNER_S3_ENDPOINT: ${{ secrets.HETZNER_S3_ENDPOINT }}
-          HETZNER_S3_BUCKET: ${{ secrets.HETZNER_S3_BUCKET }}
+          HETZNER_S3_BUCKET: ${{ inputs.bucket || secrets.HETZNER_S3_BUCKET }}
           HETZNER_S3_ACCESS_KEY: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
           HETZNER_S3_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
           HETZNER_S3_REGION: ${{ secrets.HETZNER_S3_REGION }}
@@ -105,15 +110,19 @@ jobs:
       - name: Write job summary
         if: always()
         run: |
+          RESOLVED_BUCKET="${{ inputs.bucket || '(from secret)' }}"
           {
             echo "## Backfill Hetzner — ${{ inputs.command }}"
             echo ""
+            echo "### Inputs"
             echo "| Input | Value |"
             echo "|-------|-------|"
-            echo "| Bucket | from \`HETZNER_S3_BUCKET\` secret |"
+            echo "| Bucket | \`${RESOLVED_BUCKET}\` |"
+            echo "| Source | ${{ inputs.bucket && 'workflow input' || 'HETZNER_S3_BUCKET secret' }} |"
             echo "| Command | \`${{ inputs.command }}\` |"
             echo "| Cutoff | \`${{ inputs.cutoff_before }}\` |"
             echo "| Prefix | \`${{ inputs.prefix || '(none)' }}\` |"
+            echo "| Verify Sample | \`${{ inputs.verify_sample }}\` |"
             echo ""
             if [[ -s /tmp/bf-output.txt ]]; then
               echo "### Results"
@@ -172,7 +181,7 @@ jobs:
       - name: Execute backfill run
         env:
           HETZNER_S3_ENDPOINT: ${{ secrets.HETZNER_S3_ENDPOINT }}
-          HETZNER_S3_BUCKET: ${{ secrets.HETZNER_S3_BUCKET }}
+          HETZNER_S3_BUCKET: ${{ inputs.bucket || secrets.HETZNER_S3_BUCKET }}
           HETZNER_S3_ACCESS_KEY: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
           HETZNER_S3_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
           HETZNER_S3_REGION: ${{ secrets.HETZNER_S3_REGION }}
@@ -193,12 +202,15 @@ jobs:
       - name: Write job summary
         if: always()
         run: |
+          RESOLVED_BUCKET="${{ inputs.bucket || '(from secret)' }}"
           {
             echo "## Backfill Hetzner — Execute"
             echo ""
+            echo "### Inputs"
             echo "| Input | Value |"
             echo "|-------|-------|"
-            echo "| Bucket | from \`HETZNER_S3_BUCKET\` secret |"
+            echo "| Bucket | \`${RESOLVED_BUCKET}\` |"
+            echo "| Source | ${{ inputs.bucket && 'workflow input' || 'HETZNER_S3_BUCKET secret' }} |"
             echo "| Cutoff | \`${{ inputs.cutoff_before }}\` |"
             echo "| Prefix | \`${{ inputs.prefix || '(none)' }}\` |"
             echo ""
