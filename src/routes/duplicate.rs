@@ -20,52 +20,9 @@ const PENDING_UPLOAD_TTL_HOURS: u32 = 1;
 /// Extract a thumbnail from video data using ffmpeg
 /// Uses a temp file so ffmpeg can seek (pipe input fails for videos with moov atom at end)
 pub async fn extract_thumbnail(video_data: &[u8]) -> Result<Vec<u8>, Error> {
-    let temp_dir = tempfile::tempdir().map_err(Error::Io)?;
-    let input_path = temp_dir.path().join("input.mp4");
-    let output_path = temp_dir.path().join("thumbnail.png");
-
-    tokio::fs::write(&input_path, video_data).await?;
-
-    run_ffmpeg_first_frame(&input_path, &output_path).await?;
-
-    let thumbnail = tokio::fs::read(&output_path).await?;
-    Ok(thumbnail)
-}
-
-async fn run_ffmpeg_first_frame(
-    input: &std::path::Path,
-    output: &std::path::Path,
-) -> Result<(), Error> {
-    let output_proc = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-i",
-            input.to_str().ok_or_else(|| io_err("Invalid input path"))?,
-            "-vframes",
-            "1",
-            "-f",
-            "image2",
-            output
-                .to_str()
-                .ok_or_else(|| io_err("Invalid output path"))?,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?
-        .wait_with_output()
-        .await?;
-
-    if !output_proc.status.success() || !tokio::fs::try_exists(output).await.unwrap_or(false) {
-        let stderr = String::from_utf8_lossy(&output_proc.stderr);
-        tracing::error!("ffmpeg failed: {stderr}");
-        return Err(Error::Io(io_err("Thumbnail extraction failed")));
-    }
-
-    Ok(())
-}
-
-fn io_err(msg: &str) -> std::io::Error {
-    std::io::Error::other(msg)
+    crate::thumbnail::extract_thumbnail(video_data)
+        .await
+        .map_err(Error::Io)
 }
 
 /// Upload a thumbnail to Storj

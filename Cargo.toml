@@ -3,6 +3,9 @@ name = "storj-interface"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+members = [".", "crates/backfill-thumbnails"]
+
 [lib]
 name = "storj_interface"
 path = "src/lib.rs"

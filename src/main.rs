@@ -26,6 +26,7 @@ pub(crate) mod consts;
 mod routes;
 mod s3_client;
 pub(crate) mod sentry_utils;
+mod thumbnail;
 
 fn main() {
     // Initialize Sentry
