@@ -163,7 +163,7 @@ jobs:
     if: ${{ inputs.command == 'execute' }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
-    environment: Production
+    environment: Deployment
 
     steps:
       - uses: actions/checkout@v4
