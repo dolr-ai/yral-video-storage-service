@@ -90,6 +90,16 @@ jobs:
       - name: Build (release)
         run: cargo build --release -p backfill-thumbnails
 
+      - name: Debug uplink listing
+        env:
+          STORJ_ACCESS_GRANT: ${{ secrets.STORJ_ACCESS_GRANT }}
+        run: |
+          TARGET="sj://${{ inputs.bucket }}"
+          [[ -n "${{ inputs.prefix }}" ]] && TARGET="${TARGET}/${{ inputs.prefix }}"
+          echo "Listing: ${TARGET}"
+          uplink ls -r --utc -o json --analytics=false --interactive=false \
+            --access "${STORJ_ACCESS_GRANT}" "${TARGET}" | head -5 || true
+
       - name: Run ${{ inputs.command }}
         env:
           STORJ_ACCESS_GRANT: ${{ secrets.STORJ_ACCESS_GRANT }}
@@ -187,6 +197,16 @@ jobs:
 
       - name: Build (release)
         run: cargo build --release -p backfill-thumbnails
+
+      - name: Debug uplink listing
+        env:
+          STORJ_ACCESS_GRANT: ${{ secrets.STORJ_ACCESS_GRANT }}
+        run: |
+          TARGET="sj://${{ inputs.bucket }}"
+          [[ -n "${{ inputs.prefix }}" ]] && TARGET="${TARGET}/${{ inputs.prefix }}"
+          echo "Listing: ${TARGET}"
+          uplink ls -r --utc -o json --analytics=false --interactive=false \
+            --access "${STORJ_ACCESS_GRANT}" "${TARGET}" | head -5 || true
 
       - name: Execute backfill run
         env:
