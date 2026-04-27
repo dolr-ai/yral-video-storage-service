@@ -295,9 +295,7 @@ fn parse_uplink_ls_json_line(line: &str) -> Result<Option<ObjectInfo>, &'static 
         return Ok(None);
     }
 
-    let last_modified = NaiveDateTime::parse_from_str(&record.created, "%Y-%m-%d %H:%M:%S")
-        .map(|value| DateTime::<Utc>::from_naive_utc_and_offset(value, Utc))
-        .map_err(|_| "unparseable timestamp")?;
+    let last_modified = parse_uplink_timestamp(&record.created).ok_or("unparseable timestamp")?;
 
     Ok(Some(ObjectInfo {
         key: record.key,
@@ -305,9 +303,26 @@ fn parse_uplink_ls_json_line(line: &str) -> Result<Option<ObjectInfo>, &'static 
     }))
 }
 
+fn parse_uplink_timestamp(created: &str) -> Option<DateTime<Utc>> {
+    // "2026-04-21 12:34:56" — standard uplink ls -o json output
+    if let Ok(dt) = NaiveDateTime::parse_from_str(created, "%Y-%m-%d %H:%M:%S") {
+        return Some(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+    }
+    // "2026-04-21 12:34:56 UTC" — uplink ls --utc -o json may append " UTC"
+    let stripped = created.strip_suffix(" UTC").unwrap_or(created);
+    if let Ok(dt) = NaiveDateTime::parse_from_str(stripped, "%Y-%m-%d %H:%M:%S") {
+        return Some(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+    }
+    // RFC 3339 fallback: "2026-04-21T12:34:56Z"
+    if let Ok(dt) = DateTime::parse_from_rfc3339(created) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_uplink_ls_json_output;
+    use super::{parse_uplink_ls_json_output, parse_uplink_timestamp};
 
     #[test]
     fn parses_standard_uplink_ls_json_output() {
@@ -318,6 +333,22 @@ mod tests {
         assert_eq!(objects.len(), 2);
         assert_eq!(objects[0].key, "publisher/video-1.mp4");
         assert_eq!(objects[1].key, "publisher/video-1-thumbnail.png");
+    }
+
+    #[test]
+    fn parses_utc_suffix_timestamp_from_uplink_utc_flag() {
+        let objects = parse_uplink_ls_json_output(
+            "{\"kind\":\"OBJ\",\"created\":\"2026-04-21 12:34:56 UTC\",\"size\":123,\"key\":\"publisher/video-1.mp4\"}\n",
+        );
+
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].key, "publisher/video-1.mp4");
+    }
+
+    #[test]
+    fn parses_rfc3339_timestamp_fallback() {
+        let ts = parse_uplink_timestamp("2026-04-21T12:34:56Z");
+        assert!(ts.is_some());
     }
 
     #[test]
