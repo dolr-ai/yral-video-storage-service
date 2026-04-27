@@ -536,12 +536,17 @@ async fn execute_seed_test_data(
         .await
         .context("generate old-style thumbnail from second frame")?;
 
+    let folder = cli
+        .prefix
+        .as_deref()
+        .unwrap_or("test-user")
+        .trim_end_matches('/');
+
     let mut seeded = 0usize;
     for index in 1..=cli.seed_count {
         let video_id = format!("seed-video-{}-{index}", Utc::now().timestamp());
-        let publisher = "test-user";
-        let video_key = format!("{publisher}/{video_id}.mp4");
-        let thumbnail_key = format!("{publisher}/{video_id}_thumbnail.png");
+        let video_key = format!("{folder}/{video_id}.mp4");
+        let thumbnail_key = format!("{folder}/{video_id}_thumbnail.png");
 
         backend.upload_video(&video_key, video_data.clone()).await?;
         backend
