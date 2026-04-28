@@ -15,6 +15,19 @@ use crate::consts::{
 const MAX_RETRIES: u32 = 3;
 const BASE_DELAY_MS: u64 = 500;
 
+fn fmt_sdk_err<E: std::fmt::Display>(err: &aws_sdk_s3::error::SdkError<E>) -> String {
+    use aws_sdk_s3::error::SdkError;
+    if let SdkError::ServiceError(se) = err {
+        format!(
+            "service error (HTTP {}): {}",
+            se.raw().status().as_u16(),
+            se.err()
+        )
+    } else {
+        err.to_string()
+    }
+}
+
 async fn retry_s3_op<F, Fut, T>(
     operation_name: &str,
     key: &str,
@@ -228,7 +241,7 @@ impl S3Client {
                 .key(key)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| fmt_sdk_err(&e))?;
 
             let data = resp.body.collect().await.map_err(|e| e.to_string())?;
             Ok(data.into_bytes().to_vec())
@@ -290,18 +303,7 @@ impl S3Client {
                 request = request.continuation_token(token);
             }
 
-            let response = request.send().await.map_err(|err| {
-                use aws_sdk_s3::error::SdkError;
-                if let SdkError::ServiceError(se) = &err {
-                    format!(
-                        "service error (HTTP {}): {}",
-                        se.raw().status().as_u16(),
-                        se.err()
-                    )
-                } else {
-                    err.to_string()
-                }
-            })?;
+            let response = request.send().await.map_err(|e| fmt_sdk_err(&e))?;
 
             for object in response.contents() {
                 let Some(key) = object.key() else {
@@ -338,7 +340,7 @@ impl S3Client {
         {
             Ok(_) => Ok(true),
             Err(err) => {
-                let message = err.to_string();
+                let message = fmt_sdk_err(&err);
                 if message.contains("NotFound") || message.contains("404") {
                     Ok(false)
                 } else {
@@ -358,7 +360,7 @@ impl S3Client {
                 .key(key)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| fmt_sdk_err(&e))?;
 
             let data = resp.body.collect().await.map_err(|e| e.to_string())?;
             Ok(data.into_bytes().to_vec())
@@ -379,7 +381,7 @@ impl S3Client {
                     .content_type("image/png")
                     .send()
                     .await
-                    .map_err(|err| err.to_string())?;
+                    .map_err(|err| fmt_sdk_err(&err))?;
                 Ok(())
             }
         })
@@ -395,7 +397,7 @@ impl S3Client {
                 .key(key)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| fmt_sdk_err(&e))?;
 
             let data = resp.body.collect().await.map_err(|e| e.to_string())?;
             Ok(data.into_bytes().to_vec())
