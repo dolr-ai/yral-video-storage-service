@@ -71,8 +71,14 @@ async fn upload_thumbnail_to_storj(
         .stderr(Stdio::piped())
         .spawn()?;
 
-    let mut pipe_under = child_under.stdin.take().expect("Stdin pipe to be opened for us");
-    let mut pipe_dash = child_dash.stdin.take().expect("Stdin pipe to be opened for us");
+    let mut pipe_under = child_under
+        .stdin
+        .take()
+        .expect("Stdin pipe to be opened for us");
+    let mut pipe_dash = child_dash
+        .stdin
+        .take()
+        .expect("Stdin pipe to be opened for us");
 
     tokio::try_join!(
         async move {
@@ -157,8 +163,14 @@ async fn upload_thumbnail_to_storj_with_ttl(
         .stderr(Stdio::piped())
         .spawn()?;
 
-    let mut pipe_under = child_under.stdin.take().expect("Stdin pipe to be opened for us");
-    let mut pipe_dash = child_dash.stdin.take().expect("Stdin pipe to be opened for us");
+    let mut pipe_under = child_under
+        .stdin
+        .take()
+        .expect("Stdin pipe to be opened for us");
+    let mut pipe_dash = child_dash
+        .stdin
+        .take()
+        .expect("Stdin pipe to be opened for us");
 
     tokio::try_join!(
         async move {
@@ -209,9 +221,7 @@ async fn upload_thumbnail_to_s3(
 
     for r in [r_under, r_dash] {
         r.map_err(|e| {
-            tracing::warn!(
-                "S3 thumbnail upload error for {publisher_user_id}/{video_id}: {e:?}"
-            );
+            tracing::warn!("S3 thumbnail upload error for {publisher_user_id}/{video_id}: {e:?}");
             Error::S3(format!("{e:?}"))
         })?;
     }

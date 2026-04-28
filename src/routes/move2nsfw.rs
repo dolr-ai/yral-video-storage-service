@@ -176,7 +176,10 @@ pub async fn handler(
     if let Some(ref thumbnail_data) = thumbnail_data {
         for (storj_thumbnail_key, thumbnail_dest) in [
             (
-                format!("{}/{}_thumbnail.png", request.publisher_user_id, request.video_id),
+                format!(
+                    "{}/{}_thumbnail.png",
+                    request.publisher_user_id, request.video_id
+                ),
                 format!(
                     "sj://{}/{}/{}_thumbnail.png",
                     YRAL_NSFW_VIDEOS.as_str(),
@@ -185,7 +188,10 @@ pub async fn handler(
                 ),
             ),
             (
-                format!("{}/{}-thumbnail.png", request.publisher_user_id, request.video_id),
+                format!(
+                    "{}/{}-thumbnail.png",
+                    request.publisher_user_id, request.video_id
+                ),
                 format!(
                     "sj://{}/{}/{}-thumbnail.png",
                     YRAL_NSFW_VIDEOS.as_str(),
@@ -225,7 +231,9 @@ pub async fn handler(
             let status = child.wait().await?;
 
             if !status.success() {
-                tracing::warn!("Failed to upload thumbnail to Storj NSFW bucket, continuing anyway");
+                tracing::warn!(
+                    "Failed to upload thumbnail to Storj NSFW bucket, continuing anyway"
+                );
                 breadcrumb!(
                     "storj",
                     "upload_thumbnail_nsfw",
