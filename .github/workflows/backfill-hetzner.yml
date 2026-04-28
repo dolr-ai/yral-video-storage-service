@@ -35,6 +35,11 @@ on:
         required: false
         type: string
         default: "50"
+      ffmpeg_concurrency:
+        description: "Parallel ffmpeg workers for execute (default 2, max ~4 on ubuntu-latest)"
+        required: false
+        type: string
+        default: "2"
 
 concurrency:
   group: backfill-hetzner-${{ inputs.bucket || 'default' }}-${{ inputs.command }}
@@ -102,7 +107,8 @@ jobs:
 
           case "${{ inputs.command }}" in
             audit)    ./target/release/backfill-thumbnails audit "${ARGS[@]}" ;;
-            dry-run)  ./target/release/backfill-thumbnails run   "${ARGS[@]}" ;;
+            dry-run)  ./target/release/backfill-thumbnails run   "${ARGS[@]}" \
+                        --ffmpeg-concurrency "${{ inputs.ffmpeg_concurrency }}" ;;
             verify)   ./target/release/backfill-thumbnails verify \
                         --verify-sample "${{ inputs.verify_sample }}" "${ARGS[@]}" ;;
           esac 2>&1 | tee /tmp/bf-output.txt
@@ -123,6 +129,7 @@ jobs:
             echo "| Cutoff | \`${{ inputs.cutoff_before }}\` |"
             echo "| Prefix | \`${{ inputs.prefix || '(none)' }}\` |"
             echo "| Verify Sample | \`${{ inputs.verify_sample }}\` |"
+            echo "| FFmpeg Concurrency | \`${{ inputs.ffmpeg_concurrency }}\` |"
             echo ""
             if [[ -s /tmp/bf-output.txt ]]; then
               echo "### Results"
@@ -194,6 +201,7 @@ jobs:
             --cutoff-before "${{ inputs.cutoff_before }}"
             --manifest-dir artifacts/backfill
             --execute
+            --ffmpeg-concurrency "${{ inputs.ffmpeg_concurrency }}"
           )
           [[ -n "${{ inputs.prefix }}" ]] && ARGS+=(--prefix "${{ inputs.prefix }}")
 
@@ -213,6 +221,7 @@ jobs:
             echo "| Source | ${{ inputs.bucket && 'workflow input' || 'HETZNER_S3_BUCKET secret' }} |"
             echo "| Cutoff | \`${{ inputs.cutoff_before }}\` |"
             echo "| Prefix | \`${{ inputs.prefix || '(none)' }}\` |"
+            echo "| FFmpeg Concurrency | \`${{ inputs.ffmpeg_concurrency }}\` |"
             echo ""
             if [[ -s /tmp/bf-output.txt ]]; then
               echo "### Results"
