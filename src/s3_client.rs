@@ -290,7 +290,18 @@ impl S3Client {
                 request = request.continuation_token(token);
             }
 
-            let response = request.send().await.map_err(|err| err.to_string())?;
+            let response = request.send().await.map_err(|err| {
+                use aws_sdk_s3::error::SdkError;
+                if let SdkError::ServiceError(se) = &err {
+                    format!(
+                        "service error (HTTP {}): {}",
+                        se.raw().status().as_u16(),
+                        se.err()
+                    )
+                } else {
+                    err.to_string()
+                }
+            })?;
 
             for object in response.contents() {
                 let Some(key) = object.key() else {
