@@ -167,7 +167,7 @@ jobs:
     needs: [test]
     if: ${{ inputs.command == 'execute' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 360
     environment: Production
 
     steps:
