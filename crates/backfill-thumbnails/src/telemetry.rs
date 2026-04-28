@@ -14,9 +14,26 @@ pub fn init_sentry() -> sentry::ClientInitGuard {
     ))
 }
 
-/// Spawns a background task that listens for SIGTERM and flushes Sentry before exiting.
-/// GitHub Actions sends SIGTERM on timeout/cancellation before SIGKILL, giving us a
-/// short window to ship buffered events.
+/// Ignore SIGPIPE so the binary survives a broken pipe (e.g. when the bash shell in the
+/// GitHub Actions pipeline exits) long enough to flush Sentry before we exit ourselves.
+pub fn ignore_sigpipe() {
+    // SAFETY: zeroed sigaction is valid; SIG_IGN is a defined disposition; sa_mask and
+    // sa_flags are explicitly initialized. sigaction is preferred over signal() for
+    // consistent semantics across platforms. Process-wide effect is intentional — we
+    // want write errors (EPIPE) instead of abrupt termination so SIGHUP/SIGTERM handlers
+    // can flush Sentry before exit.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = libc::SIG_IGN;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = 0;
+        libc::sigaction(libc::SIGPIPE, &sa, std::ptr::null_mut());
+    }
+}
+
+/// Spawns a background task that listens for SIGTERM/SIGHUP and flushes Sentry before
+/// exiting. GitHub Actions kills the bash step with SIGTERM; the binary in the pipeline
+/// then gets SIGHUP when the shell exits. We handle both so Sentry always gets the event.
 pub fn spawn_sigterm_flush() {
     tokio::spawn(async move {
         use tokio::signal::unix::{signal, SignalKind};
@@ -28,9 +45,19 @@ pub fn spawn_sigterm_flush() {
                 return;
             }
         };
+        let mut sighup = match signal(SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!("failed to register SIGHUP handler: {err}");
+                return;
+            }
+        };
 
-        sigterm.recv().await;
-        tracing::error!("SIGTERM received — process killed by runner (timeout or cancellation)");
+        let sig = tokio::select! {
+            _ = sigterm.recv() => "SIGTERM",
+            _ = sighup.recv()  => "SIGHUP",
+        };
+        tracing::error!("process killed by runner ({sig}) — flushing Sentry before exit");
         flush_sentry();
         std::process::exit(143);
     });

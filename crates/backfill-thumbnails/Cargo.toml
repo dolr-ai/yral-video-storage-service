@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.97"
+libc = "0.2"
 chrono = "0.4"
 clap = { version = "4.5.31", features = ["derive"] }
 image = { version = "0.25.6", default-features = false, features = ["png"] }
