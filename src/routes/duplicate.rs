@@ -965,3 +965,148 @@ mod tests {
         )
     }
 }
+
+/// Integration tests for dual-name thumbnail uploads.
+///
+/// Storj:
+///   STORJ_ACCESS_GRANT=... TEST_BUCKET=... \
+///   cargo test -p storj-interface --bin storj-interface -- --ignored storj_both_thumbnail_names
+///
+/// Hetzner S3:
+///   HETZNER_S3_ENDPOINT=... HETZNER_S3_BUCKET=... \
+///   HETZNER_S3_ACCESS_KEY=... HETZNER_S3_SECRET_KEY=... HETZNER_S3_REGION=... \
+///   cargo test -p storj-interface --bin storj-interface -- --ignored hetzner_both_thumbnail_names
+#[cfg(test)]
+mod integration_tests {
+    use super::{upload_thumbnail_to_s3, upload_thumbnail_to_storj};
+    use crate::s3_client::S3Client;
+    use tokio::process::Command;
+
+    /// Generate a real 16×16 red PNG using ffmpeg (stdout).
+    async fn generate_test_png() -> Vec<u8> {
+        let out = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=16x16:d=1:r=1",
+                "-vframes",
+                "1",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "png",
+                "-",
+            ])
+            .output()
+            .await
+            .expect("ffmpeg must be installed");
+        assert!(
+            out.status.success(),
+            "ffmpeg failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    // # Storj
+    // export $(grep -v '^#' .env | xargs)
+    // cargo test -p storj-interface --bin storj-interface -- --ignored storj_both_thumbnail_names
+    #[tokio::test]
+    #[ignore = "integration: requires STORJ_ACCESS_GRANT and TEST_BUCKET env vars"]
+    async fn storj_both_thumbnail_names_uploaded() {
+        let grant = std::env::var("STORJ_ACCESS_GRANT").expect("STORJ_ACCESS_GRANT must be set");
+        let bucket = std::env::var("TEST_BUCKET").expect("TEST_BUCKET must be set");
+
+        // SAFETY: this test runs alone (--ignored) so no other thread races on env.
+        unsafe {
+            std::env::set_var("STORJ_ACCESS_GRANT_SFW", &grant);
+            std::env::set_var("SFW_BUCKET", &bucket);
+        }
+
+        let thumbnail = generate_test_png().await;
+        let video_id = format!("test-storj-{}", chrono::Utc::now().timestamp_millis());
+        let publisher = "integration-test";
+
+        upload_thumbnail_to_storj(publisher, &video_id, &thumbnail, false)
+            .await
+            .expect("Storj upload failed");
+
+        for suffix in ["_thumbnail.png", "-thumbnail.png"] {
+            let path = format!("sj://{bucket}/{publisher}/{video_id}{suffix}");
+            let out = Command::new("uplink")
+                .args([
+                    "cp",
+                    "--interactive=false",
+                    "--analytics=false",
+                    "--progress=false",
+                    "--access",
+                    &grant,
+                    &path,
+                    "-",
+                ])
+                .output()
+                .await
+                .expect("uplink cp");
+            assert!(
+                out.status.success(),
+                "{path} not found in Storj: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                out.stdout, thumbnail,
+                "{path}: downloaded bytes differ from uploaded PNG"
+            );
+        }
+
+        // Clean up
+        for suffix in ["_thumbnail.png", "-thumbnail.png"] {
+            Command::new("uplink")
+                .args([
+                    "rm",
+                    "--access",
+                    &grant,
+                    &format!("sj://{bucket}/{publisher}/{video_id}{suffix}"),
+                ])
+                .status()
+                .await
+                .ok();
+        }
+    }
+
+    // # Hetzner S3
+    // export $(grep -v '^#' .env | xargs)
+    // cargo test -p storj-interface --bin storj-interface -- --ignored hetzner_both_thumbnail_names
+    #[tokio::test]
+    #[ignore = "integration: requires HETZNER_S3_ENDPOINT, HETZNER_S3_BUCKET, HETZNER_S3_ACCESS_KEY, HETZNER_S3_SECRET_KEY, HETZNER_S3_REGION env vars"]
+    async fn hetzner_both_thumbnail_names_uploaded() {
+        let video_id = format!("test-hetzner-{}", chrono::Utc::now().timestamp_millis());
+        let publisher = "integration-test";
+
+        let s3_client = S3Client::new().await;
+        let thumbnail = generate_test_png().await;
+
+        upload_thumbnail_to_s3(&s3_client, publisher, &video_id, &thumbnail)
+            .await
+            .expect("S3 upload failed");
+
+        for suffix in ["_thumbnail.png", "-thumbnail.png"] {
+            let key = format!("{publisher}/{video_id}{suffix}");
+            let downloaded = s3_client
+                .download_thumbnail(&key)
+                .await
+                .unwrap_or_else(|e| panic!("{key} not found in Hetzner S3: {e}"));
+            assert_eq!(
+                downloaded, thumbnail,
+                "{key}: downloaded bytes differ from uploaded PNG"
+            );
+        }
+
+        // Clean up
+        for suffix in ["_thumbnail.png", "-thumbnail.png"] {
+            let key = format!("{publisher}/{video_id}{suffix}");
+            s3_client.delete_thumbnail(&key).await.ok();
+        }
+    }
+}
