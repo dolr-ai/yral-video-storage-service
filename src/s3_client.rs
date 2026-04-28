@@ -292,18 +292,12 @@ impl S3Client {
     #[allow(dead_code)]
     pub async fn list_objects(&self, prefix: Option<&str>) -> Result<Vec<S3ObjectInfo>, String> {
         let mut items = Vec::new();
-        let mut continuation_token = None;
+        let mut continuation_token: Option<String> = None;
 
         loop {
-            let mut request = self.client.list_objects_v2().bucket(&self.bucket);
-            if let Some(prefix) = prefix {
-                request = request.prefix(prefix);
-            }
-            if let Some(token) = continuation_token.as_deref() {
-                request = request.continuation_token(token);
-            }
-
-            let response = request.send().await.map_err(|e| fmt_sdk_err(&e))?;
+            let response = self
+                .list_objects_page(prefix, continuation_token.as_deref())
+                .await?;
 
             for object in response.contents() {
                 let Some(key) = object.key() else {
@@ -326,6 +320,54 @@ impl S3Client {
         }
 
         Ok(items)
+    }
+
+    async fn list_objects_page(
+        &self,
+        prefix: Option<&str>,
+        continuation_token: Option<&str>,
+    ) -> Result<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output, String> {
+        let mut last_err = String::new();
+
+        for attempt in 0..=MAX_RETRIES {
+            let mut request = self.client.list_objects_v2().bucket(&self.bucket);
+            if let Some(p) = prefix {
+                request = request.prefix(p);
+            }
+            if let Some(token) = continuation_token {
+                request = request.continuation_token(token);
+            }
+
+            match request.send().await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    last_err = fmt_sdk_err(&e);
+                    if attempt < MAX_RETRIES {
+                        let delay_ms = BASE_DELAY_MS * 2u64.pow(attempt);
+                        let jitter = (std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .subsec_nanos()
+                            % 250) as u64;
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_retries = MAX_RETRIES,
+                            delay_ms = delay_ms + jitter,
+                            error = %last_err,
+                            "list_objects page failed, retrying"
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms + jitter)).await;
+                    }
+                }
+            }
+        }
+
+        tracing::error!(
+            attempts = MAX_RETRIES + 1,
+            error = %last_err,
+            "list_objects page failed after all retries"
+        );
+        Err(last_err)
     }
 
     #[allow(dead_code)]
