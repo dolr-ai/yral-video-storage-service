@@ -601,6 +601,8 @@ dependencies = [
  "chrono",
  "clap",
  "image",
+ "sentry",
+ "sentry-tracing",
  "serde",
  "serde_json",
  "storj-interface",
