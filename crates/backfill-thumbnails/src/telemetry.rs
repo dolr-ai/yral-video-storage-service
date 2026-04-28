@@ -30,7 +30,7 @@ pub fn spawn_sigterm_flush() {
         };
 
         sigterm.recv().await;
-        tracing::warn!("SIGTERM received — flushing Sentry before exit");
+        tracing::error!("SIGTERM received — process killed by runner (timeout or cancellation)");
         flush_sentry();
         std::process::exit(143);
     });

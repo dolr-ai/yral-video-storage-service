@@ -28,6 +28,7 @@ pub async fn execute_run(
     failures_path: &Path,
     append_lock: Arc<Mutex<()>>,
 ) -> Result<CommandSummary> {
+    tracing::warn!(scope = %cli.scope.as_str(), bucket = %backend.bucket_name(), "listing objects");
     let objects = backend.list_objects(cli.prefix.as_deref()).await?;
     let cutoff = cli
         .cutoff_before
@@ -77,6 +78,15 @@ pub async fn execute_run(
             PlannedAction::SkipManifestDone { .. } => summary.skip_manifest_done += 1,
         }
     }
+
+    tracing::warn!(
+        total_objects = objects.len(),
+        candidate_videos = summary.candidate_videos,
+        planned_process = summary.planned_process,
+        skip_remote_exists = summary.skip_remote_exists,
+        skip_manifest_done = summary.skip_manifest_done,
+        "listing complete"
+    );
 
     if !cli.execute {
         summary.dry_run = summary.planned_process;
@@ -172,12 +182,23 @@ pub async fn execute_run(
         });
     }
 
+    let mut last_logged = std::time::Instant::now();
     while let Some(result) = join_set.join_next().await {
         let (success, _, _, _) = result??;
         if success {
             summary.completed += 1;
         } else {
             summary.failed += 1;
+        }
+        let done = summary.completed + summary.failed;
+        if last_logged.elapsed().as_secs() >= 60 {
+            tracing::warn!(
+                completed = summary.completed,
+                failed = summary.failed,
+                remaining = summary.planned_process.saturating_sub(done),
+                "progress"
+            );
+            last_logged = std::time::Instant::now();
         }
     }
 
