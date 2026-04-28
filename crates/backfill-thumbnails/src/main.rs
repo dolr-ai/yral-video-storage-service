@@ -20,6 +20,7 @@ use crate::backend::Backend;
 async fn main() -> Result<()> {
     let _sentry_guard = telemetry::init_sentry();
     telemetry::init_tracing();
+    telemetry::spawn_sigterm_flush();
 
     let args: Vec<String> = env::args().collect();
     let cli = match parse_cli_args(&args) {

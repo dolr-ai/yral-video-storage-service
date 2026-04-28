@@ -14,6 +14,30 @@ pub fn init_sentry() -> sentry::ClientInitGuard {
     ))
 }
 
+/// Spawns a background task that listens for SIGTERM and flushes Sentry before exiting.
+/// GitHub Actions sends SIGTERM on timeout/cancellation before SIGKILL, giving us a
+/// short window to ship buffered events.
+pub fn spawn_sigterm_flush() {
+    tokio::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!("failed to register SIGTERM handler: {err}");
+                return;
+            }
+        };
+
+        sigterm.recv().await;
+        tracing::warn!("SIGTERM received — flushing Sentry before exit");
+        if let Some(client) = sentry::Hub::current().client() {
+            client.flush(Some(std::time::Duration::from_secs(5)));
+        }
+        std::process::exit(143);
+    });
+}
+
 pub fn init_tracing() {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::Layer;
