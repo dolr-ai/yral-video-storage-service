@@ -174,64 +174,74 @@ pub async fn handler(
 
     // Upload thumbnail to Storj NSFW bucket (if it exists)
     if let Some(ref thumbnail_data) = thumbnail_data {
-        let storj_thumbnail_key = format!(
-            "{}/{}_thumbnail.png",
-            request.publisher_user_id, request.video_id
-        );
-        let thumbnail_dest = format!(
-            "sj://{}/{}/{}_thumbnail.png",
-            YRAL_NSFW_VIDEOS.as_str(),
-            request.publisher_user_id,
-            request.video_id
-        );
-
-        breadcrumb!(
-            "storj",
-            "upload_thumbnail_nsfw",
-            storj_thumbnail_key,
-            true,
-            "starting upload"
-        );
-
-        let mut child = Command::new("uplink")
-            .args([
-                "cp",
-                "--interactive=false",
-                "--analytics=false",
-                "--progress=false",
-                "--access",
-                ACCESS_GRANT_NSFW.as_str(),
-                "-",
-                thumbnail_dest.as_str(),
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .spawn()?;
-
-        let mut pipe = child.stdin.take().expect("Stdin pipe to be opened for us");
-        pipe.write_all(thumbnail_data).await?;
-        pipe.flush().await?;
-        drop(pipe);
-
-        let status = child.wait().await?;
-
-        if !status.success() {
-            tracing::warn!("Failed to upload thumbnail to Storj NSFW bucket, continuing anyway");
-            breadcrumb!(
-                "storj",
-                "upload_thumbnail_nsfw",
-                storj_thumbnail_key,
-                false,
-                "failed but continuing"
-            );
-        } else {
+        for (storj_thumbnail_key, thumbnail_dest) in [
+            (
+                format!("{}/{}_thumbnail.png", request.publisher_user_id, request.video_id),
+                format!(
+                    "sj://{}/{}/{}_thumbnail.png",
+                    YRAL_NSFW_VIDEOS.as_str(),
+                    request.publisher_user_id,
+                    request.video_id
+                ),
+            ),
+            (
+                format!("{}/{}-thumbnail.png", request.publisher_user_id, request.video_id),
+                format!(
+                    "sj://{}/{}/{}-thumbnail.png",
+                    YRAL_NSFW_VIDEOS.as_str(),
+                    request.publisher_user_id,
+                    request.video_id
+                ),
+            ),
+        ] {
             breadcrumb!(
                 "storj",
                 "upload_thumbnail_nsfw",
                 storj_thumbnail_key,
                 true,
-                "completed"
+                "starting upload"
             );
+
+            let mut child = Command::new("uplink")
+                .args([
+                    "cp",
+                    "--interactive=false",
+                    "--analytics=false",
+                    "--progress=false",
+                    "--access",
+                    ACCESS_GRANT_NSFW.as_str(),
+                    "-",
+                    thumbnail_dest.as_str(),
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()?;
+
+            let mut pipe = child.stdin.take().expect("Stdin pipe to be opened for us");
+            pipe.write_all(thumbnail_data).await?;
+            pipe.flush().await?;
+            drop(pipe);
+
+            let status = child.wait().await?;
+
+            if !status.success() {
+                tracing::warn!("Failed to upload thumbnail to Storj NSFW bucket, continuing anyway");
+                breadcrumb!(
+                    "storj",
+                    "upload_thumbnail_nsfw",
+                    storj_thumbnail_key,
+                    false,
+                    "failed but continuing"
+                );
+            } else {
+                breadcrumb!(
+                    "storj",
+                    "upload_thumbnail_nsfw",
+                    storj_thumbnail_key,
+                    true,
+                    "completed"
+                );
+            }
         }
     }
 
