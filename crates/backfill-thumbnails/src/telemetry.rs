@@ -31,11 +31,15 @@ pub fn spawn_sigterm_flush() {
 
         sigterm.recv().await;
         tracing::warn!("SIGTERM received — flushing Sentry before exit");
-        if let Some(client) = sentry::Hub::current().client() {
-            client.flush(Some(std::time::Duration::from_secs(5)));
-        }
+        flush_sentry();
         std::process::exit(143);
     });
+}
+
+pub fn flush_sentry() {
+    if let Some(client) = sentry::Hub::current().client() {
+        client.flush(Some(std::time::Duration::from_secs(5)));
+    }
 }
 
 pub fn init_tracing() {

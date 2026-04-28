@@ -22,6 +22,15 @@ async fn main() -> Result<()> {
     telemetry::init_tracing();
     telemetry::spawn_sigterm_flush();
 
+    let result = run().await;
+    if let Err(ref e) = result {
+        tracing::error!(error = format!("{e:#}"), "backfill-thumbnails fatal error");
+        telemetry::flush_sentry();
+    }
+    result
+}
+
+async fn run() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     let cli = match parse_cli_args(&args) {
         Ok(cli) => cli,

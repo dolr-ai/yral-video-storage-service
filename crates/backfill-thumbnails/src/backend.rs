@@ -209,7 +209,7 @@ impl HetznerBackend {
             .client
             .list_objects(prefix)
             .await
-            .map_err(anyhow::Error::msg)?;
+            .map_err(|e| anyhow::anyhow!("S3 list_objects (prefix={prefix:?}): {e}"))?;
         Ok(objects
             .into_iter()
             .filter_map(|object| {
@@ -225,14 +225,14 @@ impl HetznerBackend {
         self.client
             .download_object(key)
             .await
-            .map_err(anyhow::Error::msg)
+            .map_err(|e| anyhow::anyhow!("S3 download_object (key={key}): {e}"))
     }
 
     async fn upload_png(&self, key: &str, data: Vec<u8>) -> Result<()> {
         self.client
             .upload_png_object(key, data)
             .await
-            .map_err(anyhow::Error::msg)
+            .map_err(|e| anyhow::anyhow!("S3 upload_png_object (key={key}): {e}"))
     }
 
     async fn upload_video(&self, key: &str, data: Vec<u8>) -> Result<()> {
