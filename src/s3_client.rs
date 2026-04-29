@@ -234,17 +234,20 @@ impl S3Client {
 
     pub async fn download_video(&self, key: &str) -> Result<Vec<u8>, String> {
         retry_s3_op_string("download_video", key, || async {
-            let resp = self
-                .client
-                .get_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .send()
-                .await
-                .map_err(|e| fmt_sdk_err(&e))?;
-
-            let data = resp.body.collect().await.map_err(|e| e.to_string())?;
-            Ok(data.into_bytes().to_vec())
+            tokio::time::timeout(Duration::from_secs(120), async {
+                let resp = self
+                    .client
+                    .get_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(|e| fmt_sdk_err(&e))?;
+                let data = resp.body.collect().await.map_err(|e| e.to_string())?;
+                Ok::<Vec<u8>, String>(data.into_bytes().to_vec())
+            })
+            .await
+            .map_err(|_| format!("download_video timed out after 120s: {key}"))?
         })
         .await
     }
@@ -395,17 +398,20 @@ impl S3Client {
     #[allow(dead_code)]
     pub async fn download_object(&self, key: &str) -> Result<Vec<u8>, String> {
         retry_s3_op_string("download_object", key, || async {
-            let resp = self
-                .client
-                .get_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .send()
-                .await
-                .map_err(|e| fmt_sdk_err(&e))?;
-
-            let data = resp.body.collect().await.map_err(|e| e.to_string())?;
-            Ok(data.into_bytes().to_vec())
+            tokio::time::timeout(Duration::from_secs(120), async {
+                let resp = self
+                    .client
+                    .get_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(|e| fmt_sdk_err(&e))?;
+                let data = resp.body.collect().await.map_err(|e| e.to_string())?;
+                Ok::<Vec<u8>, String>(data.into_bytes().to_vec())
+            })
+            .await
+            .map_err(|_| format!("download_object timed out after 120s: {key}"))?
         })
         .await
     }
@@ -415,16 +421,20 @@ impl S3Client {
         retry_s3_op_string("upload_png_object", key, || {
             let body = ByteStream::from(data.clone());
             async move {
-                self.client
-                    .put_object()
-                    .bucket(&self.bucket)
-                    .key(key)
-                    .body(body)
-                    .content_type("image/png")
-                    .send()
-                    .await
-                    .map_err(|err| fmt_sdk_err(&err))?;
-                Ok(())
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    self.client
+                        .put_object()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .body(body)
+                        .content_type("image/png")
+                        .send()
+                        .await
+                        .map_err(|err| fmt_sdk_err(&err))?;
+                    Ok::<(), String>(())
+                })
+                .await
+                .map_err(|_| format!("upload_png_object timed out after 60s: {key}"))?
             }
         })
         .await
@@ -432,17 +442,20 @@ impl S3Client {
 
     pub async fn download_thumbnail(&self, key: &str) -> Result<Vec<u8>, String> {
         retry_s3_op_string("download_thumbnail", key, || async {
-            let resp = self
-                .client
-                .get_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .send()
-                .await
-                .map_err(|e| fmt_sdk_err(&e))?;
-
-            let data = resp.body.collect().await.map_err(|e| e.to_string())?;
-            Ok(data.into_bytes().to_vec())
+            tokio::time::timeout(Duration::from_secs(60), async {
+                let resp = self
+                    .client
+                    .get_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(|e| fmt_sdk_err(&e))?;
+                let data = resp.body.collect().await.map_err(|e| e.to_string())?;
+                Ok::<Vec<u8>, String>(data.into_bytes().to_vec())
+            })
+            .await
+            .map_err(|_| format!("download_thumbnail timed out after 60s: {key}"))?
         })
         .await
     }
