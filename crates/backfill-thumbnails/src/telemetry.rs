@@ -70,7 +70,7 @@ pub fn spawn_sigterm_flush() {
 
 pub fn flush_sentry() {
     if let Some(client) = sentry::Hub::current().client() {
-        client.flush(Some(std::time::Duration::from_secs(5)));
+        client.flush(Some(std::time::Duration::from_secs(10)));
     }
 }
 

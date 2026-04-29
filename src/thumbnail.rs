@@ -37,15 +37,15 @@ pub async fn extract_thumbnail_from_video_path(
     }
     args.extend(["-i", input, "-vframes", "1", "-f", "image2", output]);
 
-    // kill_on_drop(true): if the caller cancels this future (e.g. via tokio::time::timeout),
-    // the child is sent SIGKILL so it doesn't become an orphan consuming CPU. This is safe
-    // because the ffmpeg semaphore in the backfill pipeline limits concurrency, so at most
-    // a handful of kills happen simultaneously — not enough to flood the SIGCHLD handler.
+    // kill_on_drop is intentionally NOT set: sending SIGKILL on future cancellation triggers
+    // SIGCHLD delivery, which at burst rates can stall Tokio's I/O driver and freeze the
+    // entire runtime (including timers and signal handlers). Orphaned ffmpeg processes are
+    // acceptable — they complete within seconds and are cleaned up by the OS when the runner
+    // exits. The ffmpeg semaphore already caps concurrent invocations.
     let output_proc = Command::new("ffmpeg")
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
         .spawn()?
         .wait_with_output()
         .await?;
