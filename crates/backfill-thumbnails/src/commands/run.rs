@@ -138,7 +138,12 @@ pub async fn execute_run(
         join_set.spawn(async move {
             let result = async {
                 let _permit = download_sem.acquire_owned().await?;
-                let video_data = backend.download_object(&video_key).await?;
+                let video_data = tokio::time::timeout(
+                    std::time::Duration::from_secs(150),
+                    backend.download_object(&video_key),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("download timed out after 150s: {video_key}"))??;
                 drop(_permit);
 
                 let _permit = ffmpeg_sem.acquire_owned().await?;
@@ -152,10 +157,13 @@ pub async fn execute_run(
                 drop(_permit);
 
                 let _permit = upload_sem.acquire_owned().await?;
-                backend
-                    .upload_png(&staged_thumbnail_key, thumbnail)
-                    .await
-                    .context("upload staged thumbnail")?;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(90),
+                    backend.upload_png(&staged_thumbnail_key, thumbnail),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("upload timed out after 90s: {staged_thumbnail_key}"))?
+                .context("upload staged thumbnail")?;
                 drop(_permit);
 
                 Ok::<(), anyhow::Error>(())
@@ -171,7 +179,15 @@ pub async fn execute_run(
                         staged_thumbnail_key: staged_thumbnail_key.clone(),
                         status: ManifestStatus::Completed,
                     };
-                    append_jsonl(manifest_path.as_path(), &manifest_entry, &append_lock).await?;
+                    if let Err(io_err) =
+                        append_jsonl(manifest_path.as_path(), &manifest_entry, &append_lock).await
+                    {
+                        tracing::error!(
+                            video_key = %video_key,
+                            error = %io_err,
+                            "failed to write completed manifest entry"
+                        );
+                    }
                     Ok::<_, anyhow::Error>((true, video_key, staged_thumbnail_key, String::new()))
                 }
                 Err(err) => {
@@ -190,13 +206,29 @@ pub async fn execute_run(
                         staged_thumbnail_key: staged_thumbnail_key.clone(),
                         status: ManifestStatus::Failed,
                     };
-                    append_jsonl(manifest_path.as_path(), &manifest_entry, &append_lock).await?;
+                    if let Err(io_err) =
+                        append_jsonl(manifest_path.as_path(), &manifest_entry, &append_lock).await
+                    {
+                        tracing::error!(
+                            video_key = %video_key,
+                            error = %io_err,
+                            "failed to write failed manifest entry"
+                        );
+                    }
                     let failure = FailureRecord {
                         video_key: video_key.clone(),
                         staged_thumbnail_key: staged_thumbnail_key.clone(),
                         error: format!("{err:#}"),
                     };
-                    append_jsonl(failures_path.as_path(), &failure, &append_lock).await?;
+                    if let Err(io_err) =
+                        append_jsonl(failures_path.as_path(), &failure, &append_lock).await
+                    {
+                        tracing::error!(
+                            video_key = %video_key,
+                            error = %io_err,
+                            "failed to write failure record"
+                        );
+                    }
                     Ok((false, video_key, staged_thumbnail_key, format!("{err:#}")))
                 }
             }
@@ -204,22 +236,38 @@ pub async fn execute_run(
     }
 
     let mut last_logged = std::time::Instant::now();
-    while let Some(result) = join_set.join_next().await {
-        let (success, _, _, _) = result??;
-        if success {
-            summary.completed += 1;
-        } else {
-            summary.failed += 1;
-        }
-        let done = summary.completed + summary.failed;
-        if last_logged.elapsed().as_secs() >= 60 {
-            tracing::warn!(
-                completed = summary.completed,
-                failed = summary.failed,
-                remaining = summary.planned_process.saturating_sub(done),
-                "progress"
-            );
-            last_logged = std::time::Instant::now();
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(90), join_set.join_next()).await {
+            Ok(None) => break,
+            Ok(Some(result)) => {
+                let (success, _, _, _) = result??;
+                if success {
+                    summary.completed += 1;
+                } else {
+                    summary.failed += 1;
+                }
+                let done = summary.completed + summary.failed;
+                if last_logged.elapsed().as_secs() >= 60 {
+                    tracing::warn!(
+                        completed = summary.completed,
+                        failed = summary.failed,
+                        remaining = summary.planned_process.saturating_sub(done),
+                        "progress"
+                    );
+                    last_logged = std::time::Instant::now();
+                }
+            }
+            Err(_) => {
+                let done = summary.completed + summary.failed;
+                tracing::warn!(
+                    completed = summary.completed,
+                    failed = summary.failed,
+                    remaining = summary.planned_process.saturating_sub(done),
+                    active_tasks = join_set.len(),
+                    "pipeline stalled — no completions in 90s"
+                );
+                last_logged = std::time::Instant::now();
+            }
         }
     }
 
