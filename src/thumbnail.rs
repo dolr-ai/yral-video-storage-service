@@ -41,6 +41,7 @@ pub async fn extract_thumbnail_from_video_path(
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?
         .wait_with_output()
         .await?;
