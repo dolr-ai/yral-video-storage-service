@@ -225,6 +225,9 @@ jobs:
       - name: Build (release)
         run: cargo build --release -p backfill-thumbnails
 
+      - name: Stagger shard start
+        run: sleep $(( ${{ matrix.shard_index }} * 30 ))
+
       - name: Execute backfill run
         env:
           HETZNER_S3_ENDPOINT: ${{ secrets.HETZNER_S3_ENDPOINT }}

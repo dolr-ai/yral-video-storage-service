@@ -117,15 +117,22 @@ pub async fn execute_run(
     let upload_sem = Arc::new(Semaphore::new(cli.upload_concurrency.max(1)));
     let mut join_set = JoinSet::new();
 
-    for action in plan {
-        let PlannedAction::Process {
+    // Only Process actions are spawned; cap concurrent tasks so JoinSet stays bounded
+    // (~22 tasks) instead of holding all 54k state machines in memory at once.
+    let mut process_iter = plan.into_iter().filter_map(|a| match a {
+        PlannedAction::Process {
             video_key,
             staged_thumbnail_key,
-        } = action
-        else {
-            continue;
-        };
+        } => Some((video_key, staged_thumbnail_key)),
+        _ => None,
+    });
+    let max_active = (cli.download_concurrency + cli.ffmpeg_concurrency + cli.upload_concurrency)
+        .saturating_add(4)
+        .max(4);
 
+    let spawn_next = |join_set: &mut JoinSet<_>,
+                      video_key: String,
+                      staged_thumbnail_key: String| {
         let backend = backend.clone();
         let download_sem = download_sem.clone();
         let ffmpeg_sem = ffmpeg_sem.clone();
@@ -134,7 +141,6 @@ pub async fn execute_run(
         let failures_path = failures_path.to_path_buf();
         let append_lock = append_lock.clone();
         let thumbnail_seek = cli.thumbnail_seek.clone();
-
         join_set.spawn(async move {
             let result = async {
                 let _permit = download_sem.acquire_owned().await?;
@@ -229,6 +235,14 @@ pub async fn execute_run(
                 }
             }
         });
+    };
+
+    // Initial fill: seed JoinSet up to max_active before entering the drain loop.
+    while join_set.len() < max_active {
+        let Some((vk, stk)) = process_iter.next() else {
+            break;
+        };
+        spawn_next(&mut join_set, vk, stk);
     }
 
     let mut last_logged = std::time::Instant::now();
@@ -252,6 +266,10 @@ pub async fn execute_run(
                     summary.completed += 1;
                 } else {
                     summary.failed += 1;
+                }
+                // Immediately replace the completed task to keep JoinSet full.
+                if let Some((vk, stk)) = process_iter.next() {
+                    spawn_next(&mut join_set, vk, stk);
                 }
                 let done = summary.completed + summary.failed;
                 if last_logged.elapsed().as_secs() >= 60 {
