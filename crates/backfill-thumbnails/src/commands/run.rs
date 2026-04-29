@@ -147,12 +147,11 @@ pub async fn execute_run(
                 drop(_permit);
 
                 let _permit = ffmpeg_sem.acquire_owned().await?;
-                let thumbnail = tokio::time::timeout(
-                    std::time::Duration::from_secs(60),
-                    extract_thumbnail_with_seek(&video_data, thumbnail_seek.as_deref()),
+                let thumbnail = extract_thumbnail_with_seek(
+                    &video_data,
+                    thumbnail_seek.as_deref(),
                 )
                 .await
-                .map_err(|_| anyhow::anyhow!("ffmpeg timed out after 60s: {video_key}"))?
                 .context("extract first-frame thumbnail")?;
                 drop(_permit);
 

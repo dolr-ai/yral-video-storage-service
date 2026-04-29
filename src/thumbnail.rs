@@ -37,26 +37,40 @@ pub async fn extract_thumbnail_from_video_path(
     }
     args.extend(["-i", input, "-vframes", "1", "-f", "image2", output]);
 
-    // kill_on_drop is intentionally NOT set: sending SIGKILL on future cancellation triggers
-    // SIGCHLD delivery, which at burst rates can stall Tokio's I/O driver and freeze the
-    // entire runtime (including timers and signal handlers). Orphaned ffmpeg processes are
-    // acceptable — they complete within seconds and are cleaned up by the OS when the runner
-    // exits. The ffmpeg semaphore already caps concurrent invocations.
-    let output_proc = Command::new("ffmpeg")
+    // Spawn without kill_on_drop to avoid SIGCHLD bursts when the future is cancelled
+    // (burst SIGCHLD stalls Tokio's I/O driver). Use select! to kill+reap the child
+    // explicitly only on the timeout path so it never becomes an orphan consuming CPU.
+    // child.wait() borrows &mut self (unlike wait_with_output which moves self), so
+    // child remains accessible in the timeout branch for kill()+wait().
+    let mut child = Command::new("ffmpeg")
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn()?
-        .wait_with_output()
-        .await?;
+        .spawn()?;
 
-    if !output_proc.status.success() || !tokio::fs::try_exists(output).await.unwrap_or(false) {
-        let stderr = String::from_utf8_lossy(&output_proc.stderr);
-        tracing::error!("ffmpeg failed: {stderr}");
-        return Err(io_err("Thumbnail extraction failed"));
+    let mut stderr_handle = child.stderr.take();
+
+    tokio::select! {
+        status = child.wait() => {
+            let status = status?;
+            let mut stderr_buf = Vec::new();
+            if let Some(ref mut handle) = stderr_handle {
+                use tokio::io::AsyncReadExt;
+                let _ = handle.read_to_end(&mut stderr_buf).await;
+            }
+            if !status.success() || !tokio::fs::try_exists(output).await.unwrap_or(false) {
+                let stderr = String::from_utf8_lossy(&stderr_buf);
+                tracing::error!("ffmpeg failed: {stderr}");
+                return Err(io_err("Thumbnail extraction failed"));
+            }
+            Ok(())
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await; // reap so no zombie or orphan
+            Err(io_err("ffmpeg timed out after 60s"))
+        }
     }
-
-    Ok(())
 }
 
 fn io_err(msg: &str) -> std::io::Error {
