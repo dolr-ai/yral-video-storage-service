@@ -19,6 +19,7 @@ use crate::backend::Backend;
 #[tokio::main]
 async fn main() -> Result<()> {
     telemetry::ignore_sigpipe();
+    telemetry::install_kill_signal_handlers();
     let _sentry_guard = telemetry::init_sentry();
     telemetry::init_tracing();
     telemetry::spawn_sigterm_flush();
