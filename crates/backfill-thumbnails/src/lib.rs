@@ -68,6 +68,8 @@ pub struct CliOptions {
     pub verify_sample: Option<usize>,
     pub thumbnail_seek: Option<String>,
     pub seed_count: usize,
+    pub shard_index: usize,
+    pub shard_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +119,16 @@ struct RawConcurrencyArgs {
     upload_concurrency: usize,
 }
 
+#[derive(Debug, Args, Clone)]
+struct RawShardArgs {
+    /// Which slice of videos this job processes (0-based).
+    #[arg(long, default_value_t = 0)]
+    shard_index: usize,
+    /// Total number of parallel shards. 1 means process everything.
+    #[arg(long, default_value_t = 1)]
+    shard_count: usize,
+}
+
 #[derive(Debug, Args)]
 struct RawSeedTestDataArgs {
     #[command(flatten)]
@@ -135,6 +147,8 @@ struct RawRunArgs {
     execute: bool,
     #[command(flatten)]
     concurrency: RawConcurrencyArgs,
+    #[command(flatten)]
+    shard: RawShardArgs,
     #[arg(long)]
     thumbnail_seek: Option<String>,
 }
@@ -216,10 +230,13 @@ impl RawCommand {
                     verify_sample: None,
                     thumbnail_seek: None,
                     seed_count: args.seed_count,
+                    shard_index: 0,
+                    shard_count: 1,
                 })
             }
             Self::Run(args) => {
                 validate_scope_bucket(args.common.scope, args.common.bucket_override.as_deref())?;
+                validate_shard(args.shard.shard_index, args.shard.shard_count)?;
                 Ok(CliOptions {
                     command: CommandKind::Run,
                     scope: args.common.scope,
@@ -234,6 +251,8 @@ impl RawCommand {
                     verify_sample: None,
                     thumbnail_seek: args.thumbnail_seek,
                     seed_count: 3,
+                    shard_index: args.shard.shard_index,
+                    shard_count: args.shard.shard_count,
                 })
             }
             Self::Verify(args) => {
@@ -252,6 +271,8 @@ impl RawCommand {
                     verify_sample: args.verify_sample,
                     thumbnail_seek: None,
                     seed_count: 3,
+                    shard_index: 0,
+                    shard_count: 1,
                 })
             }
             Self::Audit(args) => {
@@ -270,10 +291,37 @@ impl RawCommand {
                     verify_sample: None,
                     thumbnail_seek: None,
                     seed_count: 3,
+                    shard_index: 0,
+                    shard_count: 1,
                 })
             }
         }
     }
+}
+
+/// FNV-1a 64-bit hash — stable, dependency-free, good distribution for key strings.
+pub fn shard_for_key(key: &str, shard_count: usize) -> usize {
+    if shard_count <= 1 {
+        return 0;
+    }
+    let mut hash: u64 = 14695981039346656037;
+    for byte in key.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    (hash % shard_count as u64) as usize
+}
+
+fn validate_shard(shard_index: usize, shard_count: usize) -> Result<(), clap::Error> {
+    if shard_count == 0 {
+        return Err(value_validation_error("--shard-count must be at least 1"));
+    }
+    if shard_index >= shard_count {
+        return Err(value_validation_error(&format!(
+            "--shard-index {shard_index} must be less than --shard-count {shard_count}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_scope_bucket(scope: Scope, bucket_override: Option<&str>) -> Result<(), clap::Error> {
@@ -430,6 +478,35 @@ impl ManifestIndex {
 mod tests {
     use super::*;
     use clap::error::ErrorKind;
+
+    #[test]
+    fn shard_for_key_with_count_one_always_returns_zero() {
+        assert_eq!(shard_for_key("any/key.mp4", 1), 0);
+        assert_eq!(shard_for_key("another/key.mp4", 0), 0);
+    }
+
+    #[test]
+    fn shard_for_key_distributes_evenly_across_three_shards() {
+        let keys: Vec<String> = (0..300)
+            .map(|i| format!("publisher-{i:04x}/video-{i:032x}.mp4"))
+            .collect();
+        let mut counts = [0usize; 3];
+        for key in &keys {
+            counts[shard_for_key(key, 3)] += 1;
+        }
+        // Each shard should get roughly 100 ± 30 (within 30% of ideal)
+        for count in counts {
+            assert!(count > 70 && count < 130, "uneven shard: {count}");
+        }
+    }
+
+    #[test]
+    fn validate_shard_rejects_index_ge_count() {
+        assert!(validate_shard(3, 3).is_err());
+        assert!(validate_shard(0, 0).is_err());
+        assert!(validate_shard(0, 1).is_ok());
+        assert!(validate_shard(2, 3).is_ok());
+    }
 
     #[test]
     fn parses_scope_and_backend_shape() {

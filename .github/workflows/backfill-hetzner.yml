@@ -3,6 +3,10 @@ name: Backfill Thumbnails — Hetzner
 # Generates <video_id>-thumbnail.png for historical videos in a Hetzner S3 bucket.
 # Bucket is resolved from the optional input, falling back to HETZNER_S3_BUCKET secret.
 # Execute requires Production environment approval. All other commands are read-only.
+#
+# Sharding: set shard_count > 1 to spawn that many parallel execute runners, each
+# processing a distinct slice of videos. One trigger → all shards start automatically.
+# Failed shards can be individually re-run via "Re-run failed jobs" in the GH Actions UI.
 
 on:
   workflow_dispatch:
@@ -36,10 +40,15 @@ on:
         type: string
         default: "50"
       ffmpeg_concurrency:
-        description: "Parallel ffmpeg workers for execute (default 2, max ~4 on ubuntu-latest)"
+        description: "Parallel ffmpeg workers per shard (default 2, max ~4 on ubuntu-latest)"
         required: false
         type: string
         default: "2"
+      shard_count:
+        description: "Parallel execute shards (1 = all videos on one runner, 3 = split across 3 runners)"
+        required: false
+        type: string
+        default: "1"
 
 concurrency:
   group: backfill-hetzner-${{ inputs.bucket || 'default' }}-${{ inputs.command }}
@@ -162,13 +171,44 @@ jobs:
           retention-days: 90
           if-no-files-found: ignore
 
-  execute:
-    name: "execute · hetzner"
+  # Converts the shard_count input into a JSON array [0, 1, ..., N-1] for the matrix.
+  generate-shard-matrix:
+    name: "generate shard matrix"
     needs: [test]
+    if: ${{ inputs.command == 'execute' }}
+    runs-on: ubuntu-latest
+    outputs:
+      shard_indices: ${{ steps.matrix.outputs.shard_indices }}
+    steps:
+      - id: matrix
+        run: |
+          COUNT="${{ inputs.shard_count || '1' }}"
+          INDICES="["
+          for i in $(seq 0 $((COUNT - 1))); do
+            [ "$i" -gt 0 ] && INDICES+=","
+            INDICES+="$i"
+          done
+          INDICES+="]"
+          echo "shard_indices=${INDICES}" >> "$GITHUB_OUTPUT"
+
+  execute:
+    name: "execute · hetzner · shard ${{ matrix.shard_index }}/${{ inputs.shard_count }}"
+    needs: [generate-shard-matrix]
     if: ${{ inputs.command == 'execute' }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     environment: Production
+
+    # Each shard gets its own concurrency slot so all shards run in parallel.
+    # cancel-in-progress: false ensures retriggered runs queue rather than cancel in-flight work.
+    concurrency:
+      group: backfill-hetzner-${{ inputs.bucket || 'default' }}-execute-shard${{ matrix.shard_index }}
+      cancel-in-progress: false
+
+    strategy:
+      fail-fast: false   # a failed shard does not cancel other shards
+      matrix:
+        shard_index: ${{ fromJson(needs.generate-shard-matrix.outputs.shard_indices) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -202,6 +242,8 @@ jobs:
             --manifest-dir artifacts/backfill
             --execute
             --ffmpeg-concurrency "${{ inputs.ffmpeg_concurrency }}"
+            --shard-index "${{ matrix.shard_index }}"
+            --shard-count "${{ inputs.shard_count }}"
           )
           [[ -n "${{ inputs.prefix }}" ]] && ARGS+=(--prefix "${{ inputs.prefix }}")
 
@@ -212,7 +254,7 @@ jobs:
         run: |
           RESOLVED_BUCKET="${{ inputs.bucket || '(from secret)' }}"
           {
-            echo "## Backfill Hetzner — Execute"
+            echo "## Backfill Hetzner — Execute · Shard ${{ matrix.shard_index }}/${{ inputs.shard_count }}"
             echo ""
             echo "### Inputs"
             echo "| Input | Value |"
@@ -222,6 +264,7 @@ jobs:
             echo "| Cutoff | \`${{ inputs.cutoff_before }}\` |"
             echo "| Prefix | \`${{ inputs.prefix || '(none)' }}\` |"
             echo "| FFmpeg Concurrency | \`${{ inputs.ffmpeg_concurrency }}\` |"
+            echo "| Shard | \`${{ matrix.shard_index }} / ${{ inputs.shard_count }}\` |"
             echo ""
             if [[ -s /tmp/bf-output.txt ]]; then
               echo "### Results"
@@ -249,7 +292,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backfill-hetzner-execute-${{ github.run_id }}
+          name: backfill-hetzner-execute-${{ github.run_id }}-shard${{ matrix.shard_index }}
           path: artifacts/backfill/
           retention-days: 90
           if-no-files-found: ignore

@@ -1,7 +1,8 @@
 use super::{append_jsonl, load_manifest_entries, write_json, CommandSummary};
 use anyhow::{Context, Result};
 use backfill_thumbnails::{
-    build_run_plan, CliOptions, ManifestEntry, ManifestIndex, ManifestStatus, PlannedAction,
+    build_run_plan, shard_for_key, CliOptions, ManifestEntry, ManifestIndex, ManifestStatus,
+    PlannedAction,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -48,15 +49,29 @@ pub async fn execute_run(
 
     let manifest_entries = load_manifest_entries(manifest_path).await?;
     let manifest = ManifestIndex::from_entries(&manifest_entries);
-    let plan = build_run_plan(
-        backend.kind(),
-        &videos,
-        &remote_staged_keys,
-        &manifest,
-        backend.bucket_name(),
-        cutoff,
-        cli.prefix.as_deref(),
-    );
+    let plan = {
+        let full = build_run_plan(
+            backend.kind(),
+            &videos,
+            &remote_staged_keys,
+            &manifest,
+            backend.bucket_name(),
+            cutoff,
+            cli.prefix.as_deref(),
+        );
+        if cli.shard_count > 1 {
+            full.into_iter()
+                .filter(|action| match action {
+                    PlannedAction::Process { video_key, .. } => {
+                        shard_for_key(video_key, cli.shard_count) == cli.shard_index
+                    }
+                    _ => true,
+                })
+                .collect()
+        } else {
+            full
+        }
+    };
 
     let mut summary = CommandSummary {
         run_id: run_id.to_string(),
@@ -85,6 +100,8 @@ pub async fn execute_run(
         planned_process = summary.planned_process,
         skip_remote_exists = summary.skip_remote_exists,
         skip_manifest_done = summary.skip_manifest_done,
+        shard_index = cli.shard_index,
+        shard_count = cli.shard_count,
         "listing complete"
     );
 
