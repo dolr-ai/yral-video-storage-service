@@ -42,22 +42,37 @@ pub async fn extract_thumbnail_from_video_path(
     // explicitly only on the timeout path so it never becomes an orphan consuming CPU.
     // child.wait() borrows &mut self (unlike wait_with_output which moves self), so
     // child remains accessible in the timeout branch for kill()+wait().
-    let mut child = Command::new("ffmpeg")
+    //
+    // `nice -n 10` gives ffmpeg lower CPU priority than Tokio's worker threads. Without
+    // this, clusters of large videos saturate both vCPUs on the 2-core GH Actions runner,
+    // starving the async reactor and causing timers/timeouts to stop firing (~30 min stall).
+    // `nice` exec-replaces itself with ffmpeg, so child.kill() still targets the ffmpeg pid.
+    let mut child = Command::new("nice")
+        .arg("-n")
+        .arg("10")
+        .arg("ffmpeg")
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()?;
 
-    let mut stderr_handle = child.stderr.take();
+    let stderr_handle = child.stderr.take();
 
     tokio::select! {
-        status = child.wait() => {
+        // Drain stderr concurrently with wait() so the pipe never fills (>64 KB) and
+        // blocks ffmpeg from exiting — which would deadlock child.wait() indefinitely.
+        (status, stderr_buf) = async {
+            use tokio::io::AsyncReadExt;
+            let stderr_fut = async move {
+                let mut buf = Vec::new();
+                if let Some(mut h) = stderr_handle {
+                    let _ = h.read_to_end(&mut buf).await;
+                }
+                buf
+            };
+            tokio::join!(child.wait(), stderr_fut)
+        } => {
             let status = status?;
-            let mut stderr_buf = Vec::new();
-            if let Some(ref mut handle) = stderr_handle {
-                use tokio::io::AsyncReadExt;
-                let _ = handle.read_to_end(&mut stderr_buf).await;
-            }
             if !status.success() || !tokio::fs::try_exists(output).await.unwrap_or(false) {
                 let stderr = String::from_utf8_lossy(&stderr_buf);
                 tracing::error!("ffmpeg failed: {stderr}");

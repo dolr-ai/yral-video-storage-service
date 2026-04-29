@@ -147,12 +147,9 @@ pub async fn execute_run(
                 drop(_permit);
 
                 let _permit = ffmpeg_sem.acquire_owned().await?;
-                let thumbnail = extract_thumbnail_with_seek(
-                    &video_data,
-                    thumbnail_seek.as_deref(),
-                )
-                .await
-                .context("extract first-frame thumbnail")?;
+                let thumbnail = extract_thumbnail_with_seek(&video_data, thumbnail_seek.as_deref())
+                    .await
+                    .context("extract first-frame thumbnail")?;
                 drop(_permit);
 
                 let _permit = upload_sem.acquire_owned().await?;
@@ -235,11 +232,22 @@ pub async fn execute_run(
     }
 
     let mut last_logged = std::time::Instant::now();
+    let mut consecutive_stalls = 0u32;
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(90), join_set.join_next()).await {
             Ok(None) => break,
-            Ok(Some(result)) => {
-                let (success, _, _, _) = result??;
+            Ok(Some(join_result)) => {
+                consecutive_stalls = 0;
+                let success = match join_result {
+                    Err(join_err) => {
+                        tracing::error!(error = %join_err, "task panicked");
+                        false
+                    }
+                    Ok(inner) => {
+                        let (success, _, _, _) = inner?;
+                        success
+                    }
+                };
                 if success {
                     summary.completed += 1;
                 } else {
@@ -257,15 +265,25 @@ pub async fn execute_run(
                 }
             }
             Err(_) => {
+                consecutive_stalls += 1;
                 let done = summary.completed + summary.failed;
                 tracing::warn!(
                     completed = summary.completed,
                     failed = summary.failed,
                     remaining = summary.planned_process.saturating_sub(done),
                     active_tasks = join_set.len(),
+                    consecutive_stalls,
                     "pipeline stalled — no completions in 90s"
                 );
                 last_logged = std::time::Instant::now();
+                if consecutive_stalls >= 10 {
+                    tracing::error!(
+                        active_tasks = join_set.len(),
+                        "aborting: pipeline stalled for 15 min with no completions"
+                    );
+                    join_set.abort_all();
+                    break;
+                }
             }
         }
     }
