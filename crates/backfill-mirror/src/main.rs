@@ -1,8 +1,9 @@
 //! Mirror Hetzner S3 objects into Storj SFW bucket.
 //!
-//! Usage:
-//!   backfill-mirror audit    -- list what Hetzner has that Storj SFW is missing
-//!   backfill-mirror run      -- copy missing objects (add --execute to actually write)
+//! Commands:
+//!   audit    -- show full bidirectional diff (what each side is missing)
+//!   run      -- copy objects Hetzner has that Storj SFW is missing (add --execute to write)
+//!   cleanup  -- delete objects Storj SFW has that Hetzner no longer has (add --execute to delete)
 //!
 //! Required env vars:
 //!   HETZNER_S3_ENDPOINT, HETZNER_S3_BUCKET, HETZNER_S3_ACCESS_KEY, HETZNER_S3_SECRET_KEY
@@ -34,10 +35,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum SubCommand {
-    /// Show how many objects are in Hetzner but missing from Storj SFW
+    /// Show bidirectional diff: what each side has that the other is missing
     Audit(CommonArgs),
-    /// Copy objects from Hetzner to Storj SFW (dry-run by default, add --execute to write)
-    Run(RunArgs),
+    /// Copy objects from Hetzner to Storj SFW that Storj is missing (dry-run by default)
+    Run(MutateArgs),
+    /// Delete Storj SFW objects that have no matching object in Hetzner (dry-run by default)
+    Cleanup(MutateArgs),
 }
 
 #[derive(Args, Clone)]
@@ -51,16 +54,13 @@ struct CommonArgs {
 }
 
 #[derive(Args)]
-struct RunArgs {
+struct MutateArgs {
     #[command(flatten)]
     common: CommonArgs,
-    /// Max concurrent Hetzner downloads
+    /// Max concurrent operations
     #[arg(long, default_value_t = 8)]
-    download_concurrency: usize,
-    /// Max concurrent Storj uploads
-    #[arg(long, default_value_t = 8)]
-    upload_concurrency: usize,
-    /// Actually perform copies (default is dry-run)
+    concurrency: usize,
+    /// Actually perform writes/deletes (default is dry-run)
     #[arg(long)]
     execute: bool,
 }
@@ -69,16 +69,25 @@ struct RunArgs {
 struct AuditSummary {
     hetzner_objects: usize,
     storj_sfw_objects: usize,
+    /// In Hetzner but missing from Storj SFW
     missing_from_storj: usize,
+    /// In Storj SFW but not in Hetzner (stale — likely NSFW-moved videos)
+    stale_in_storj: usize,
 }
 
 #[derive(Debug, Serialize)]
 struct RunSummary {
     mode: &'static str,
-    hetzner_objects: usize,
-    storj_sfw_objects: usize,
-    missing_from_storj: usize,
+    to_copy: usize,
     copied: usize,
+    failed: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanupSummary {
+    mode: &'static str,
+    stale_in_storj: usize,
+    deleted: usize,
     failed: usize,
 }
 
@@ -90,13 +99,195 @@ async fn main() -> Result<()> {
     match cli.command {
         SubCommand::Audit(args) => audit(args).await,
         SubCommand::Run(args) => run(args).await,
+        SubCommand::Cleanup(args) => cleanup(args).await,
     }
 }
 
 async fn audit(args: CommonArgs) -> Result<()> {
+    let (hetzner_keys, storj_keys) = list_both(&args).await?;
+
+    let missing_from_storj = hetzner_keys
+        .iter()
+        .filter(|k| !storj_keys.contains(*k))
+        .count();
+    let stale_in_storj = storj_keys
+        .iter()
+        .filter(|k| !hetzner_keys.contains(*k))
+        .count();
+
+    let summary = AuditSummary {
+        hetzner_objects: hetzner_keys.len(),
+        storj_sfw_objects: storj_keys.len(),
+        missing_from_storj,
+        stale_in_storj,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    Ok(())
+}
+
+async fn run(args: MutateArgs) -> Result<()> {
+    let (hetzner_keys, storj_keys) = list_both(&args.common).await?;
+
+    let to_copy: Vec<String> = hetzner_keys
+        .iter()
+        .filter(|k| !storj_keys.contains(*k))
+        .cloned()
+        .collect();
+
+    if !args.execute {
+        let summary = RunSummary {
+            mode: "dry-run",
+            to_copy: to_copy.len(),
+            copied: 0,
+            failed: 0,
+        };
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    eprintln!(
+        "Copying {} objects from Hetzner to Storj SFW...",
+        to_copy.len()
+    );
+
+    let access_grant = Arc::new(resolve_access_grant()?);
+    let storj_bucket = Arc::new(resolve_storj_bucket(args.common.storj_bucket.as_deref()));
+    let s3 = Arc::new(S3Client::new().await);
+    let sem = Arc::new(Semaphore::new(args.concurrency.max(1)));
+    let total = to_copy.len();
+
+    let mut join_set: JoinSet<Result<()>> = JoinSet::new();
+    for key in to_copy {
+        let s3 = s3.clone();
+        let access_grant = access_grant.clone();
+        let storj_bucket = storj_bucket.clone();
+        let sem = sem.clone();
+
+        join_set.spawn(async move {
+            let _permit = sem.acquire_owned().await?;
+            let data = s3
+                .download_object(&key)
+                .await
+                .map_err(|e| anyhow::anyhow!("download {key} from Hetzner: {e}"))?;
+            upload_to_storj(&access_grant, &storj_bucket, &key, data)
+                .await
+                .with_context(|| format!("upload {key} to Storj SFW"))?;
+            tracing::info!(key = %key, "copied");
+            Ok(())
+        });
+    }
+
+    let (mut copied, mut failed) = (0usize, 0usize);
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(Ok(())) => copied += 1,
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "copy failed");
+                failed += 1;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "task panicked");
+                failed += 1;
+            }
+        }
+        if (copied + failed) % 500 == 0 {
+            eprintln!("  progress: {}/{total} ({failed} failed)", copied + failed);
+        }
+    }
+
+    let summary = RunSummary {
+        mode: "execute",
+        to_copy: total,
+        copied,
+        failed,
+    };
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+
+    if failed > 0 {
+        bail!("{failed} objects failed to copy");
+    }
+    Ok(())
+}
+
+async fn cleanup(args: MutateArgs) -> Result<()> {
+    let (hetzner_keys, storj_keys) = list_both(&args.common).await?;
+
+    let stale: Vec<String> = storj_keys
+        .iter()
+        .filter(|k| !hetzner_keys.contains(*k))
+        .cloned()
+        .collect();
+
+    if !args.execute {
+        let summary = CleanupSummary {
+            mode: "dry-run",
+            stale_in_storj: stale.len(),
+            deleted: 0,
+            failed: 0,
+        };
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    eprintln!("Deleting {} stale objects from Storj SFW...", stale.len());
+
+    let access_grant = Arc::new(resolve_access_grant()?);
+    let storj_bucket = Arc::new(resolve_storj_bucket(args.common.storj_bucket.as_deref()));
+    let sem = Arc::new(Semaphore::new(args.concurrency.max(1)));
+    let total = stale.len();
+
+    let mut join_set: JoinSet<Result<()>> = JoinSet::new();
+    for key in stale {
+        let access_grant = access_grant.clone();
+        let storj_bucket = storj_bucket.clone();
+        let sem = sem.clone();
+
+        join_set.spawn(async move {
+            let _permit = sem.acquire_owned().await?;
+            delete_from_storj(&access_grant, &storj_bucket, &key)
+                .await
+                .with_context(|| format!("delete {key} from Storj SFW"))?;
+            tracing::info!(key = %key, "deleted");
+            Ok(())
+        });
+    }
+
+    let (mut deleted, mut failed) = (0usize, 0usize);
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(Ok(())) => deleted += 1,
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "delete failed");
+                failed += 1;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "task panicked");
+                failed += 1;
+            }
+        }
+        if (deleted + failed) % 500 == 0 {
+            eprintln!("  progress: {}/{total} ({failed} failed)", deleted + failed);
+        }
+    }
+
+    let summary = CleanupSummary {
+        mode: "execute",
+        stale_in_storj: total,
+        deleted,
+        failed,
+    };
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+
+    if failed > 0 {
+        bail!("{failed} objects failed to delete");
+    }
+    Ok(())
+}
+
+async fn list_both(args: &CommonArgs) -> Result<(HashSet<String>, HashSet<String>)> {
     let access_grant = resolve_access_grant()?;
     let storj_bucket = resolve_storj_bucket(args.storj_bucket.as_deref());
-
     let s3 = S3Client::new().await;
 
     eprintln!("Listing Hetzner objects...");
@@ -105,142 +296,11 @@ async fn audit(args: CommonArgs) -> Result<()> {
     eprintln!("Listing Storj SFW objects...");
     let storj_keys = list_storj_keys(&access_grant, &storj_bucket, args.prefix.as_deref()).await?;
 
-    let missing = hetzner_keys
-        .iter()
-        .filter(|k| !storj_keys.contains(*k))
-        .count();
-
-    let summary = AuditSummary {
-        hetzner_objects: hetzner_keys.len(),
-        storj_sfw_objects: storj_keys.len(),
-        missing_from_storj: missing,
-    };
-
-    println!("{}", serde_json::to_string_pretty(&summary)?);
-    Ok(())
-}
-
-async fn run(args: RunArgs) -> Result<()> {
-    let access_grant = resolve_access_grant()?;
-    let storj_bucket = resolve_storj_bucket(args.common.storj_bucket.as_deref());
-
-    let s3 = S3Client::new().await;
-
-    eprintln!("Listing Hetzner objects...");
-    let hetzner_keys = list_hetzner_keys(&s3, args.common.prefix.as_deref()).await?;
-
-    eprintln!("Listing Storj SFW objects...");
-    let storj_keys = list_storj_keys(&access_grant, &storj_bucket, args.common.prefix.as_deref()).await?;
-
-    let missing: Vec<String> = hetzner_keys
-        .iter()
-        .filter(|k| !storj_keys.contains(*k))
-        .cloned()
-        .collect();
-
-    let total_missing = missing.len();
-
-    let summary = if !args.execute {
-        println!(
-            "Dry-run: {} Hetzner objects, {} Storj SFW objects, {} missing (use --execute to copy)",
-            hetzner_keys.len(),
-            storj_keys.len(),
-            total_missing
-        );
-        RunSummary {
-            mode: "dry-run",
-            hetzner_objects: hetzner_keys.len(),
-            storj_sfw_objects: storj_keys.len(),
-            missing_from_storj: total_missing,
-            copied: 0,
-            failed: 0,
-        }
-    } else {
-        eprintln!(
-            "Copying {} missing objects from Hetzner to Storj SFW...",
-            total_missing
-        );
-
-        let s3 = Arc::new(s3);
-        let access_grant = Arc::new(access_grant);
-        let storj_bucket = Arc::new(storj_bucket);
-
-        let download_sem = Arc::new(Semaphore::new(args.download_concurrency.max(1)));
-        let upload_sem = Arc::new(Semaphore::new(args.upload_concurrency.max(1)));
-
-        let mut join_set: JoinSet<Result<bool>> = JoinSet::new();
-
-        for key in missing {
-            let s3 = s3.clone();
-            let access_grant = access_grant.clone();
-            let storj_bucket = storj_bucket.clone();
-            let download_sem = download_sem.clone();
-            let upload_sem = upload_sem.clone();
-
-            join_set.spawn(async move {
-                let _dl = download_sem.acquire_owned().await?;
-                let data = s3
-                    .download_object(&key)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("download {key} from Hetzner: {e}"))?;
-                drop(_dl);
-
-                let _ul = upload_sem.acquire_owned().await?;
-                upload_to_storj(&access_grant, &storj_bucket, &key, data)
-                    .await
-                    .with_context(|| format!("upload {key} to Storj SFW"))?;
-                drop(_ul);
-
-                tracing::info!(key = %key, "copied");
-                Ok(true)
-            });
-        }
-
-        let mut copied = 0usize;
-        let mut failed = 0usize;
-
-        while let Some(result) = join_set.join_next().await {
-            match result {
-                Ok(Ok(_)) => copied += 1,
-                Ok(Err(e)) => {
-                    tracing::error!(error = %e, "copy failed");
-                    failed += 1;
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "task panicked");
-                    failed += 1;
-                }
-            }
-
-            if (copied + failed) % 100 == 0 {
-                eprintln!("  progress: {}/{} ({} failed)", copied + failed, total_missing, failed);
-            }
-        }
-
-        RunSummary {
-            mode: "execute",
-            hetzner_objects: hetzner_keys.len(),
-            storj_sfw_objects: storj_keys.len(),
-            missing_from_storj: total_missing,
-            copied,
-            failed,
-        }
-    };
-
-    println!("{}", serde_json::to_string_pretty(&summary)?);
-
-    if summary.failed > 0 {
-        bail!("{} objects failed to copy", summary.failed);
-    }
-
-    Ok(())
+    Ok((hetzner_keys, storj_keys))
 }
 
 async fn list_hetzner_keys(s3: &S3Client, prefix: Option<&str>) -> Result<HashSet<String>> {
-    let objects = s3
-        .list_objects(prefix)
-        .await
-        .map_err(anyhow::Error::msg)?;
+    let objects = s3.list_objects(prefix).await.map_err(anyhow::Error::msg)?;
     Ok(objects.into_iter().map(|o| o.key).collect())
 }
 
@@ -304,12 +364,7 @@ fn parse_uplink_ls_keys(stdout: &str) -> HashSet<String> {
         .collect()
 }
 
-async fn upload_to_storj(
-    access_grant: &str,
-    bucket: &str,
-    key: &str,
-    data: Vec<u8>,
-) -> Result<()> {
+async fn upload_to_storj(access_grant: &str, bucket: &str, key: &str, data: Vec<u8>) -> Result<()> {
     let dest = format!("sj://{bucket}/{key}");
 
     let mut child = Command::new("uplink")
@@ -330,7 +385,9 @@ async fn upload_to_storj(
         .with_context(|| format!("spawn uplink cp for {dest}"))?;
 
     let mut pipe = child.stdin.take().context("uplink stdin unavailable")?;
-    pipe.write_all(&data).await.context("write data to uplink")?;
+    pipe.write_all(&data)
+        .await
+        .context("write data to uplink")?;
     pipe.flush().await.context("flush uplink stdin")?;
     drop(pipe);
 
@@ -345,13 +402,41 @@ async fn upload_to_storj(
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    Ok(())
+}
 
+async fn delete_from_storj(access_grant: &str, bucket: &str, key: &str) -> Result<()> {
+    let path = format!("sj://{bucket}/{key}");
+
+    let output = Command::new("uplink")
+        .args([
+            "rm",
+            "--interactive=false",
+            "--analytics=false",
+            "--access",
+            access_grant,
+            &path,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn uplink rm for {path}"))?
+        .wait_with_output()
+        .await
+        .context("wait for uplink rm")?;
+
+    if !output.status.success() {
+        bail!(
+            "uplink rm failed for {}: {}",
+            path,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(())
 }
 
 fn resolve_access_grant() -> Result<String> {
-    std::env::var("STORJ_ACCESS_GRANT_SFW")
-        .context("STORJ_ACCESS_GRANT_SFW must be set")
+    std::env::var("STORJ_ACCESS_GRANT_SFW").context("STORJ_ACCESS_GRANT_SFW must be set")
 }
 
 fn resolve_storj_bucket(override_val: Option<&str>) -> String {
@@ -364,8 +449,7 @@ fn resolve_storj_bucket(override_val: Option<&str>) -> String {
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .try_init();
 }
