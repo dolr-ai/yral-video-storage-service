@@ -594,6 +594,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backfill-mirror"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "storj-interface",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "backfill-thumbnails"
 version = "0.1.0"
 dependencies = [

@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::breadcrumb;
-use crate::consts::{ACCESS_GRANT_NSFW, YRAL_NSFW_VIDEOS};
+use crate::consts::{ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, YRAL_NSFW_VIDEOS, YRAL_VIDEOS};
 use crate::s3_client::S3Client;
 
 #[derive(thiserror::Error, Debug)]
@@ -40,6 +40,40 @@ impl IntoResponse for Error {
             })),
         )
             .into_response()
+    }
+}
+
+async fn delete_from_storj_sfw(sj_path: &str) {
+    let result = Command::new("uplink")
+        .args([
+            "rm",
+            "--interactive=false",
+            "--analytics=false",
+            "--access",
+            ACCESS_GRANT_SFW.as_str(),
+            sj_path,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    match result {
+        Ok(child) => match child.wait_with_output().await {
+            Ok(output) if !output.status.success() => {
+                tracing::warn!(
+                    path = sj_path,
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "Failed to delete from Storj SFW (non-fatal)"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(path = sj_path, error = %e, "IO error deleting from Storj SFW (non-fatal)");
+            }
+        },
+        Err(e) => {
+            tracing::warn!(path = sj_path, error = %e, "Failed to spawn uplink rm for Storj SFW (non-fatal)");
+        }
     }
 }
 
@@ -233,6 +267,25 @@ pub async fn handler(
                 "completed"
             );
         }
+    }
+
+    // Delete from Storj SFW to keep it mirroring Hetzner
+    let sfw_video_path = format!(
+        "sj://{}/{}/{}.mp4",
+        YRAL_VIDEOS.as_str(),
+        request.publisher_user_id,
+        request.video_id
+    );
+    delete_from_storj_sfw(&sfw_video_path).await;
+
+    if thumbnail_data.is_some() {
+        let sfw_thumbnail_path = format!(
+            "sj://{}/{}/{}_thumbnail.png",
+            YRAL_VIDEOS.as_str(),
+            request.publisher_user_id,
+            request.video_id
+        );
+        delete_from_storj_sfw(&sfw_thumbnail_path).await;
     }
 
     // Delete video from S3 after successful move
