@@ -37,9 +37,10 @@ async fn upload_thumbnail_to_storj(
     } else {
         (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
     };
-    let dest = format!("sj://{bucket}/{publisher_user_id}/{video_id}_thumbnail.png");
+    let dest_under = format!("sj://{bucket}/{publisher_user_id}/{video_id}_thumbnail.png");
+    let dest_dash = format!("sj://{bucket}/{publisher_user_id}/{video_id}-thumbnail.png");
 
-    let mut child = Command::new("uplink")
+    let mut child_under = Command::new("uplink")
         .args([
             "cp",
             "--interactive=false",
@@ -48,23 +49,64 @@ async fn upload_thumbnail_to_storj(
             "--access",
             grant,
             "-",
-            dest.as_str(),
+            dest_under.as_str(),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut child_dash = Command::new("uplink")
+        .args([
+            "cp",
+            "--interactive=false",
+            "--analytics=false",
+            "--progress=false",
+            "--access",
+            grant,
+            "-",
+            dest_dash.as_str(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
 
-    let mut pipe = child.stdin.take().expect("Stdin pipe to be opened for us");
-    pipe.write_all(thumbnail_data).await?;
-    pipe.flush().await?;
-    drop(pipe);
+    let mut pipe_under = child_under
+        .stdin
+        .take()
+        .expect("Stdin pipe to be opened for us");
+    let mut pipe_dash = child_dash
+        .stdin
+        .take()
+        .expect("Stdin pipe to be opened for us");
 
-    let status = child.wait().await?;
-    if !status.success() {
-        return Err(Error::Io(std::io::Error::other(format!(
-            "uplink command failed with status: {status}"
-        ))));
+    tokio::try_join!(
+        async move {
+            pipe_under.write_all(thumbnail_data).await?;
+            pipe_under.flush().await
+        },
+        async move {
+            pipe_dash.write_all(thumbnail_data).await?;
+            pipe_dash.flush().await
+        }
+    )?;
+
+    let (out_under, out_dash) = tokio::join!(
+        child_under.wait_with_output(),
+        child_dash.wait_with_output(),
+    );
+
+    for (out, dest) in [
+        (out_under.map_err(Error::Io)?, &dest_under),
+        (out_dash.map_err(Error::Io)?, &dest_dash),
+    ] {
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(Error::Io(std::io::Error::other(format!(
+                "uplink command failed for {dest} with status: {} — {stderr}",
+                out.status
+            ))));
+        }
     }
 
     Ok(())
@@ -83,9 +125,10 @@ async fn upload_thumbnail_to_storj_with_ttl(
     } else {
         (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
     };
-    let dest = format!("sj://{bucket}/{publisher_user_id}/{video_id}_thumbnail.png");
+    let dest_under = format!("sj://{bucket}/{publisher_user_id}/{video_id}_thumbnail.png");
+    let dest_dash = format!("sj://{bucket}/{publisher_user_id}/{video_id}-thumbnail.png");
 
-    let mut child = Command::new("uplink")
+    let mut child_under = Command::new("uplink")
         .args([
             "cp",
             "--interactive=false",
@@ -96,23 +139,66 @@ async fn upload_thumbnail_to_storj_with_ttl(
             "--access",
             grant,
             "-",
-            dest.as_str(),
+            dest_under.as_str(),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut child_dash = Command::new("uplink")
+        .args([
+            "cp",
+            "--interactive=false",
+            "--analytics=false",
+            "--progress=false",
+            "--expires",
+            expires,
+            "--access",
+            grant,
+            "-",
+            dest_dash.as_str(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
 
-    let mut pipe = child.stdin.take().expect("Stdin pipe to be opened for us");
-    pipe.write_all(thumbnail_data).await?;
-    pipe.flush().await?;
-    drop(pipe);
+    let mut pipe_under = child_under
+        .stdin
+        .take()
+        .expect("Stdin pipe to be opened for us");
+    let mut pipe_dash = child_dash
+        .stdin
+        .take()
+        .expect("Stdin pipe to be opened for us");
 
-    let status = child.wait().await?;
-    if !status.success() {
-        return Err(Error::Io(std::io::Error::other(format!(
-            "uplink command failed with status: {status}"
-        ))));
+    tokio::try_join!(
+        async move {
+            pipe_under.write_all(thumbnail_data).await?;
+            pipe_under.flush().await
+        },
+        async move {
+            pipe_dash.write_all(thumbnail_data).await?;
+            pipe_dash.flush().await
+        }
+    )?;
+
+    let (out_under, out_dash) = tokio::join!(
+        child_under.wait_with_output(),
+        child_dash.wait_with_output(),
+    );
+
+    for (out, dest) in [
+        (out_under.map_err(Error::Io)?, &dest_under),
+        (out_dash.map_err(Error::Io)?, &dest_dash),
+    ] {
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(Error::Io(std::io::Error::other(format!(
+                "uplink command failed for {dest} with status: {} — {stderr}",
+                out.status
+            ))));
+        }
     }
 
     Ok(())
@@ -123,17 +209,22 @@ async fn upload_thumbnail_to_s3(
     s3_client: &S3Client,
     publisher_user_id: &str,
     video_id: &str,
-    thumbnail_data: Vec<u8>,
+    thumbnail_data: &[u8],
 ) -> Result<(), Error> {
-    let key = format!("{publisher_user_id}/{video_id}_thumbnail.png");
+    let key_under = format!("{publisher_user_id}/{video_id}_thumbnail.png");
+    let key_dash = format!("{publisher_user_id}/{video_id}-thumbnail.png");
 
-    s3_client
-        .upload_thumbnail(&key, thumbnail_data)
-        .await
-        .map_err(|e| {
+    let (r_under, r_dash) = tokio::join!(
+        s3_client.upload_thumbnail(&key_under, thumbnail_data.to_vec()),
+        s3_client.upload_thumbnail(&key_dash, thumbnail_data.to_vec()),
+    );
+
+    for r in [r_under, r_dash] {
+        r.map_err(|e| {
             tracing::warn!("S3 thumbnail upload error for {publisher_user_id}/{video_id}: {e:?}");
             Error::S3(format!("{e:?}"))
         })?;
+    }
 
     Ok(())
 }
@@ -347,8 +438,6 @@ pub async fn handler(
     };
 
     if !is_nsfw {
-        let thumbnail_clone = thumbnail_data.clone();
-
         let storj_video_upload =
             upload_to_storj(&publisher_user_id, &video_id, &metadata, &body, is_nsfw);
         let storj_thumbnail_upload =
@@ -356,7 +445,7 @@ pub async fn handler(
         let s3_video_upload =
             upload_to_s3(&s3_client, &publisher_user_id, &video_id, &metadata, &body);
         let s3_thumbnail_upload =
-            upload_thumbnail_to_s3(&s3_client, &publisher_user_id, &video_id, thumbnail_clone);
+            upload_thumbnail_to_s3(&s3_client, &publisher_user_id, &video_id, &thumbnail_data);
 
         tokio::try_join!(
             storj_video_upload,
@@ -432,8 +521,6 @@ pub async fn handler_raw_upload_initial(
     let expires = format!("+{}h", PENDING_UPLOAD_TTL_HOURS);
 
     if !params.is_nsfw {
-        let thumbnail_clone = thumbnail_data.clone();
-
         let storj_video_upload = upload_to_storj_with_ttl(
             &params.publisher_user_id,
             &params.video_id,
@@ -460,7 +547,7 @@ pub async fn handler_raw_upload_initial(
             &s3_client,
             &params.publisher_user_id,
             &params.video_id,
-            thumbnail_clone,
+            &thumbnail_data,
         );
 
         tokio::try_join!(
@@ -636,8 +723,6 @@ pub async fn handler_raw_finalize(
 
     // Re-upload with final metadata (no TTL)
     if !params.is_nsfw {
-        let thumbnail_clone = thumbnail_data.clone();
-
         let storj_video_upload = upload_to_storj(
             &params.publisher_user_id,
             &params.video_id,
@@ -662,7 +747,7 @@ pub async fn handler_raw_finalize(
             &s3_client,
             &params.publisher_user_id,
             &params.video_id,
-            thumbnail_clone,
+            &thumbnail_data,
         );
 
         tokio::try_join!(
@@ -878,5 +963,150 @@ mod tests {
             (sum_g / pixel_count) as u8,
             (sum_b / pixel_count) as u8,
         )
+    }
+}
+
+/// Integration tests for dual-name thumbnail uploads.
+///
+/// Storj:
+///   STORJ_ACCESS_GRANT=... TEST_BUCKET=... \
+///   cargo test -p storj-interface --bin storj-interface -- --ignored storj_both_thumbnail_names
+///
+/// Hetzner S3:
+///   HETZNER_S3_ENDPOINT=... HETZNER_S3_BUCKET=... \
+///   HETZNER_S3_ACCESS_KEY=... HETZNER_S3_SECRET_KEY=... HETZNER_S3_REGION=... \
+///   cargo test -p storj-interface --bin storj-interface -- --ignored hetzner_both_thumbnail_names
+#[cfg(test)]
+mod integration_tests {
+    use super::{upload_thumbnail_to_s3, upload_thumbnail_to_storj};
+    use crate::s3_client::S3Client;
+    use tokio::process::Command;
+
+    /// Generate a real 16×16 red PNG using ffmpeg (stdout).
+    async fn generate_test_png() -> Vec<u8> {
+        let out = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=16x16:d=1:r=1",
+                "-vframes",
+                "1",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "png",
+                "-",
+            ])
+            .output()
+            .await
+            .expect("ffmpeg must be installed");
+        assert!(
+            out.status.success(),
+            "ffmpeg failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    // # Storj
+    // export $(grep -v '^#' .env | xargs)
+    // cargo test -p storj-interface --bin storj-interface -- --ignored storj_both_thumbnail_names
+    #[tokio::test]
+    #[ignore = "integration: requires STORJ_ACCESS_GRANT and TEST_BUCKET env vars"]
+    async fn storj_both_thumbnail_names_uploaded() {
+        let grant = std::env::var("STORJ_ACCESS_GRANT").expect("STORJ_ACCESS_GRANT must be set");
+        let bucket = std::env::var("TEST_BUCKET").expect("TEST_BUCKET must be set");
+
+        // SAFETY: this test runs alone (--ignored) so no other thread races on env.
+        unsafe {
+            std::env::set_var("STORJ_ACCESS_GRANT_SFW", &grant);
+            std::env::set_var("SFW_BUCKET", &bucket);
+        }
+
+        let thumbnail = generate_test_png().await;
+        let video_id = format!("test-storj-{}", chrono::Utc::now().timestamp_millis());
+        let publisher = "integration-test";
+
+        upload_thumbnail_to_storj(publisher, &video_id, &thumbnail, false)
+            .await
+            .expect("Storj upload failed");
+
+        for suffix in ["_thumbnail.png", "-thumbnail.png"] {
+            let path = format!("sj://{bucket}/{publisher}/{video_id}{suffix}");
+            let out = Command::new("uplink")
+                .args([
+                    "cp",
+                    "--interactive=false",
+                    "--analytics=false",
+                    "--progress=false",
+                    "--access",
+                    &grant,
+                    &path,
+                    "-",
+                ])
+                .output()
+                .await
+                .expect("uplink cp");
+            assert!(
+                out.status.success(),
+                "{path} not found in Storj: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                out.stdout, thumbnail,
+                "{path}: downloaded bytes differ from uploaded PNG"
+            );
+        }
+
+        // Clean up
+        for suffix in ["_thumbnail.png", "-thumbnail.png"] {
+            Command::new("uplink")
+                .args([
+                    "rm",
+                    "--access",
+                    &grant,
+                    &format!("sj://{bucket}/{publisher}/{video_id}{suffix}"),
+                ])
+                .status()
+                .await
+                .ok();
+        }
+    }
+
+    // # Hetzner S3
+    // export $(grep -v '^#' .env | xargs)
+    // cargo test -p storj-interface --bin storj-interface -- --ignored hetzner_both_thumbnail_names
+    #[tokio::test]
+    #[ignore = "integration: requires HETZNER_S3_ENDPOINT, HETZNER_S3_BUCKET, HETZNER_S3_ACCESS_KEY, HETZNER_S3_SECRET_KEY, HETZNER_S3_REGION env vars"]
+    async fn hetzner_both_thumbnail_names_uploaded() {
+        let video_id = format!("test-hetzner-{}", chrono::Utc::now().timestamp_millis());
+        let publisher = "integration-test";
+
+        let s3_client = S3Client::new().await;
+        let thumbnail = generate_test_png().await;
+
+        upload_thumbnail_to_s3(&s3_client, publisher, &video_id, &thumbnail)
+            .await
+            .expect("S3 upload failed");
+
+        for suffix in ["_thumbnail.png", "-thumbnail.png"] {
+            let key = format!("{publisher}/{video_id}{suffix}");
+            let downloaded = s3_client
+                .download_thumbnail(&key)
+                .await
+                .unwrap_or_else(|e| panic!("{key} not found in Hetzner S3: {e}"));
+            assert_eq!(
+                downloaded, thumbnail,
+                "{key}: downloaded bytes differ from uploaded PNG"
+            );
+        }
+
+        // Clean up
+        for suffix in ["_thumbnail.png", "-thumbnail.png"] {
+            let key = format!("{publisher}/{video_id}{suffix}");
+            s3_client.delete_thumbnail(&key).await.ok();
+        }
     }
 }
