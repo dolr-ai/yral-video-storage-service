@@ -174,6 +174,42 @@ async fn run_server() -> anyhow::Result<()> {
                 .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB limit for HLS files
                 .layer(middleware::from_fn(authorize)),
         )
+        .route(
+            "/mirror/jobs/scan-storj",
+            post(routes::mirror::scan_storj)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/mirror/jobs/scan-hetzner",
+            post(routes::mirror::scan_hetzner)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/mirror/jobs/phash",
+            post(routes::mirror::phash_backfill)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/mirror/jobs/mirror",
+            post(routes::mirror::mirror)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/mirror/jobs/cleanup",
+            post(routes::mirror::cleanup)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/mirror/audit",
+            get(routes::mirror::audit)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
         .route("/health", get(health))
         .layer(middleware::from_fn(sentry_utils::sentry_request_logger))
         .layer(cors)
