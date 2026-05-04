@@ -12,7 +12,7 @@ use tokio::process::Command;
 
 use crate::breadcrumb;
 use crate::consts::{ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, YRAL_NSFW_VIDEOS, YRAL_VIDEOS};
-use crate::s3_client::S3Client;
+use crate::AppState;
 
 // TTL for pending uploads (in hours)
 const PENDING_UPLOAD_TTL_HOURS: u32 = 1;
@@ -368,7 +368,7 @@ async fn upload_to_s3(
 
 #[tracing::instrument(skip_all)]
 pub async fn handler(
-    State(s3_client): State<S3Client>,
+    State(state): State<AppState>,
     Json(Args {
         publisher_user_id,
         video_id,
@@ -376,6 +376,7 @@ pub async fn handler(
         metadata,
     }): Json<Args>,
 ) -> Result<impl IntoResponse, Error> {
+    let s3_client = &state.s3_client;
     let source = format!(
         "https://customer-2p3jflss4r4hmpnz.cloudflarestream.com/{video_id}/downloads/default.mp4",
     );
@@ -443,9 +444,9 @@ pub async fn handler(
         let storj_thumbnail_upload =
             upload_thumbnail_to_storj(&publisher_user_id, &video_id, &thumbnail_data, is_nsfw);
         let s3_video_upload =
-            upload_to_s3(&s3_client, &publisher_user_id, &video_id, &metadata, &body);
+            upload_to_s3(s3_client, &publisher_user_id, &video_id, &metadata, &body);
         let s3_thumbnail_upload =
-            upload_thumbnail_to_s3(&s3_client, &publisher_user_id, &video_id, &thumbnail_data);
+            upload_thumbnail_to_s3(s3_client, &publisher_user_id, &video_id, &thumbnail_data);
 
         tokio::try_join!(
             storj_video_upload,
@@ -487,10 +488,11 @@ pub struct RawFinalizeBody {
 
 #[tracing::instrument(skip_all)]
 pub async fn handler_raw_upload_initial(
-    State(s3_client): State<S3Client>,
+    State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<RawUploadInitialParams>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, Error> {
+    let s3_client = &state.s3_client;
     // Extract the "file" field from the multipart upload
     let mut file_data = None;
     while let Some(field) = multipart
@@ -537,14 +539,14 @@ pub async fn handler_raw_upload_initial(
             params.is_nsfw,
         );
         let s3_video_upload = upload_to_s3(
-            &s3_client,
+            s3_client,
             &params.publisher_user_id,
             &params.video_id,
             &pending_metadata,
             &body_data,
         );
         let s3_thumbnail_upload = upload_thumbnail_to_s3(
-            &s3_client,
+            s3_client,
             &params.publisher_user_id,
             &params.video_id,
             &thumbnail_data,
@@ -585,10 +587,11 @@ pub async fn handler_raw_upload_initial(
 
 #[tracing::instrument(skip_all)]
 pub async fn handler_raw_finalize(
-    State(s3_client): State<S3Client>,
+    State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<RawFinalizeParams>,
     Json(body): Json<RawFinalizeBody>,
 ) -> Result<impl IntoResponse, Error> {
+    let s3_client = &state.s3_client;
     let metadata = body.metadata;
 
     let (bucket, grant) = if params.is_nsfw {
@@ -737,14 +740,14 @@ pub async fn handler_raw_finalize(
             params.is_nsfw,
         );
         let s3_video_upload = upload_to_s3(
-            &s3_client,
+            s3_client,
             &params.publisher_user_id,
             &params.video_id,
             &metadata,
             &file_data,
         );
         let s3_thumbnail_upload = upload_thumbnail_to_s3(
-            &s3_client,
+            s3_client,
             &params.publisher_user_id,
             &params.video_id,
             &thumbnail_data,

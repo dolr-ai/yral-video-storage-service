@@ -17,7 +17,7 @@ use tokio::process::Command;
 
 use crate::breadcrumb;
 use crate::consts::{ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, YRAL_NSFW_VIDEOS, YRAL_VIDEOS};
-use crate::s3_client::S3Client;
+use crate::AppState;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -159,7 +159,7 @@ async fn upload_hls_to_s3(
 
 #[tracing::instrument(skip_all)]
 pub async fn handler(
-    State(s3_client): State<S3Client>,
+    State(state): State<AppState>,
     Query(params): Query<HlsUploadParams>,
     body: Body,
 ) -> Result<impl IntoResponse, Error> {
@@ -189,6 +189,7 @@ pub async fn handler(
 
     // Additionally upload to S3 for SFW videos
     if !params.is_nsfw {
+        let s3_client = state.s3_client.clone();
         join_set.spawn(async move {
             upload_hls_to_s3(
                 &s3_client,

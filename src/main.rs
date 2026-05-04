@@ -17,6 +17,7 @@ use reqwest::{header::AUTHORIZATION, StatusCode};
 use sentry_tower::{NewSentryLayer, SentryHttpLayer};
 use std::sync::Arc;
 use tokio::{signal, sync::Notify};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::layer::SubscriberExt;
@@ -29,6 +30,14 @@ mod s3_client;
 mod storj_s3_client;
 pub(crate) mod sentry_utils;
 mod thumbnail;
+
+#[derive(Clone)]
+pub(crate) struct AppState {
+    pub s3_client: s3_client::S3Client,
+    pub storj_client: storj_s3_client::StorjS3Client,
+    pub db_url: String,
+    pub cancel: CancellationToken,
+}
 
 fn main() {
     // Initialize Sentry
@@ -95,8 +104,32 @@ async fn run_server() -> anyhow::Result<()> {
     Lazy::force(&HETZNER_S3_SECRET_KEY);
     Lazy::force(&HETZNER_S3_REGION);
 
+    // Force new lazy consts
+    let _ = &*consts::DATABASE_URL;
+    let _ = &*consts::STORJ_GATEWAY_ACCESS_KEY;
+    let _ = &*consts::STORJ_GATEWAY_SECRET_KEY;
+
     // Initialize S3 client
     let s3_client = s3_client::S3Client::new().await;
+
+    // Init DB schema at startup
+    let db_client = db::connect(consts::DATABASE_URL.as_str())
+        .await
+        .context("Failed to connect to postgres")?;
+    db::init_schema(&db_client)
+        .await
+        .context("Failed to init DB schema")?;
+    drop(db_client); // jobs create their own connections
+
+    let storj_client = storj_s3_client::StorjS3Client::new().await;
+    let cancel = CancellationToken::new();
+
+    let app_state = AppState {
+        s3_client,
+        storj_client,
+        db_url: consts::DATABASE_URL.clone(),
+        cancel: cancel.clone(),
+    };
 
     // Configure CORS to allow cross-origin requests
     let cors = CorsLayer::new()
@@ -113,30 +146,30 @@ async fn run_server() -> anyhow::Result<()> {
         .route(
             "/duplicate",
             post(routes::duplicate::handler)
-                .with_state(s3_client.clone())
+                .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
         )
         .route(
             "/duplicate_raw/upload",
             post(routes::duplicate::handler_raw_upload_initial)
-                .with_state(s3_client.clone())
+                .with_state(app_state.clone())
                 .layer(DefaultBodyLimit::max(500 * 1024 * 1024)), // 500MB limit for raw video upload
         )
         .route(
             "/duplicate_raw/finalize",
-            post(routes::duplicate::handler_raw_finalize).with_state(s3_client.clone()),
+            post(routes::duplicate::handler_raw_finalize).with_state(app_state.clone()),
         )
         // NOTE: This will be removed as the upload happens in the very end of the pipeline and nsfw flag is passed into duplicate
         .route(
             "/move-to-nsfw",
             post(routes::move2nsfw::handler)
-                .with_state(s3_client.clone())
+                .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
         )
         .route(
             "/hls/duplicate",
             post(routes::duplicate_hls::handler)
-                .with_state(s3_client.clone())
+                .with_state(app_state.clone())
                 .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB limit for HLS files
                 .layer(middleware::from_fn(authorize)),
         )
@@ -151,11 +184,13 @@ async fn run_server() -> anyhow::Result<()> {
 
     let notify = Arc::new(Notify::new());
     let notify_clone = notify.clone();
+    let cancel_clone = cancel.clone();
 
     tokio::spawn(async move {
         if let Err(err) = signal::ctrl_c().await {
             tracing::error!("Failed to listen for shutdown signal: {err:#}");
         }
+        cancel_clone.cancel();
         notify_clone.notify_one();
     });
 

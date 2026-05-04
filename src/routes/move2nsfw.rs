@@ -8,7 +8,7 @@ use tokio::process::Command;
 
 use crate::breadcrumb;
 use crate::consts::{ACCESS_GRANT_NSFW, YRAL_NSFW_VIDEOS};
-use crate::s3_client::S3Client;
+use crate::AppState;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -45,9 +45,10 @@ impl IntoResponse for Error {
 
 #[tracing::instrument(skip_all)]
 pub async fn handler(
-    State(s3_client): State<S3Client>,
+    State(state): State<AppState>,
     Json(request): Json<Args>,
 ) -> Result<impl IntoResponse, Error> {
+    let s3_client = &state.s3_client;
     // Download video from S3 (SFW storage)
     let s3_video_key = format!("{}/{}.mp4", request.publisher_user_id, request.video_id);
     let s3_thumbnail_key = format!(
