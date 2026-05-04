@@ -48,3 +48,50 @@ pub static SERVICE_SECRET_TOKEN: Lazy<String> = Lazy::new(|| {
         std::env::var("SERVICE_SECRET_TOKEN").expect("A shared secret to be present")
     )
 });
+
+// Storj S3 gateway credentials (for listing/verifying, not uploads)
+pub static STORJ_GATEWAY_ACCESS_KEY: Lazy<String> = Lazy::new(|| {
+    std::env::var("STORJ_GATEWAY_ACCESS_KEY")
+        .expect("STORJ_GATEWAY_ACCESS_KEY required")
+});
+pub static STORJ_GATEWAY_SECRET_KEY: Lazy<String> = Lazy::new(|| {
+    std::env::var("STORJ_GATEWAY_SECRET_KEY")
+        .expect("STORJ_GATEWAY_SECRET_KEY required")
+});
+pub static STORJ_SFW_BUCKET: Lazy<String> = Lazy::new(|| {
+    std::env::var("STORJ_SFW_BUCKET").unwrap_or_else(|_| "yral-sfw".to_string())
+});
+
+// Database
+pub static DATABASE_URL: Lazy<String> = Lazy::new(|| {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL required")
+});
+
+// Job tuning
+pub static PHASH_CONCURRENCY: Lazy<usize> = Lazy::new(|| {
+    std::env::var("PHASH_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4)
+});
+pub static MIRROR_CONCURRENCY: Lazy<usize> = Lazy::new(|| {
+    std::env::var("MIRROR_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8)
+});
+pub static SCAN_PAGE_SIZE: Lazy<i64> = Lazy::new(|| {
+    std::env::var("SCAN_PAGE_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000)
+});
+pub static MAX_PHASH_RETRIES: Lazy<i32> = Lazy::new(|| {
+    std::env::var("MAX_PHASH_RETRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5)
+});
+pub static TEMP_KEY_PREFIX: Lazy<String> = Lazy::new(|| {
+    std::env::var("TEMP_KEY_PREFIX").unwrap_or_else(|_| "_pending/".to_string())
+});
