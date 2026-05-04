@@ -201,7 +201,7 @@ WORKDIR /app
 COPY --from=builder /app/target/x86_64-unknown-linux-gnu/release/storj-interface .
 
 EXPOSE 3000
-ENTRYPOINT ["./storj-interface"]
+ENTRYPOINT ["/app/storj-interface"]
 ```
 
 - [ ] **Step 4: Verify phash crate now compiles locally**
@@ -236,16 +236,20 @@ git commit -m "feat: switch to gnu target + multi-stage Dockerfile for ffmpeg-ne
 
 - [ ] **Step 1: Add deps to [dependencies] in root Cargo.toml**
 
+First check which deps are already present:
+```bash
+grep 'tempfile\|futures\|tokio-postgres\|tokio-util' Cargo.toml
+```
+
+Then add only the missing ones to `[dependencies]`:
 ```toml
 # New deps for mirror index feature
 futures = "0.3"
 phash = { path = "crates/phash" }
-tempfile = "3"          # already present — verify, don't duplicate
+tempfile = "3"          # skip if already present
 tokio-postgres = "0.7.15"
 tokio-util = { version = "0.7", features = ["sync"] }
 ```
-
-Note: `tempfile` is already in Cargo.toml — skip if present.
 
 - [ ] **Step 2: Verify Cargo.toml parses**
 
@@ -388,7 +392,7 @@ pub async fn download_to_file(
 }
 ```
 
-Add `use futures_util::StreamExt;` at the top (already imported — check existing imports first).
+Add `use futures::StreamExt;` at the top of `src/s3_client.rs`. Use `futures` (already added as a dependency in Task 3), not `futures_util` directly. Add this unconditionally — do not rely on transitive imports.
 
 - [ ] **Step 3: Verify**
 
@@ -1105,12 +1109,27 @@ tokio::spawn(async move {
 
 - [ ] **Step 5: Pass AppState to existing routes**
 
-Update each route's `.with_state(s3_client.clone())` to `.with_state(app_state.clone())`. This requires updating `duplicate.rs`, `duplicate_hls.rs`, `move2nsfw.rs` handlers to accept `State(AppState)` instead of `State(S3Client)` and use `state.s3_client`.
+Update each route's `.with_state(s3_client.clone())` to `.with_state(app_state.clone())`. This requires updating `duplicate.rs`, `duplicate_hls.rs`, `move2nsfw.rs` handlers to accept `State<AppState>` instead of `State<S3Client>`.
 
-> **Important:** This is the largest mechanical change. Go file by file:
-> - `src/routes/duplicate.rs`: change `State(s3_client): State<S3Client>` → `State(state): State<AppState>`, use `state.s3_client`
-> - `src/routes/duplicate_hls.rs`: same
-> - `src/routes/move2nsfw.rs`: same
+> **Important:** This is the largest mechanical change. In each file, at the top add:
+> ```rust
+> use crate::AppState;
+> ```
+>
+> For each handler, change the signature pattern:
+> ```rust
+> // BEFORE
+> State(s3_client): State<S3Client>,
+>
+> // AFTER
+> State(state): State<AppState>,
+> ```
+> Then replace `s3_client.` with `state.s3_client.` everywhere in the function body.
+>
+> Apply to each file:
+> - `src/routes/duplicate.rs` — 3 handlers use `State(s3_client): State<S3Client>`
+> - `src/routes/duplicate_hls.rs` — check all handlers
+> - `src/routes/move2nsfw.rs` — check all handlers
 
 - [ ] **Step 6: Verify build**
 
@@ -1309,39 +1328,26 @@ pub async fn run(storj: StorjS3Client, db_url: String, cancel: CancellationToken
     tracing::info!("Job 0 (scan-storj): starting");
     let client = db::connect(&db_url).await?;
     let mut total = 0usize;
-    let mut continuation: Option<String> = None;
 
-    loop {
-        if cancel.is_cancelled() {
-            tracing::info!("Job 0 (scan-storj): cancelled at {total} objects");
-            return Ok(());
-        }
+    if cancel.is_cancelled() {
+        tracing::info!("Job 0 (scan-storj): cancelled before start");
+        return Ok(());
+    }
 
-        // list_objects returns a page; for pagination we need the raw continuation token
-        // Use the underlying S3 list_objects_v2 with continuation support
-        // StorjS3Client.list_objects() handles pagination internally and returns all objects
-        // For large buckets, we page manually to check cancellation between pages.
-        // If StorjS3Client.list_objects returns all at once, this is one batch.
-        // Refactor to paginate if needed — for now use list_objects which paginates internally.
-        let objects = storj.list_objects(None).await
-            .map_err(|e| anyhow::anyhow!("Storj list failed: {e}"))?;
+    // S3Client::list_objects paginates internally — returns all keys in one Vec (~30MB for 600K keys)
+    let objects = storj.list_objects(None).await
+        .map_err(|e| anyhow::anyhow!("Storj list failed: {e}"))?;
 
-        for obj in &objects {
-            let Some(video_id) = video_id_from_key(&obj.key) else {
-                continue; // skip thumbnails and non-mp4
-            };
+    for obj in &objects {
+        let Some(video_id) = video_id_from_key(&obj.key) else {
+            continue; // skip thumbnails and non-mp4
+        };
 
-            db::upsert_storj_key(&client, &video_id, &obj.key).await
-                .map_err(|e| anyhow::anyhow!("DB upsert failed for {}: {e}", obj.key))?;
+        db::upsert_storj_key(&client, &video_id, &obj.key).await
+            .map_err(|e| anyhow::anyhow!("DB upsert failed for {}: {e}", obj.key))?;
 
-            total += 1;
-            crate::jobs::log_progress(total, "scan-storj");
-        }
-
-        // list_objects in S3Client paginates internally — returns all objects at once.
-        // If future performance requires chunked page-by-page, refactor S3Client.list_objects
-        // to accept a continuation_token. For now this is complete.
-        break;
+        total += 1;
+        crate::jobs::log_progress(total, "scan-storj");
     }
 
     tracing::info!(total, "Job 0 (scan-storj): complete");
@@ -1449,13 +1455,10 @@ git commit -m "feat: add Job 1 (scan-hetzner) to populate video_index from Hetzn
 
 ```rust
 // src/jobs/phash_backfill.rs
-use std::sync::Arc;
-
 use anyhow::Result;
 use futures::StreamExt;
 use phash::PHasher;
 use tempfile::NamedTempFile;
-use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::consts::{MAX_PHASH_RETRIES, PHASH_CONCURRENCY, SCAN_PAGE_SIZE};
@@ -1465,7 +1468,6 @@ use crate::s3_client::S3Client;
 pub async fn run(s3: S3Client, db_url: String, cancel: CancellationToken) -> Result<()> {
     tracing::info!("Job 2 (phash-backfill): starting");
     let client = db::connect(&db_url).await?;
-    let semaphore = Arc::new(Semaphore::new(*PHASH_CONCURRENCY));
     let mut grand_total = 0usize;
 
     loop {
@@ -1479,16 +1481,14 @@ pub async fn run(s3: S3Client, db_url: String, cancel: CancellationToken) -> Res
             break;
         }
 
-        // Process up to PHASH_CONCURRENCY simultaneously using buffer_unordered.
+        // buffer_unordered(*PHASH_CONCURRENCY) already bounds the number of in-flight futures.
+        // No separate semaphore needed — adding one would be redundant.
         // NamedTempFile is created in the async closure (not moved into spawn_blocking)
         // so it is dropped in the async context after spawn_blocking returns.
         let results: Vec<(String, Result<String>)> = futures::stream::iter(rows)
             .map(|row| {
                 let s3 = s3.clone();
-                let sem = semaphore.clone();
                 async move {
-                    let _permit = sem.acquire().await.unwrap();
-
                     // Create tempfile in async scope
                     let mut tmp = NamedTempFile::new()
                         .map_err(|e| anyhow::anyhow!("tempfile: {e}"))?;
@@ -1578,12 +1578,12 @@ git commit -m "feat: add Job 2 (phash-backfill) with buffer_unordered + NamedTem
 
 ```rust
 // src/jobs/mirror.rs
-use std::sync::Arc;
-
+// NOTE: The spec pseudocode uses join_all — that is an error. buffer_unordered is used here
+// to bound the number of concurrent tempfiles (one per in-flight future). join_all would open
+// SCAN_PAGE_SIZE tempfiles simultaneously, exhausting disk space at 600K scale.
 use anyhow::Result;
 use futures::StreamExt;
 use tempfile::NamedTempFile;
-use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::consts::{ACCESS_GRANT_SFW, MIRROR_CONCURRENCY, SCAN_PAGE_SIZE, STORJ_SFW_BUCKET};
@@ -1594,7 +1594,6 @@ use crate::s3_client::S3Client;
 pub async fn run(s3: S3Client, db_url: String, cancel: CancellationToken) -> Result<()> {
     tracing::info!("Job 3 (mirror): starting");
     let client = db::connect(&db_url).await?;
-    let semaphore = Arc::new(Semaphore::new(*MIRROR_CONCURRENCY));
     let mut grand_total = 0usize;
 
     loop {
@@ -1608,15 +1607,14 @@ pub async fn run(s3: S3Client, db_url: String, cancel: CancellationToken) -> Res
             break;
         }
 
+        // buffer_unordered bounds concurrent in-flight futures (and their tempfiles).
+        // Do NOT replace with join_all — that would open all tempfiles simultaneously.
         let results: Vec<(String, String, Result<()>)> = futures::stream::iter(rows)
             .map(|row| {
                 let s3 = s3.clone();
-                let sem = semaphore.clone();
                 let bucket = STORJ_SFW_BUCKET.clone();
                 let grant = ACCESS_GRANT_SFW.clone();
                 async move {
-                    let _permit = sem.acquire().await.unwrap();
-
                     let result = mirror_one(&s3, &row.hetzner_key, &bucket, &grant).await;
                     (row.video_id, row.hetzner_key, result)
                 }
@@ -1831,7 +1829,9 @@ use serde::Serialize;
 
 use crate::db;
 use crate::jobs;
-use crate::main::AppState; // adjust import path if AppState is defined in lib.rs
+// AppState is defined in main.rs — the binary crate root IS main.rs, so `crate::AppState` works.
+// Do NOT use `crate::main::AppState` — that is not valid Rust syntax.
+use crate::AppState;
 
 #[derive(Serialize)]
 pub struct AuditResponse {
@@ -2057,6 +2057,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "15432:5432"   # expose for local smoke test only; remove in production if not needed
     networks:
       - storj-net
     restart: unless-stopped
@@ -2067,8 +2069,8 @@ services:
       retries: 5
 
   caddy:
-    # unchanged
-    ...
+    # Leave caddy service unchanged — do not paste this comment block into the YAML file.
+    # Copy the existing caddy service definition from the current docker-compose.yml.
 
 networks:
   storj-net:
