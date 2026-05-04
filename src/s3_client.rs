@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
@@ -122,6 +123,10 @@ pub struct S3ObjectInfo {
 }
 
 impl S3Client {
+    pub fn from_raw(client: aws_sdk_s3::Client, bucket: String) -> Self {
+        Self { client, bucket }
+    }
+
     pub async fn new() -> Self {
         Self::new_with_bucket(None).await
     }
@@ -353,6 +358,31 @@ impl S3Client {
             Ok(data.into_bytes().to_vec())
         })
         .await
+    }
+
+    /// Stream an S3 object directly to an open file — avoids loading into memory.
+    pub async fn download_to_file(
+        &self,
+        key: &str,
+        file: &mut tokio::fs::File,
+    ) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+
+        let resp = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut body = resp.body;
+        while let Some(chunk) = body.next().await {
+            let bytes = chunk.map_err(|e| e.to_string())?;
+            file.write_all(&bytes).await.map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     #[allow(dead_code)]
