@@ -25,6 +25,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 pub(crate) mod consts;
 mod db;
+mod jobs;
 mod routes;
 mod s3_client;
 mod storj_s3_client;
