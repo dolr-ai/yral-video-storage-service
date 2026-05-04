@@ -210,14 +210,14 @@ pending → failed                       (after retry_count >= MAX_PHASH_RETRIES
 ### Shared: Backpressure + Cancellation
 
 All jobs:
-- Use `tokio::sync::Semaphore` for bounded parallel I/O
+- Use `futures::stream::iter(rows).buffer_unordered(N)` for bounded parallel I/O — this limits concurrent in-flight futures without a separate semaphore
 - Check `CancellationToken` between batch iterations
 - DB writes happen sequentially after parallel work, not inside concurrent futures
 - Downloads stream to `NamedTempFile` (disk, not in-memory); auto-deleted on drop
 
 ```
-PHASH_CONCURRENCY=4      # semaphore permits for phash ops
-MIRROR_CONCURRENCY=8     # semaphore permits for mirror ops
+PHASH_CONCURRENCY=4      # buffer_unordered concurrency for phash ops
+MIRROR_CONCURRENCY=8     # buffer_unordered concurrency for mirror ops
 SCAN_PAGE_SIZE=1000      # S3 list_objects_v2 page size
 MAX_PHASH_RETRIES=5      # retry_count ceiling before status → 'failed'
 ```
@@ -315,7 +315,7 @@ loop:
     results: Vec<(video_id, Result<phash>)> =
         futures::stream::iter(rows)
             .map(|row| async {
-                _permit = semaphore.acquire()
+                // buffer_unordered bounds concurrency — no semaphore needed
 
                 // NamedTempFile created in async scope; only .path() passed into
                 // spawn_blocking — file handle stays in async scope, not moved
@@ -379,9 +379,10 @@ loop:
     if empty: break
 
     // Parallel upload; DB writes happen AFTER each video completes
-    semaphore = Semaphore(MIRROR_CONCURRENCY)
-    results: Vec<(video_id, Result<()>)> = join_all(rows.map(|row| async {
-        _permit = semaphore.acquire()
+    // Use buffer_unordered (NOT join_all) to bound concurrent tempfiles
+    results: Vec<(video_id, Result<()>)> =
+        futures::stream::iter(rows)
+            .map(|row| async {
 
         // 1. Copy MP4 (required)
         tmp_mp4 = NamedTempFile::new()
@@ -539,8 +540,8 @@ yral-video-storage-service/
 | `STORJ_GATEWAY_ACCESS_KEY` | required | From `uplink share --register` (see setup below) |
 | `STORJ_GATEWAY_SECRET_KEY` | required | From `uplink share --register` |
 | `STORJ_SFW_BUCKET` | `yral-sfw` | Target Storj bucket name |
-| `PHASH_CONCURRENCY` | `4` | Semaphore permits for phash ops |
-| `MIRROR_CONCURRENCY` | `8` | Semaphore permits for mirror ops |
+| `PHASH_CONCURRENCY` | `4` | buffer_unordered concurrency for phash ops |
+| `MIRROR_CONCURRENCY` | `8` | buffer_unordered concurrency for mirror ops |
 | `SCAN_PAGE_SIZE` | `1000` | S3 list_objects_v2 page size |
 | `MAX_PHASH_RETRIES` | `5` | Retry ceiling before status → 'failed' |
 | `TEMP_KEY_PREFIX` | `_pending/` | Hetzner key prefix identifying temp objects |
@@ -615,7 +616,7 @@ Re-trigger Jobs 1, 2, 3 on a schedule to pick up new uploads. Jobs are idempoten
 
 - [x] Idempotent jobs — upsert without first-write-wins, WHERE guards on status
 - [x] All-or-none per video — DB update only after successful upload (MP4 + thumbnail)
-- [x] Backpressure — semaphore bounds concurrent in-flight ops
+- [x] Backpressure — buffer_unordered bounds concurrent in-flight ops
 - [x] Tempfile cleanup — `NamedTempFile` auto-deletes on drop; path passed to spawn_blocking, file handle stays in async scope
 - [x] Graceful shutdown — CancellationToken checked between batch iterations; HTTP endpoints return 202 immediately
 - [x] Retry cap — `retry_count` + `MAX_PHASH_RETRIES`; terminal `failed` state prevents infinite retry storms
