@@ -21,6 +21,7 @@ aws-sdk-s3 = "1.64"
 axum = { version = "0.8.1", features = ["multipart"] }
 bytes = "1.8"
 chrono = "0.4"
+futures = "0.3"
 futures-util = "0.3.31"
 http-body-util = "0.1"
 once_cell = "1.21.1"
@@ -39,7 +40,10 @@ sentry-tower = { version = "0.42.0", features = ["http"] }
 sentry-tracing = "0.42.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
+phash = { path = "crates/phash" }
 tempfile = "3"
+tokio-postgres = "0.7.15"
+tokio-util = { version = "0.7", features = ["rt"] }
 thiserror = "2.0.12"
 tower = "0.5"
 tokio = { version = "1.43.0", features = ["full"] }
