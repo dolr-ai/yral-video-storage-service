@@ -361,28 +361,78 @@ impl S3Client {
     }
 
     /// Stream an S3 object directly to an open file — avoids loading into memory.
+    /// Retries with exponential backoff; truncates the file before each retry.
     pub async fn download_to_file(
         &self,
         key: &str,
         file: &mut tokio::fs::File,
     ) -> Result<(), String> {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
-        let resp = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut last_err = String::new();
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                file.seek(std::io::SeekFrom::Start(0))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                file.set_len(0).await.map_err(|e| e.to_string())?;
 
-        let mut body = resp.body;
-        while let Some(chunk) = body.next().await {
-            let bytes = chunk.map_err(|e| e.to_string())?;
-            file.write_all(&bytes).await.map_err(|e| e.to_string())?;
+                let delay_ms = BASE_DELAY_MS * 2u64.pow(attempt - 1);
+                let jitter = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos()
+                    % 250) as u64;
+                let total_delay = Duration::from_millis(delay_ms + jitter);
+                tracing::warn!(
+                    operation = "download_to_file",
+                    key = key,
+                    attempt = attempt,
+                    max_retries = MAX_RETRIES,
+                    delay_ms = total_delay.as_millis() as u64,
+                    error = %last_err,
+                    "S3 operation failed, retrying"
+                );
+                tokio::time::sleep(total_delay).await;
+            }
+
+            let result: Result<(), String> = async {
+                let resp = self
+                    .client
+                    .get_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let mut body = resp.body;
+                while let Some(chunk) = body.next().await {
+                    let bytes = chunk.map_err(|e| e.to_string())?;
+                    file.write_all(&bytes).await.map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            }
+            .await;
+
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if attempt == MAX_RETRIES {
+                        tracing::error!(
+                            operation = "download_to_file",
+                            key = key,
+                            attempts = attempt + 1,
+                            error = %e,
+                            "S3 operation failed after all retries"
+                        );
+                        return Err(e);
+                    }
+                    last_err = e;
+                }
+            }
         }
-        Ok(())
+        Err(last_err)
     }
 
     #[allow(dead_code)]

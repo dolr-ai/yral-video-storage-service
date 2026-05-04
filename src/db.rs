@@ -223,7 +223,7 @@ pub async fn update_mirror_success(
         .execute(
             "UPDATE video_index
              SET storj_key = $1, status = 'mirrored', error_message = NULL
-             WHERE video_id = $2",
+             WHERE video_id = $2 AND status = 'phash_computed'",
             &[&storj_key, &video_id],
         )
         .await?;
@@ -419,8 +419,15 @@ mod tests {
             .await
             .unwrap();
 
-        let rows = fetch_pending_phash_batch(&client, 10).await.unwrap();
-        assert!(rows.iter().any(|r| r.video_id == "user/abc"));
+        let row = client
+            .query_one(
+                "SELECT storj_key FROM video_index WHERE video_id = $1",
+                &[&"user/abc"],
+            )
+            .await
+            .unwrap();
+        let storj_key: String = row.get(0);
+        assert_eq!(storj_key, "user/abc-v2.mp4");
         drop(pg);
     }
 
