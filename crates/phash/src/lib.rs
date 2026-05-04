@@ -24,8 +24,8 @@ impl PHasher {
     }
 
     /// Compute perceptual hash for a video file.
-    /// Returns concatenated hex-encoded 64-bit hashes — one per sampled frame.
-    /// 10 frames × 16 hex chars = 160-char deterministic string.
+    /// Returns concatenated hex-encoded hashes — one per sampled frame.
+    /// Output length = num_frames × (hash_size² / 4) hex chars (deterministic).
     pub fn compute_hash(&self, path: &Path) -> Result<String> {
         use ffmpeg_next as ffmpeg;
 
@@ -41,13 +41,27 @@ impl PHasher {
             .index();
 
         let stream = ictx.stream(video_stream_index).context("stream")?;
-        let duration = stream.duration();
 
         let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
             .context("codec context")?
             .decoder()
             .video()
             .context("video decoder")?;
+
+        // AV_NOPTS_VALUE = i64::MIN — stream duration absent for fragmented/truncated files
+        let duration_ts = if stream.duration() == i64::MIN {
+            // Fall back to format-context duration (in AV_TIME_BASE = 1_000_000 units)
+            let fmt_duration = ictx.duration();
+            if fmt_duration <= 0 {
+                anyhow::bail!("Cannot determine video duration for {}", path.display());
+            }
+            // Convert from AV_TIME_BASE to stream time_base units
+            let tb = stream.time_base();
+            (fmt_duration as f64 * tb.denominator() as f64
+                / (ffmpeg_next::ffi::AV_TIME_BASE as f64 * tb.numerator() as f64)) as i64
+        } else {
+            stream.duration()
+        };
 
         // Compute evenly-spaced timestamps (in stream time_base units)
         let timestamps: Vec<i64> = (0..self.num_frames)
@@ -57,7 +71,7 @@ impl PHasher {
                 } else {
                     0.5
                 };
-                (frac * duration as f64) as i64
+                (frac * duration_ts as f64) as i64
             })
             .collect();
 
@@ -69,6 +83,7 @@ impl PHasher {
 
         for &ts in &timestamps {
             ictx.seek(ts, ..ts).context("seek")?;
+            decoder.flush();
 
             let mut found = false;
             'packet_loop: for (stream, packet) in ictx.packets() {
@@ -87,9 +102,10 @@ impl PHasher {
             }
 
             if !found {
-                // seek past end — use last successfully hashed frame or skip
-                // For robustness, just skip missing frames
-                log::warn!("No frame found at timestamp {ts}");
+                log::warn!("No frame found at timestamp {ts}, using zero hash");
+                // hash_size bits = hash_size * hash_size bits = hash_size^2 / 8 bytes
+                let zero_bytes = vec![0u8; (self.hash_size * self.hash_size / 8) as usize];
+                result.push_str(&bytes_to_hex(&zero_bytes));
             }
         }
 
@@ -102,7 +118,12 @@ impl PHasher {
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 fn frame_to_image(frame: &ffmpeg_next::frame::Video) -> Result<DynamicImage> {
@@ -143,13 +164,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn phaser_default_num_frames() {
+    fn phasher_default_num_frames() {
         let p = PHasher::new();
         assert_eq!(p.num_frames, 10);
     }
 
     #[test]
-    fn phaser_default_hash_size() {
+    fn phasher_default_hash_size() {
         let p = PHasher::new();
         assert_eq!(p.hash_size, 8);
     }
