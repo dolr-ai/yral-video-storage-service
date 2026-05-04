@@ -26,9 +26,9 @@
 
 ## Architecture
 
-**Approach:** HTTP-triggered background jobs in main service (Approach B).
+**Approach:** HTTP-triggered background jobs in main service.
 
-Jobs live in `src/jobs/`, triggered via `POST /mirror/jobs/*` with existing `SERVICE_SECRET_TOKEN` auth. Postgres tracks state. phash runs in `spawn_blocking`. Sentry + tracing already wired.
+Jobs live in `src/jobs/`, triggered via `POST /mirror/jobs/*`. Endpoints return **202 Accepted immediately** and run the job as a background tokio task — HTTP connections do not block for job completion. Existing `SERVICE_SECRET_TOKEN` auth middleware protects all endpoints. Postgres tracks state. phash runs in `spawn_blocking`. Sentry + tracing already wired in `main.rs`.
 
 ### Migration sequence
 
@@ -41,7 +41,9 @@ Jobs live in `src/jobs/`, triggered via `POST /mirror/jobs/*` with existing `SER
 6. Job 4: Cleanup         — delete confirmed-mirrored temp/pending Hetzner objects
 ```
 
-Jobs 0 and 1 write different columns — can run in either order or concurrently.
+Jobs 0 and 1 write different columns and can run concurrently. Jobs 2–4 must run in order.
+
+For ongoing delta (new uploads after initial rclone): re-trigger Job 1 periodically to discover new Hetzner objects, then Jobs 2 and 3 for phash + mirror.
 
 ---
 
@@ -50,17 +52,32 @@ Jobs 0 and 1 write different columns — can run in either order or concurrently
 **Current:** `x86_64-unknown-linux-musl` + Alpine base image
 **New:** `x86_64-unknown-linux-gnu` + Debian Slim base image
 
-Reason: `ffmpeg-next` crate (needed for phash) links against libavcodec/libavformat C libs, incompatible with musl cross-compile. `rustls-tls` already used so no OpenSSL concern.
+Reason: `ffmpeg-next` crate links against libavcodec/libavformat C libs, incompatible with musl. `rustls-tls` already used so no OpenSSL concern from dropping musl.
 
 **CI (`build-binary.yml`):**
 - Remove `musl-tools` apt package
 - Change target to `x86_64-unknown-linux-gnu`
-- Install `ffmpeg` dev headers: `libavformat-dev libavcodec-dev libavutil-dev libswscale-dev clang`
+- Install ffmpeg dev headers before build: `libavformat-dev libavcodec-dev libavutil-dev libswscale-dev clang`
 
 **Dockerfile (multi-stage):**
-```
-Stage 1 (builder): rust:bookworm + ffmpeg-dev headers → compile binary
-Stage 2 (runtime): debian:bookworm-slim + runtime ffmpeg + uplink CLI
+```dockerfile
+# Stage 1: builder
+FROM rust:bookworm AS builder
+RUN apt-get update && apt-get install -y \
+    libavformat-dev libavcodec-dev libavutil-dev libswscale-dev clang pkg-config
+WORKDIR /app
+COPY . .
+RUN cargo build --release --target x86_64-unknown-linux-gnu
+
+# Stage 2: runtime
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
+# install uplink CLI — pin version for reproducible builds
+RUN curl -L https://github.com/storj/storj/releases/download/v1.112.4/uplink_linux_amd64.zip \
+    -o /tmp/uplink.zip && unzip /tmp/uplink.zip -d /tmp && install /tmp/uplink /usr/local/bin/uplink
+COPY --from=builder /app/target/x86_64-unknown-linux-gnu/release/storj-interface /app/storj-interface
+EXPOSE 3000
+ENTRYPOINT ["/app/storj-interface"]
 ```
 
 ---
@@ -81,19 +98,51 @@ postgres:
   networks:
     - storj-net
   restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U storj -d mirror_index"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+
+storj-interface:
+  # ... existing config ...
+  depends_on:
+    postgres:
+      condition: service_healthy
+  environment:
+    # Single source of truth: DATABASE_URL contains the password.
+    # Do NOT set POSTGRES_PASSWORD separately in storj-interface env.
+    DATABASE_URL: postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/mirror_index
 ```
 
-Pattern: `tokio_postgres` + `batch_execute` for schema init (same as counter repo). One connection per job run, reconnect per batch loop iteration. No pool needed — DB writes are fast, bottleneck is network/CPU.
+Pattern: `tokio_postgres` + `batch_execute` for schema init (matches counter repo). One connection per job run. DB writes happen in a sequential post-processing loop after parallel compute/network work completes — never inside concurrent futures.
+
+### Storj Credential Architecture
+
+Two Storj auth paths exist; both must derive from the same root access grant:
+
+| Path | Used by | Credential |
+|---|---|---|
+| `uplink` CLI | Jobs 3 (mirror upload) | `STORJ_ACCESS_GRANT_SFW` (existing env var) |
+| `gateway.storjshare.io` S3 API | Jobs 0, 4 (scan/verify) | `STORJ_GATEWAY_ACCESS_KEY` + `STORJ_GATEWAY_SECRET_KEY` |
+
+Generate S3-compatible credentials once:
+```bash
+uplink share --register --readonly=false \
+    --access=$STORJ_ACCESS_GRANT_SFW \
+    sj://yral-sfw
+# Outputs: Access Key ID and Secret Key → set as STORJ_GATEWAY_ACCESS_KEY/SECRET_KEY
+```
+
+**Caveat:** Storj's S3 gateway (`gateway.storjshare.io`) supports `ListObjectsV2` but compatibility is partial (no object versioning, no multipart listing). Validate object count from Job 0 against `uplink ls -r sj://yral-sfw | wc -l` on the first run to confirm no objects are missed.
 
 ### Storj S3 Client (`src/storj_s3_client.rs`)
 
-New `StorjS3Client` using Storj's S3-compatible gateway (`gateway.storjshare.io`). Same `aws-sdk-s3` code as existing `S3Client`, different endpoint + credentials. Used by Job 0 (scan) and Job 4 (verify before delete).
-
-Credentials: S3-compatible access key + secret derived from Storj access grant (one-time `uplink share --register` command).
+New `StorjS3Client` struct: same `aws-sdk-s3` code as existing `S3Client`, endpoint overridden to `https://gateway.storjshare.io`, credentials from `STORJ_GATEWAY_ACCESS_KEY` / `STORJ_GATEWAY_SECRET_KEY`. Used by Jobs 0 and 4.
 
 ### phash crate (`crates/phash/`)
 
-Ported verbatim from `off-chain-agent/src/duplicate_video/phash.rs`. Dependencies: `ffmpeg-next`, `image_hasher`, `image`. No API changes.
+Ported verbatim from `off-chain-agent/src/duplicate_video/phash.rs`. Dependencies: `ffmpeg-next`, `image_hasher`, `image`. No API changes. Produces 640-char deterministic binary string — idempotent for the same video file.
 
 ---
 
@@ -101,149 +150,225 @@ Ported verbatim from `off-chain-agent/src/duplicate_video/phash.rs`. Dependencie
 
 ```sql
 CREATE TABLE IF NOT EXISTS video_index (
+    -- Full S3 key without extension: "user123/abc123"
+    -- Derived keys: hetzner_key = video_id || '.mp4'
+    --               storj_key   = video_id || '.mp4'
+    --               thumbnail   = video_id || '-thumbnail.png'
     video_id      TEXT PRIMARY KEY,
-    -- stem of mp4 filename: "user123/abc.mp4" → video_id = "abc"
-    -- actually full relative path without extension for uniqueness
-    hetzner_key   TEXT,          -- "user123/abc.mp4"  NULL = not in Hetzner
-    storj_key     TEXT,          -- "user123/abc.mp4"  NULL = not in Storj
-    phash         TEXT,          -- 640-char binary string, NULL = not computed
+    hetzner_key   TEXT,     -- NULL = not known to be in Hetzner
+    storj_key     TEXT,     -- NULL = not known to be in Storj
+    phash         TEXT,     -- 640-char binary, NULL = not computed
     is_temp       BOOLEAN NOT NULL DEFAULT FALSE,
-    status        TEXT NOT NULL DEFAULT 'pending',
-    -- pending | phash_computed | mirrored | done
+    retry_count   INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'phash_computed', 'mirrored', 'failed', 'done')),
     error_message TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_phash_null    ON video_index (video_id)
-    WHERE phash IS NULL;
-CREATE INDEX IF NOT EXISTS idx_missing_storj ON video_index (video_id)
-    WHERE storj_key IS NULL AND is_temp = FALSE;
+-- Covering index: Job 2 SELECTs video_id + hetzner_key
+CREATE INDEX IF NOT EXISTS idx_phash_null    ON video_index (video_id, hetzner_key)
+    WHERE phash IS NULL AND hetzner_key IS NOT NULL AND status != 'failed';
+-- Covers Job 3 WHERE clause fully: storj_key IS NULL AND hetzner_key IS NOT NULL
+-- AND is_temp = FALSE AND status = 'phash_computed'
+CREATE INDEX IF NOT EXISTS idx_missing_storj ON video_index (video_id, hetzner_key)
+    WHERE storj_key IS NULL AND is_temp = FALSE AND hetzner_key IS NOT NULL
+      AND status = 'phash_computed';
 CREATE INDEX IF NOT EXISTS idx_temp_cleanup  ON video_index (video_id)
     WHERE is_temp = TRUE AND status = 'mirrored';
 CREATE INDEX IF NOT EXISTS idx_status        ON video_index (status);
+-- Supports duplicate phash audit query
+CREATE INDEX IF NOT EXISTS idx_phash_val     ON video_index (phash)
+    WHERE phash IS NOT NULL;
+
+-- Auto-update updated_at
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+$$;
+CREATE TRIGGER video_index_updated_at
+    BEFORE UPDATE ON video_index
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 ```
 
-**video_id:** Full relative path without extension (e.g. `"user123/abc123"`). This ensures uniqueness across folders. `hetzner_key` = `video_id + ".mp4"`. Thumbnail key = `video_id + "-thumbnail.png"`.
+**video_id** is the full path without extension (e.g. `"user123/abc123"`), not the filename stem alone. This prevents collisions between `user1/abc.mp4` and `user2/abc.mp4`.
 
 **Status state machine:**
 ```
-pending → phash_computed → mirrored → done
-                                    ↑ (temp files only: cleanup removes hetzner_key)
+pending → phash_computed → mirrored
+                         → done        (temp files only, after cleanup removes hetzner_key)
+pending → failed                       (after retry_count >= MAX_PHASH_RETRIES, default 5)
 ```
-Errors set `error_message` only; `status` stays at current value for retry on next run.
+
+`mirrored` is the **terminal state for permanent (non-temp) videos**. Only temp videos advance to `done`. `failed` is a terminal state for unrecoverable errors (corrupt video, permanently missing file). Manual intervention required to reset: `UPDATE video_index SET status='pending', retry_count=0 WHERE video_id=$1`.
 
 ---
 
 ## Job Specifications
 
-### Backpressure
+### Shared: Backpressure + Cancellation
 
-All jobs use a `tokio::sync::Semaphore` to bound concurrent in-flight operations. Never holds more than `CONCURRENCY` videos in memory simultaneously. Downloads stream to tempfile (not in-memory).
+All jobs:
+- Use `tokio::sync::Semaphore` for bounded parallel I/O
+- Check `CancellationToken` between batch iterations
+- DB writes happen sequentially after parallel work, not inside concurrent futures
+- Downloads stream to `NamedTempFile` (disk, not in-memory); auto-deleted on drop
 
 ```
-PHASH_CONCURRENCY=4      # concurrent phash ops (download + decode)
-MIRROR_CONCURRENCY=8     # concurrent mirror ops (download + uplink upload)
+PHASH_CONCURRENCY=4      # semaphore permits for phash ops
+MIRROR_CONCURRENCY=8     # semaphore permits for mirror ops
 SCAN_PAGE_SIZE=1000      # S3 list_objects_v2 page size
+MAX_PHASH_RETRIES=5      # retry_count ceiling before status → 'failed'
 ```
 
-Progress logged every 1000 videos via `tracing::info!`. Per-video errors: `tracing::error!` + `sentry::capture_error`.
+**CancellationToken wiring:** Create a `CancellationToken` at startup, store in `AppState`. In the shutdown signal handler, call `token.cancel()` alongside `notify_clone.notify_one()`. Each HTTP job endpoint returns 202 immediately, then `tokio::spawn`s the job task with a token clone from `AppState`. Each job checks `token.is_cancelled()` at the top of each batch iteration and returns early if set.
+
+```rust
+// In run_server():
+let cancel = CancellationToken::new();
+// In signal handler:
+cancel.cancel();
+notify_clone.notify_one();
+// AppState holds cancel: CancellationToken
+// Job endpoint:
+let token = state.cancel.clone();
+tokio::spawn(async move { run_job_phash(db, token).await });
+return StatusCode::ACCEPTED;
+```
+
+Progress: `tracing::info!` every 1000 videos. Errors: `tracing::error!` + `sentry::capture_error` per video. All success UPDATE statements include `error_message = NULL` to avoid stale error counts in audit.
+
+**Disk space:** Minimum 10GB free on temp partition before running phash/mirror jobs. `MIRROR_CONCURRENCY=8` at average 50MB/video = ~400MB simultaneous temp usage. Check with `df -h /tmp` before triggering jobs.
 
 ---
 
 ### Job 0 — Scan Storj
 
-`POST /mirror/jobs/scan-storj`
+`POST /mirror/jobs/scan-storj` → 202 Accepted, runs in background
 
-Reconciles the Postgres index with what rclone already copied. Must run after rclone and before Job 3 to avoid re-uploading 600K already-mirrored files.
+Reconciles the Postgres index with what rclone already copied. Must run before Job 3 to avoid re-uploading 600K already-mirrored files.
 
 ```
 for each page of objects in yral-sfw (StorjS3Client.list_objects_v2):
+    check CancellationToken
+
     for each key ending in ".mp4":
-        video_id = key without extension
-        UPSERT video_index (video_id, storj_key=key)
-        ON CONFLICT DO UPDATE SET storj_key = EXCLUDED.storj_key
-        WHERE video_index.storj_key IS NULL
+        video_id = strip ".mp4" suffix from key
+
+        -- Always update storj_key (not first-write-wins) to allow
+        -- correction if a stale or wrong key was previously recorded
+        INSERT INTO video_index (video_id, storj_key)
+        VALUES ($video_id, $key)
+        ON CONFLICT (video_id) DO UPDATE
+            SET storj_key = EXCLUDED.storj_key,
+                error_message = NULL
 ```
 
-Idempotent: re-running is safe. Does not touch phash or status.
+After completion: validate object count against `uplink ls -r` count on first run.
 
 ---
 
 ### Job 1 — Scan Hetzner
 
-`POST /mirror/jobs/scan-hetzner`
+`POST /mirror/jobs/scan-hetzner` → 202 Accepted, runs in background
 
 ```
 for each page of objects in Hetzner bucket (S3Client.list_objects):
-    skip keys ending in "_thumbnail.png" or "-thumbnail.png"
-    for each key ending in ".mp4":
-        video_id = key without extension
-        is_temp = key contains TEMP_KEY_PREFIX (default "_pending/")
-        UPSERT video_index (video_id, hetzner_key=key, is_temp)
-        ON CONFLICT DO UPDATE SET hetzner_key = EXCLUDED.hetzner_key,
-            is_temp = EXCLUDED.is_temp
-        WHERE video_index.hetzner_key IS NULL
+    check CancellationToken
+    skip keys NOT ending in ".mp4"  -- excludes both thumbnail variants
+    skip keys ending in "_thumbnail.png" or "-thumbnail.png" (redundant safety)
+
+    video_id = strip ".mp4" suffix from key
+    is_temp = key.contains(TEMP_KEY_PREFIX)  -- default "_pending/"
+
+    INSERT INTO video_index (video_id, hetzner_key, is_temp)
+    VALUES ($video_id, $key, $is_temp)
+    ON CONFLICT (video_id) DO UPDATE
+        SET hetzner_key = EXCLUDED.hetzner_key,
+            is_temp = EXCLUDED.is_temp,
+            error_message = NULL
 ```
 
-Idempotent. Does not touch phash or status.
+Re-trigger periodically for ongoing delta (new uploads after initial rclone).
 
 ---
 
 ### Job 2 — Phash Backfill
 
-`POST /mirror/jobs/phash`
+`POST /mirror/jobs/phash` → 202 Accepted, runs in background
 
 ```
 loop:
+    check CancellationToken
+
     rows = SELECT video_id, hetzner_key FROM video_index
            WHERE phash IS NULL
+             AND hetzner_key IS NOT NULL   -- skip Storj-only rows (Job 1 not yet run)
+             AND status = 'pending'        -- skip mirrored/failed rows
            LIMIT SCAN_PAGE_SIZE
 
     if empty: break
 
-    semaphore = Semaphore(PHASH_CONCURRENCY)
-    results = join_all(rows.map(|row| async {
-        _permit = semaphore.acquire()
+    // Use buffer_unordered instead of join_all so at most PHASH_CONCURRENCY
+    // NamedTempFiles exist on disk simultaneously (join_all would open all 1000)
+    results: Vec<(video_id, Result<phash>)> =
+        futures::stream::iter(rows)
+            .map(|row| async {
+                _permit = semaphore.acquire()
 
-        // download to tempfile (streaming, not in-memory)
-        tmp = stream hetzner_key to NamedTempFile
+                // NamedTempFile created in async scope; only .path() passed into
+                // spawn_blocking — file handle stays in async scope, not moved
+                // into the blocking thread, so drop always runs here
+                tmp = NamedTempFile::new()
+                stream_download(hetzner_key, tmp.as_file_mut()).await?
 
-        // CPU-intensive: run in blocking thread pool
-        phash_result = spawn_blocking(|| PHasher::new().compute_hash(&tmp.path()))
+                phash_result = spawn_blocking({
+                    let path = tmp.path().to_owned()
+                    move || PHasher::new().compute_hash(&path)
+                }).await
 
-        // always cleanup, success or error
-        drop(tmp)  // NamedTempFile auto-deletes on drop
+                drop(tmp)  // file deleted here, always, before permit released
 
-        (row.video_id, phash_result)
-    }))
+                (row.video_id, phash_result)
+            })
+            .buffer_unordered(PHASH_CONCURRENCY)
+            .collect()
+            .await
 
+    // Sequential DB writes after all parallel work done
     for (video_id, result) in results:
         if Ok(phash):
-            UPDATE video_index SET phash=$phash, status='phash_computed',
-                error_message=NULL, updated_at=NOW()
-            WHERE video_id=$video_id
-        if Err(e):
-            tracing::error!(video_id, error=%e, "phash failed")
-            sentry::capture_error(&e)
-            UPDATE video_index SET error_message=$e, updated_at=NOW()
-            WHERE video_id=$video_id
-            // status stays 'pending' → retried next run
-```
+            UPDATE video_index
+            SET phash=$phash, status='phash_computed', error_message=NULL
+            WHERE video_id=$video_id AND status='pending'
+            -- status='pending' guard prevents regression if a concurrent Job 3
+            -- already advanced this row to 'mirrored'
 
-Idempotent: WHERE clause filters already-computed rows.
-Tempfile cleanup: `NamedTempFile` from `tempfile` crate auto-deletes on drop (success or panic).
+        if Err(e):
+            // Atomic increment + conditional status: single round trip, no TOCTOU
+            UPDATE video_index
+            SET retry_count = retry_count + 1,
+                status = CASE WHEN retry_count + 1 >= $MAX_PHASH_RETRIES
+                              THEN 'failed' ELSE 'pending' END,
+                error_message = $e
+            WHERE video_id=$video_id
+            RETURNING retry_count AS new_retries INTO new_retries
+
+            tracing::error!(video_id, retries=new_retries, error=%e, "phash failed")
+            sentry::capture_error(&e)
+```
 
 ---
 
 ### Job 3 — Mirror Incremental
 
-`POST /mirror/jobs/mirror`
-
-Handles new videos uploaded after rclone ran. For bulk initial migration, rclone + Job 0 handle the 600K; this job is for the ongoing delta.
+`POST /mirror/jobs/mirror` → 202 Accepted, runs in background
 
 ```
 loop:
+    check CancellationToken
+
     rows = SELECT video_id, hetzner_key FROM video_index
            WHERE storj_key IS NULL
              AND hetzner_key IS NOT NULL
@@ -253,82 +378,118 @@ loop:
 
     if empty: break
 
+    // Parallel upload; DB writes happen AFTER each video completes
     semaphore = Semaphore(MIRROR_CONCURRENCY)
-    for each row (bounded by semaphore):
-        // 1. Copy MP4
-        tmp_mp4 = download hetzner_key to NamedTempFile
-        uplink cp --access=$ACCESS_GRANT tmp_mp4 sj://yral-sfw/{hetzner_key}
+    results: Vec<(video_id, Result<()>)> = join_all(rows.map(|row| async {
+        _permit = semaphore.acquire()
+
+        // 1. Copy MP4 (required)
+        tmp_mp4 = NamedTempFile::new()
+        stream_download(hetzner_key, tmp_mp4.as_file_mut()).await?
+        uplink_cp(tmp_mp4.path(), format!("sj://yral-sfw/{hetzner_key}")).await?
         drop(tmp_mp4)
 
-        // 2. Copy thumbnail if present (best-effort, non-fatal)
-        thumb_hetzner = hetzner_key.replace(".mp4", "-thumbnail.png")
-        if S3Client.object_exists(thumb_hetzner):
-            tmp_thumb = download thumb_hetzner to NamedTempFile
-            uplink cp --access=$ACCESS_GRANT tmp_thumb sj://yral-sfw/{thumb_hetzner}
-            drop(tmp_thumb)
+        // 2. Copy thumbnail (in scope per spec; missing thumbnail = warn not error)
+        // Use strip_suffix to avoid replacing ".mp4" within folder names
+        thumb_key = hetzner_key.strip_suffix(".mp4")
+            .map(|stem| format!("{stem}-thumbnail.png"))
+        if let Some(thumb_key) = thumb_key:
+            match S3Client.object_exists(&thumb_key).await:
+                Ok(true):
+                    tmp_thumb = NamedTempFile::new()
+                    stream_download(&thumb_key, tmp_thumb.as_file_mut()).await?
+                    uplink_cp(tmp_thumb.path(), format!("sj://yral-sfw/{thumb_key}")).await?
+                    drop(tmp_thumb)
+                Ok(false):
+                    // Thumbnail absent on Hetzner — warn but do not block MP4 mirror
+                    tracing::warn!(video_id, "thumbnail missing on Hetzner, mirroring MP4 only")
+                    sentry::add_breadcrumb(...)  // not a capture_error; expected for some videos
+                Err(e):
+                    // Transient S3 error checking thumbnail — treat as hard error, retry row
+                    return Err(e)
 
-        // 3. Commit to index
-        UPDATE video_index SET storj_key=hetzner_key, status='mirrored',
-            updated_at=NOW()
-        WHERE video_id=$video_id
+        Ok(row.video_id)
+    }))
 
-        // on any error: log + sentry, storj_key stays NULL, retried next run
+    // Sequential DB writes
+    for (video_id, result) in results:
+        if Ok(_):
+            UPDATE video_index
+            SET storj_key=hetzner_key, status='mirrored', error_message=NULL
+            WHERE video_id=$video_id
+        if Err(e):
+            UPDATE video_index SET error_message=$e WHERE video_id=$video_id
+            -- storj_key stays NULL → retried next run
+            tracing::error!(video_id, error=%e, "mirror failed")
+            sentry::capture_error(&e)
 ```
 
-All-or-none per video: DB update only after successful upload. If process crashes after upload but before DB update, next run re-uploads (uplink cp to same key = idempotent overwrite).
+All-or-none per video pair: DB commit only after both MP4 and thumbnail uploads succeed. If process crashes after upload but before DB update, next run re-uploads (uplink cp to same key = idempotent overwrite, no duplicate data).
 
 ---
 
 ### Job 4 — Temp Cleanup
 
-`POST /mirror/jobs/cleanup`
+`POST /mirror/jobs/cleanup` → 202 Accepted, runs in background
 
-Deletes confirmed-mirrored temp/pending Hetzner objects.
+**Intentionally serial** (no concurrency semaphore) — deletion is irreversible; safety over throughput. Do not trigger Job 4 until `GET /mirror/audit` shows `missing_storj = 0`.
 
 ```
-rows = SELECT video_id, hetzner_key, storj_key FROM video_index
-       WHERE is_temp = TRUE AND status = 'mirrored'
-         AND hetzner_key IS NOT NULL AND storj_key IS NOT NULL
+loop:
+    check CancellationToken
 
-for each row:
-    // Safety: verify Storj copy exists before deleting Hetzner
-    assert StorjS3Client.object_exists(storj_key)
+    rows = SELECT video_id, hetzner_key, storj_key FROM video_index
+           WHERE is_temp = TRUE AND status = 'mirrored'
+             AND hetzner_key IS NOT NULL AND storj_key IS NOT NULL
+           LIMIT SCAN_PAGE_SIZE
 
-    S3Client.delete_video(hetzner_key)
+    if empty: break
 
-    UPDATE video_index SET hetzner_key=NULL, is_temp=FALSE,
-        status='done', updated_at=NOW()
-    WHERE video_id=$video_id
+    for each row:
+        // object_exists returns Ok(true), Ok(false), or Err(e)
+        // Err(e)     → transient error → abort row, log, retry next run (do NOT delete)
+        // Ok(false)  → Storj copy missing → CRITICAL alert, do NOT delete Hetzner copy
+        // Ok(true)   → safe to delete
+        match StorjS3Client.object_exists(storj_key):
+            Err(e)      → tracing::error!; sentry::capture_error(&e); continue next row
+            Ok(false)   → tracing::error!("Storj copy missing before cleanup — data loss risk");
+                          sentry::capture_error(...); continue next row
+            Ok(true)    → proceed
 
-    // on error: log + sentry, hetzner_key stays, retried next run
+        S3Client.delete_video(hetzner_key)?
+
+        UPDATE video_index
+        SET hetzner_key=NULL, is_temp=FALSE, status='done', error_message=NULL
+        WHERE video_id=$video_id
+
+        // on delete error: log + sentry, row retried next run
 ```
 
 ---
 
 ### Audit Endpoint
 
-`GET /mirror/audit`
-
-Single aggregate SELECT — no full scan.
+`GET /mirror/audit` — auth required, no side effects
 
 ```sql
 SELECT
-    COUNT(*)                                         AS total,
-    COUNT(phash)                                     AS phash_computed,
-    COUNT(*) FILTER (WHERE status = 'mirrored'
-                        OR status = 'done')          AS mirrored,
+    COUNT(*)                                              AS total,
+    COUNT(phash)                                          AS phash_computed,
+    COUNT(*) FILTER (WHERE status IN ('mirrored','done')) AS mirrored,
     COUNT(*) FILTER (WHERE storj_key IS NULL
-                       AND is_temp = FALSE)          AS missing_storj,
+                       AND is_temp = FALSE)               AS missing_storj,
     COUNT(*) FILTER (WHERE hetzner_key IS NULL
-                       AND is_temp = FALSE)          AS missing_hetzner,
+                       AND is_temp = FALSE
+                       AND status != 'done')              AS missing_hetzner,
     COUNT(*) FILTER (WHERE is_temp = TRUE
-                       AND status = 'mirrored')      AS cleanup_pending,
-    COUNT(*) FILTER (WHERE error_message IS NOT NULL) AS error_count
+                       AND status = 'mirrored')           AS cleanup_pending,
+    COUNT(*) FILTER (WHERE status = 'failed')             AS failed,
+    COUNT(*) FILTER (WHERE error_message IS NOT NULL)     AS error_count
 FROM video_index;
 ```
 
-Plus a second query for duplicate phashes:
 ```sql
+-- Duplicate phash audit (uses idx_phash_val)
 SELECT phash, array_agg(video_id) AS video_ids
 FROM video_index WHERE phash IS NOT NULL
 GROUP BY phash HAVING COUNT(*) > 1
@@ -349,22 +510,22 @@ yral-video-storage-service/
       src/lib.rs          -- ported from off-chain-agent/src/duplicate_video/phash.rs
   src/
     db.rs                 -- postgres connect, schema init, all query functions
-    storj_s3_client.rs    -- aws-sdk-s3 client pointed at gateway.storjshare.io
+    storj_s3_client.rs    -- aws-sdk-s3 → gateway.storjshare.io
     jobs/
-      mod.rs              -- log_every_n helper, semaphore constants
+      mod.rs              -- CancellationToken wiring, log_progress helper
       scan_storj.rs       -- Job 0
       scan_hetzner.rs     -- Job 1
       phash_backfill.rs   -- Job 2
       mirror.rs           -- Job 3
       cleanup.rs          -- Job 4
     routes/
-      mirror.rs           -- POST /mirror/jobs/* + GET /mirror/audit
-      mod.rs              -- add mirror router
+      mirror.rs           -- 202 trigger endpoints + GET /mirror/audit
+      mod.rs              -- wire mirror router
   deploy/
-    docker-compose.yml    -- add postgres service + postgres_data volume
-    Dockerfile            -- multi-stage: builder + runtime
+    docker-compose.yml    -- postgres service + healthcheck + postgres_data volume
+    Dockerfile            -- multi-stage debian build
   .github/workflows/
-    build-binary.yml      -- gnu target + ffmpeg-dev install
+    build-binary.yml      -- x86_64-unknown-linux-gnu + ffmpeg-dev headers
 ```
 
 ---
@@ -373,63 +534,96 @@ yral-video-storage-service/
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | required | `postgres://storj:$PW@postgres:5432/mirror_index` |
-| `POSTGRES_PASSWORD` | required | Postgres password (GitHub secret) |
-| `STORJ_GATEWAY_ACCESS_KEY` | required | S3-compat key for `gateway.storjshare.io` |
-| `STORJ_GATEWAY_SECRET_KEY` | required | S3-compat secret for `gateway.storjshare.io` |
+| `DATABASE_URL` | required | Full postgres URL including password |
+| `POSTGRES_PASSWORD` | required | Used only in docker-compose to build `DATABASE_URL` |
+| `STORJ_GATEWAY_ACCESS_KEY` | required | From `uplink share --register` (see setup below) |
+| `STORJ_GATEWAY_SECRET_KEY` | required | From `uplink share --register` |
 | `STORJ_SFW_BUCKET` | `yral-sfw` | Target Storj bucket name |
-| `PHASH_CONCURRENCY` | `4` | Max parallel phash operations |
-| `MIRROR_CONCURRENCY` | `8` | Max parallel mirror operations |
-| `SCAN_PAGE_SIZE` | `1000` | S3 list_objects page size |
-| `TEMP_KEY_PREFIX` | `_pending/` | Hetzner key prefix for temp objects |
+| `PHASH_CONCURRENCY` | `4` | Semaphore permits for phash ops |
+| `MIRROR_CONCURRENCY` | `8` | Semaphore permits for mirror ops |
+| `SCAN_PAGE_SIZE` | `1000` | S3 list_objects_v2 page size |
+| `MAX_PHASH_RETRIES` | `5` | Retry ceiling before status → 'failed' |
+| `TEMP_KEY_PREFIX` | `_pending/` | Hetzner key prefix identifying temp objects |
+
+`STORJ_ACCESS_GRANT_SFW` is existing — reused as-is by uplink CLI in Job 3.
 
 ---
 
-## Operational Steps (one-time migration)
+## Operational Steps
+
+### One-time setup: Storj gateway credentials
 
 ```bash
-# 1. Deploy with new Postgres + env vars
+# Run once; save output as GitHub secrets
+uplink share --register --readonly=false \
+    --access=$STORJ_ACCESS_GRANT_SFW \
+    sj://yral-sfw
+# → outputs Access Key ID  → STORJ_GATEWAY_ACCESS_KEY
+# → outputs Secret Key     → STORJ_GATEWAY_SECRET_KEY
+```
+
+### Initial migration
+
+```bash
+# 0. Check disk space (need ≥10GB free on /tmp)
+df -h /tmp
+
+# 1. Deploy updated service with Postgres
 docker compose up -d
 
-# 2. Bulk copy (run on server with rclone configured)
-rclone copy hetzner:yral-videos storj:yral-sfw \
+# 2. Bulk copy via rclone (use actual HETZNER_S3_BUCKET value, not hardcoded name)
+rclone copy ${HETZNER_S3_BUCKET}: storj:yral-sfw \
     --exclude "*_thumbnail.png" \
     --transfers=32 --checkers=64 \
     --progress
 
-# 3. Reconcile index (order: 0 then 1, or parallel)
+# 3. Reconcile index (can run concurrently)
 curl -X POST https://storj-interface.yral.com/mirror/jobs/scan-storj \
     -H "Authorization: Bearer $SERVICE_SECRET_TOKEN"
 curl -X POST https://storj-interface.yral.com/mirror/jobs/scan-hetzner \
     -H "Authorization: Bearer $SERVICE_SECRET_TOKEN"
 
-# 4. Phash backfill (long-running, re-trigger if needed)
+# 4. Validate Job 0 object count (uplink outputs one object per line with metadata;
+#    --recursive lists all; awk extracts the last field which is the key path)
+uplink ls --recursive sj://yral-sfw | awk '{print $NF}' | grep '\.mp4$' | wc -l
+# compare against: curl /mirror/audit | jq .total
+
+# 5. Phash backfill (long-running; re-trigger if interrupted)
 curl -X POST https://storj-interface.yral.com/mirror/jobs/phash \
     -H "Authorization: Bearer $SERVICE_SECRET_TOKEN"
 
-# 5. Mirror any gaps
+# 6. Mirror any gaps
 curl -X POST https://storj-interface.yral.com/mirror/jobs/mirror \
     -H "Authorization: Bearer $SERVICE_SECRET_TOKEN"
 
-# 6. Audit
+# 7. Audit
 curl https://storj-interface.yral.com/mirror/audit \
-    -H "Authorization: Bearer $SERVICE_SECRET_TOKEN"
+    -H "Authorization: Bearer $SERVICE_SECRET_TOKEN" | jq
 
-# 7. Cleanup temp files when ready
+# 8. Cleanup temp files (only when audit shows missing_storj=0)
 curl -X POST https://storj-interface.yral.com/mirror/jobs/cleanup \
     -H "Authorization: Bearer $SERVICE_SECRET_TOKEN"
 ```
+
+### Ongoing delta (after initial migration)
+
+Re-trigger Jobs 1, 2, 3 on a schedule to pick up new uploads. Jobs are idempotent — already-processed rows are skipped by their WHERE clauses.
 
 ---
 
 ## Production Requirements Checklist
 
-- [x] Idempotent jobs — upsert + WHERE guards, safe to re-run
-- [x] All-or-none per video — DB update only after successful upload
+- [x] Idempotent jobs — upsert without first-write-wins, WHERE guards on status
+- [x] All-or-none per video — DB update only after successful upload (MP4 + thumbnail)
 - [x] Backpressure — semaphore bounds concurrent in-flight ops
-- [x] Tempfile cleanup — `NamedTempFile` auto-deletes on drop
+- [x] Tempfile cleanup — `NamedTempFile` auto-deletes on drop; path passed to spawn_blocking, file handle stays in async scope
+- [x] Graceful shutdown — CancellationToken checked between batch iterations; HTTP endpoints return 202 immediately
+- [x] Retry cap — `retry_count` + `MAX_PHASH_RETRIES`; terminal `failed` state prevents infinite retry storms
 - [x] Observability — `tracing::info!` every 1000, `tracing::error!` per failure
-- [x] Sentry — `sentry::capture_error` on every per-video failure
+- [x] Sentry — `sentry::capture_error` on every per-video and infrastructure failure
 - [x] Auth — `SERVICE_SECRET_TOKEN` middleware on all job endpoints
-- [x] Graceful handling — errors update `error_message`, job continues with next video
 - [x] Resumable — jobs pick up from WHERE clause on next trigger
+- [x] Disk space — documented minimum 10GB free before running jobs
+- [x] Storj dual-auth — documented: uplink CLI (Job 3) + S3 gateway (Jobs 0, 4) from same root grant
+- [x] DB writes sequential — parallel block collects results, sequential loop writes to Postgres
+- [x] error_message cleared — all success UPDATE paths include `error_message = NULL`
