@@ -23,6 +23,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 pub(crate) mod consts;
+mod db;
 mod routes;
 mod s3_client;
 mod storj_s3_client;
