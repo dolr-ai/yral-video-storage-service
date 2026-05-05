@@ -7,6 +7,11 @@ use crate::jobs;
 use crate::jobs::JobGuard;
 use crate::AppState;
 
+#[derive(serde::Deserialize, Default)]
+pub struct JobParams {
+    pub limit: Option<usize>,
+}
+
 #[derive(Serialize)]
 pub struct AuditResponse {
     pub total: i64,
@@ -26,7 +31,10 @@ pub struct DuplicateEntry {
     pub video_ids: Vec<String>,
 }
 
-pub async fn scan_storj(State(state): State<AppState>) -> StatusCode {
+pub async fn scan_storj(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<JobParams>,
+) -> StatusCode {
     if state
         .job_scan_storj_running
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -40,7 +48,7 @@ pub async fn scan_storj(State(state): State<AppState>) -> StatusCode {
     let guard = JobGuard(state.job_scan_storj_running.clone());
     tokio::spawn(async move {
         let _guard = guard;
-        if let Err(e) = jobs::scan_storj::run(storj, db_url, cancel).await {
+        if let Err(e) = jobs::scan_storj::run(storj, db_url, cancel, params.limit).await {
             tracing::error!(error = %e, "Job 0 (scan-storj) error");
             sentry::capture_message(&format!("scan-storj job failed: {e}"), sentry::Level::Error);
         }
@@ -48,7 +56,10 @@ pub async fn scan_storj(State(state): State<AppState>) -> StatusCode {
     StatusCode::ACCEPTED
 }
 
-pub async fn scan_hetzner(State(state): State<AppState>) -> StatusCode {
+pub async fn scan_hetzner(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<JobParams>,
+) -> StatusCode {
     if state
         .job_scan_hetzner_running
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -62,7 +73,7 @@ pub async fn scan_hetzner(State(state): State<AppState>) -> StatusCode {
     let guard = JobGuard(state.job_scan_hetzner_running.clone());
     tokio::spawn(async move {
         let _guard = guard;
-        if let Err(e) = jobs::scan_hetzner::run(s3, db_url, cancel).await {
+        if let Err(e) = jobs::scan_hetzner::run(s3, db_url, cancel, params.limit).await {
             tracing::error!(error = %e, "Job 1 (scan-hetzner) error");
             sentry::capture_message(
                 &format!("scan-hetzner job failed: {e}"),
@@ -73,7 +84,10 @@ pub async fn scan_hetzner(State(state): State<AppState>) -> StatusCode {
     StatusCode::ACCEPTED
 }
 
-pub async fn phash_backfill(State(state): State<AppState>) -> StatusCode {
+pub async fn phash_backfill(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<JobParams>,
+) -> StatusCode {
     if state
         .job_phash_running
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -87,7 +101,7 @@ pub async fn phash_backfill(State(state): State<AppState>) -> StatusCode {
     let guard = JobGuard(state.job_phash_running.clone());
     tokio::spawn(async move {
         let _guard = guard;
-        if let Err(e) = jobs::phash_backfill::run(s3, db_url, cancel).await {
+        if let Err(e) = jobs::phash_backfill::run(s3, db_url, cancel, params.limit).await {
             tracing::error!(error = %e, "Job 2 (phash-backfill) error");
             sentry::capture_message(&format!("phash job failed: {e}"), sentry::Level::Error);
         }
@@ -95,7 +109,10 @@ pub async fn phash_backfill(State(state): State<AppState>) -> StatusCode {
     StatusCode::ACCEPTED
 }
 
-pub async fn mirror(State(state): State<AppState>) -> StatusCode {
+pub async fn mirror(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<JobParams>,
+) -> StatusCode {
     if state
         .job_mirror_running
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -109,7 +126,7 @@ pub async fn mirror(State(state): State<AppState>) -> StatusCode {
     let guard = JobGuard(state.job_mirror_running.clone());
     tokio::spawn(async move {
         let _guard = guard;
-        if let Err(e) = jobs::mirror::run(s3, db_url, cancel).await {
+        if let Err(e) = jobs::mirror::run(s3, db_url, cancel, params.limit).await {
             tracing::error!(error = %e, "Job 3 (mirror) error");
             sentry::capture_message(&format!("mirror job failed: {e}"), sentry::Level::Error);
         }
@@ -147,4 +164,28 @@ pub async fn audit(State(state): State<AppState>) -> Result<Json<AuditResponse>,
             })
             .collect(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_params_limit_parses() {
+        let p: JobParams = serde_json::from_value(serde_json::json!({"limit": 10})).unwrap();
+        assert_eq!(p.limit, Some(10));
+    }
+
+    #[test]
+    fn job_params_no_limit_defaults_none() {
+        let p: JobParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(p.limit, None);
+    }
+
+    #[test]
+    fn job_params_invalid_limit_fails() {
+        let result: Result<JobParams, _> =
+            serde_json::from_value(serde_json::json!({"limit": "abc"}));
+        assert!(result.is_err());
+    }
 }

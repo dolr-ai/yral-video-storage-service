@@ -66,11 +66,15 @@ impl MirrorClient {
         (ts, sig)
     }
 
-    async fn post_job(&self, path: &str) -> Result<(), MirrorError> {
+    async fn post_job(&self, path: &str, limit: Option<u64>) -> Result<(), MirrorError> {
+        let url = match limit {
+            Some(n) => format!("{}{}?limit={}", self.base_url, path, n),
+            None => format!("{}{}", self.base_url, path),
+        };
         let (ts, sig) = self.sign("POST", path);
         let resp = self
             .http
-            .post(format!("{}{}", self.base_url, path))
+            .post(url)
             .header("X-Timestamp", &ts)
             .header("Authorization", format!("HMAC-SHA256 {sig}"))
             .send()
@@ -89,30 +93,25 @@ impl MirrorClient {
 
     /// Generates a signed URL valid for 5 minutes. Embed directly in a request
     /// without setting any headers — useful for webhooks or browser-initiated calls.
-    ///
-    /// ```
-    /// let url = client.signed_url("GET", "/mirror/audit");
-    /// // GET {url} → 200 AuditResponse, no headers needed
-    /// ```
     pub fn signed_url(&self, method: &str, path: &str) -> String {
         let (ts, sig) = self.sign(method, path);
         format!("{}{}?timestamp={}&sig={}", self.base_url, path, ts, sig)
     }
 
-    pub async fn scan_storj(&self) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/scan-storj").await
+    pub async fn scan_storj(&self, limit: Option<u64>) -> Result<(), MirrorError> {
+        self.post_job("/mirror/jobs/scan-storj", limit).await
     }
 
-    pub async fn scan_hetzner(&self) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/scan-hetzner").await
+    pub async fn scan_hetzner(&self, limit: Option<u64>) -> Result<(), MirrorError> {
+        self.post_job("/mirror/jobs/scan-hetzner", limit).await
     }
 
-    pub async fn phash_backfill(&self) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/phash").await
+    pub async fn phash_backfill(&self, limit: Option<u64>) -> Result<(), MirrorError> {
+        self.post_job("/mirror/jobs/phash", limit).await
     }
 
-    pub async fn mirror(&self) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/mirror").await
+    pub async fn mirror(&self, limit: Option<u64>) -> Result<(), MirrorError> {
+        self.post_job("/mirror/jobs/mirror", limit).await
     }
 
     pub async fn audit(&self) -> Result<AuditResponse, MirrorError> {

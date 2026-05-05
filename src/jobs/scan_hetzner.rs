@@ -6,7 +6,7 @@ use crate::db;
 use crate::jobs::video_id_from_key;
 use crate::s3_client::S3Client;
 
-pub async fn run(s3: S3Client, db_url: String, cancel: CancellationToken) -> Result<()> {
+pub async fn run(s3: S3Client, db_url: String, cancel: CancellationToken, limit: Option<usize>) -> Result<()> {
     tracing::info!("Job 1 (scan-hetzner): starting");
     let client = db::connect(&db_url).await?;
     let mut total = 0usize;
@@ -37,6 +37,10 @@ pub async fn run(s3: S3Client, db_url: String, cancel: CancellationToken) -> Res
 
         total += 1;
         crate::jobs::log_progress(total, "scan-hetzner");
+        if limit.map_or(false, |n| total >= n) {
+            tracing::info!(total, "Job 1 (scan-hetzner): limit reached");
+            break;
+        }
     }
 
     tracing::info!(total, "Job 1 (scan-hetzner): complete");
