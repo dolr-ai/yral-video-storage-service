@@ -17,10 +17,9 @@ RUN apt-get update && apt-get install -y \
     ffmpeg ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Pin uplink version for reproducible builds
-RUN curl -L https://github.com/storj/storj/releases/download/v1.112.4/uplink_linux_amd64.zip \
+RUN curl -L https://github.com/storj/storj/releases/latest/download/uplink_linux_amd64.zip \
     -o /tmp/uplink.zip \
-    && unzip /tmp/uplink.zip -d /tmp \
+    && unzip /tmp/uplink.zip uplink -d /tmp \
     && install /tmp/uplink /usr/local/bin/uplink \
     && rm -rf /tmp/uplink /tmp/uplink.zip
 
