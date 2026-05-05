@@ -46,6 +46,7 @@ pub struct VideoRow {
     pub hetzner_key: String,
 }
 
+#[allow(dead_code)]
 pub struct CleanupRow {
     pub video_id: String,
     pub hetzner_key: String,
@@ -246,6 +247,7 @@ pub async fn update_error(
 
 // --- Job 4: Cleanup ---
 
+#[allow(dead_code)]
 pub async fn fetch_pending_cleanup_batch(
     client: &Client,
     limit: i64,
@@ -269,6 +271,7 @@ pub async fn fetch_pending_cleanup_batch(
         .collect())
 }
 
+#[allow(dead_code)]
 pub async fn update_cleanup_done(
     client: &Client,
     video_id: &str,

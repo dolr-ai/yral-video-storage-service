@@ -37,6 +37,7 @@ impl StorjS3Client {
         self.0.list_objects(prefix).await
     }
 
+    #[allow(dead_code)]
     pub async fn object_exists(&self, key: &str) -> Result<bool, String> {
         self.0.object_exists(key).await
     }
