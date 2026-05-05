@@ -49,6 +49,13 @@ pub static SERVICE_SECRET_TOKEN: Lazy<String> = Lazy::new(|| {
     )
 });
 
+// Mirror access grant — scoped to yral-sfw on EU1 satellite (separate from ACCESS_GRANT_SFW
+// which targets yral-videos and is used by existing upload routes)
+pub static MIRROR_ACCESS_GRANT: Lazy<String> = Lazy::new(|| {
+    std::env::var("STORJ_MIRROR_ACCESS_GRANT")
+        .expect("STORJ_MIRROR_ACCESS_GRANT required for mirror job uploads")
+});
+
 // Storj S3 gateway credentials (for listing/verifying, not uploads)
 pub static STORJ_GATEWAY_ACCESS_KEY: Lazy<String> = Lazy::new(|| {
     std::env::var("STORJ_GATEWAY_ACCESS_KEY")

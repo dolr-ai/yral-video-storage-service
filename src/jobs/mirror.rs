@@ -6,7 +6,7 @@ use futures::StreamExt;
 use tempfile::NamedTempFile;
 use tokio_util::sync::CancellationToken;
 
-use crate::consts::{ACCESS_GRANT_SFW, MIRROR_CONCURRENCY, SCAN_PAGE_SIZE, STORJ_SFW_BUCKET};
+use crate::consts::{MIRROR_ACCESS_GRANT, MIRROR_CONCURRENCY, SCAN_PAGE_SIZE, STORJ_SFW_BUCKET};
 use crate::db;
 use crate::jobs::{thumb_key_from_mp4_key, uplink_cp};
 use crate::s3_client::S3Client;
@@ -33,7 +33,7 @@ pub async fn run(s3: S3Client, db_url: String, cancel: CancellationToken) -> Res
             .map(|row| {
                 let s3 = s3.clone();
                 let bucket = STORJ_SFW_BUCKET.clone();
-                let grant = ACCESS_GRANT_SFW.clone();
+                let grant = MIRROR_ACCESS_GRANT.clone();
                 async move {
                     let result = mirror_one(&s3, &row.hetzner_key, &bucket, &grant).await;
                     (row.video_id, row.hetzner_key, result)

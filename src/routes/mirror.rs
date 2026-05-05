@@ -1,8 +1,10 @@
 use axum::{extract::State, http::StatusCode, Json};
 use serde::Serialize;
+use std::sync::atomic::Ordering;
 
 use crate::db;
 use crate::jobs;
+use crate::jobs::JobGuard;
 use crate::AppState;
 
 #[derive(Serialize)]
@@ -25,10 +27,19 @@ pub struct DuplicateEntry {
 }
 
 pub async fn scan_storj(State(state): State<AppState>) -> StatusCode {
+    if state
+        .job_scan_storj_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return StatusCode::CONFLICT;
+    }
     let storj = state.storj_client.clone();
     let db_url = state.db_url.clone();
     let cancel = state.cancel.clone();
+    let guard = JobGuard(state.job_scan_storj_running.clone());
     tokio::spawn(async move {
+        let _guard = guard;
         if let Err(e) = jobs::scan_storj::run(storj, db_url, cancel).await {
             tracing::error!(error = %e, "Job 0 (scan-storj) error");
             sentry::capture_message(
@@ -41,10 +52,19 @@ pub async fn scan_storj(State(state): State<AppState>) -> StatusCode {
 }
 
 pub async fn scan_hetzner(State(state): State<AppState>) -> StatusCode {
+    if state
+        .job_scan_hetzner_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return StatusCode::CONFLICT;
+    }
     let s3 = state.s3_client.clone();
     let db_url = state.db_url.clone();
     let cancel = state.cancel.clone();
+    let guard = JobGuard(state.job_scan_hetzner_running.clone());
     tokio::spawn(async move {
+        let _guard = guard;
         if let Err(e) = jobs::scan_hetzner::run(s3, db_url, cancel).await {
             tracing::error!(error = %e, "Job 1 (scan-hetzner) error");
             sentry::capture_message(
@@ -57,10 +77,19 @@ pub async fn scan_hetzner(State(state): State<AppState>) -> StatusCode {
 }
 
 pub async fn phash_backfill(State(state): State<AppState>) -> StatusCode {
+    if state
+        .job_phash_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return StatusCode::CONFLICT;
+    }
     let s3 = state.s3_client.clone();
     let db_url = state.db_url.clone();
     let cancel = state.cancel.clone();
+    let guard = JobGuard(state.job_phash_running.clone());
     tokio::spawn(async move {
+        let _guard = guard;
         if let Err(e) = jobs::phash_backfill::run(s3, db_url, cancel).await {
             tracing::error!(error = %e, "Job 2 (phash-backfill) error");
             sentry::capture_message(&format!("phash job failed: {e}"), sentry::Level::Error);
@@ -70,31 +99,23 @@ pub async fn phash_backfill(State(state): State<AppState>) -> StatusCode {
 }
 
 pub async fn mirror(State(state): State<AppState>) -> StatusCode {
+    if state
+        .job_mirror_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return StatusCode::CONFLICT;
+    }
     let s3 = state.s3_client.clone();
     let db_url = state.db_url.clone();
     let cancel = state.cancel.clone();
+    let guard = JobGuard(state.job_mirror_running.clone());
     tokio::spawn(async move {
+        let _guard = guard;
         if let Err(e) = jobs::mirror::run(s3, db_url, cancel).await {
             tracing::error!(error = %e, "Job 3 (mirror) error");
             sentry::capture_message(
                 &format!("mirror job failed: {e}"),
-                sentry::Level::Error,
-            );
-        }
-    });
-    StatusCode::ACCEPTED
-}
-
-pub async fn cleanup(State(state): State<AppState>) -> StatusCode {
-    let s3 = state.s3_client.clone();
-    let storj = state.storj_client.clone();
-    let db_url = state.db_url.clone();
-    let cancel = state.cancel.clone();
-    tokio::spawn(async move {
-        if let Err(e) = jobs::cleanup::run(s3, storj, db_url, cancel).await {
-            tracing::error!(error = %e, "Job 4 (cleanup) error");
-            sentry::capture_message(
-                &format!("cleanup job failed: {e}"),
                 sentry::Level::Error,
             );
         }

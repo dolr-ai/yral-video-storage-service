@@ -1,4 +1,3 @@
-pub mod cleanup;
 pub mod mirror;
 pub mod phash_backfill;
 pub mod scan_hetzner;
@@ -6,7 +5,21 @@ pub mod scan_storj;
 
 use anyhow::{Context, Result};
 use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio::process::Command;
+
+/// RAII guard that resets an AtomicBool to false on drop.
+/// Ensures the job-running flag is cleared even if the job panics.
+pub struct JobGuard(pub Arc<AtomicBool>);
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 /// Extract video_id from an S3 key — returns None if not an .mp4 file.
 /// video_id = full path without .mp4 extension, e.g. "user123/abc"

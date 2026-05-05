@@ -15,7 +15,10 @@ use consts::{
 use once_cell::sync::Lazy;
 use reqwest::{header::AUTHORIZATION, StatusCode};
 use sentry_tower::{NewSentryLayer, SentryHttpLayer};
-use std::sync::Arc;
+use std::sync::{
+    atomic::AtomicBool,
+    Arc,
+};
 use tokio::{signal, sync::Notify};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
@@ -38,6 +41,10 @@ pub(crate) struct AppState {
     pub storj_client: storj_s3_client::StorjS3Client,
     pub db_url: String,
     pub cancel: CancellationToken,
+    pub job_scan_storj_running: Arc<AtomicBool>,
+    pub job_scan_hetzner_running: Arc<AtomicBool>,
+    pub job_phash_running: Arc<AtomicBool>,
+    pub job_mirror_running: Arc<AtomicBool>,
 }
 
 fn main() {
@@ -109,6 +116,7 @@ async fn run_server() -> anyhow::Result<()> {
     let _ = &*consts::DATABASE_URL;
     let _ = &*consts::STORJ_GATEWAY_ACCESS_KEY;
     let _ = &*consts::STORJ_GATEWAY_SECRET_KEY;
+    let _ = &*consts::MIRROR_ACCESS_GRANT;
 
     // Initialize S3 client
     let s3_client = s3_client::S3Client::new().await;
@@ -130,6 +138,10 @@ async fn run_server() -> anyhow::Result<()> {
         storj_client,
         db_url: consts::DATABASE_URL.clone(),
         cancel: cancel.clone(),
+        job_scan_storj_running: Arc::new(AtomicBool::new(false)),
+        job_scan_hetzner_running: Arc::new(AtomicBool::new(false)),
+        job_phash_running: Arc::new(AtomicBool::new(false)),
+        job_mirror_running: Arc::new(AtomicBool::new(false)),
     };
 
     // Configure CORS to allow cross-origin requests
@@ -195,12 +207,6 @@ async fn run_server() -> anyhow::Result<()> {
         .route(
             "/mirror/jobs/mirror",
             post(routes::mirror::mirror)
-                .with_state(app_state.clone())
-                .layer(middleware::from_fn(authorize)),
-        )
-        .route(
-            "/mirror/jobs/cleanup",
-            post(routes::mirror::cleanup)
                 .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
         )

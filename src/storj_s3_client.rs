@@ -5,7 +5,7 @@ use aws_sdk_s3::Client;
 use crate::consts::{STORJ_GATEWAY_ACCESS_KEY, STORJ_GATEWAY_SECRET_KEY, STORJ_SFW_BUCKET};
 use crate::s3_client::{S3Client, S3ObjectInfo};
 
-pub const STORJ_GATEWAY_ENDPOINT: &str = "https://gateway.storjshare.io";
+pub const STORJ_GATEWAY_ENDPOINT: &str = "https://gateway.eu1.storjshare.io";
 
 #[derive(Clone)]
 pub struct StorjS3Client(S3Client);
@@ -51,6 +51,6 @@ mod tests {
 
     #[test]
     fn storj_s3_client_uses_gateway_endpoint() {
-        assert_eq!(STORJ_GATEWAY_ENDPOINT, "https://gateway.storjshare.io");
+        assert_eq!(STORJ_GATEWAY_ENDPOINT, "https://gateway.eu1.storjshare.io");
     }
 }

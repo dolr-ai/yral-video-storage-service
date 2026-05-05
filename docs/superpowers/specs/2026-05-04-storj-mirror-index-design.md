@@ -90,7 +90,7 @@ ENTRYPOINT ["/app/storj-interface"]
 postgres:
   image: postgres:16-alpine
   environment:
-    POSTGRES_DB: mirror_index
+    POSTGRES_DB: video_fingerprint_index
     POSTGRES_USER: storj
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
   volumes:
@@ -99,7 +99,7 @@ postgres:
     - storj-net
   restart: unless-stopped
   healthcheck:
-    test: ["CMD-SHELL", "pg_isready -U storj -d mirror_index"]
+    test: ["CMD-SHELL", "pg_isready -U storj -d video_fingerprint_index"]
     interval: 10s
     timeout: 5s
     retries: 5
@@ -112,7 +112,7 @@ storj-interface:
   environment:
     # Single source of truth: DATABASE_URL contains the password.
     # Do NOT set POSTGRES_PASSWORD separately in storj-interface env.
-    DATABASE_URL: postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/mirror_index
+    DATABASE_URL: postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/video_fingerprint_index
 ```
 
 Pattern: `tokio_postgres` + `batch_execute` for schema init (matches counter repo). One connection per job run. DB writes happen in a sequential post-processing loop after parallel compute/network work completes — never inside concurrent futures.

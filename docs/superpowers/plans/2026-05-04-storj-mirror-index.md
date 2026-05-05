@@ -2040,7 +2040,7 @@ services:
       SERVICE_SECRET_TOKEN: ${SERVICE_SECRET_TOKEN}
       ENVIRONMENT: ${ENVIRONMENT:-production}
       # --- new vars ---
-      DATABASE_URL: postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/mirror_index
+      DATABASE_URL: postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/video_fingerprint_index
       STORJ_GATEWAY_ACCESS_KEY: ${STORJ_GATEWAY_ACCESS_KEY}
       STORJ_GATEWAY_SECRET_KEY: ${STORJ_GATEWAY_SECRET_KEY}
       STORJ_SFW_BUCKET: ${STORJ_SFW_BUCKET:-yral-sfw}
@@ -2052,7 +2052,7 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: mirror_index
+      POSTGRES_DB: video_fingerprint_index
       POSTGRES_USER: storj
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
@@ -2063,7 +2063,7 @@ services:
       - storj-net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U storj -d mirror_index"]
+      test: ["CMD-SHELL", "pg_isready -U storj -d video_fingerprint_index"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -2130,7 +2130,7 @@ Expected: all tests pass. DB tests require docker.
 ```bash
 # Start service locally (requires docker compose with postgres)
 docker compose -f deploy/docker-compose.yml up -d postgres
-DATABASE_URL=postgres://storj:test@localhost:15432/mirror_index \
+DATABASE_URL=postgres://storj:test@localhost:15432/video_fingerprint_index \
   STORJ_ACCESS_GRANT_SFW=dummy \
   STORJ_ACCESS_GRANT_NSFW=dummy \
   STORJ_GATEWAY_ACCESS_KEY=dummy \
