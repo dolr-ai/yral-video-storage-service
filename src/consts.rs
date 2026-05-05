@@ -42,12 +42,8 @@ pub static HETZNER_S3_SECRET_KEY: Lazy<String> = Lazy::new(|| {
 pub static HETZNER_S3_REGION: Lazy<String> =
     Lazy::new(|| std::env::var("HETZNER_S3_REGION").unwrap_or_else(|_| "eu-central".to_string()));
 
-pub static SERVICE_SECRET_TOKEN: Lazy<String> = Lazy::new(|| {
-    format!(
-        "Bearer {}",
-        std::env::var("SERVICE_SECRET_TOKEN").expect("A shared secret to be present")
-    )
-});
+pub static SERVICE_SECRET_TOKEN: Lazy<String> =
+    Lazy::new(|| std::env::var("SERVICE_SECRET_TOKEN").expect("A shared secret to be present"));
 
 // Mirror access grant — scoped to yral-sfw on EU1 satellite (separate from ACCESS_GRANT_SFW
 // which targets yral-videos and is used by existing upload routes)
