@@ -2166,6 +2166,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirror-client"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac 0.12.1",
+ "reqwest",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3561,6 +3573,8 @@ dependencies = [
  "chrono",
  "futures",
  "futures-util",
+ "hex",
+ "hmac 0.12.1",
  "http-body-util",
  "once_cell",
  "phash",
@@ -3570,6 +3584,7 @@ dependencies = [
  "sentry-tracing",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "tokio",

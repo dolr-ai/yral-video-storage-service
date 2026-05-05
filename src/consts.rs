@@ -58,21 +58,17 @@ pub static MIRROR_ACCESS_GRANT: Lazy<String> = Lazy::new(|| {
 
 // Storj S3 gateway credentials (for listing/verifying, not uploads)
 pub static STORJ_GATEWAY_ACCESS_KEY: Lazy<String> = Lazy::new(|| {
-    std::env::var("STORJ_GATEWAY_ACCESS_KEY")
-        .expect("STORJ_GATEWAY_ACCESS_KEY required")
+    std::env::var("STORJ_GATEWAY_ACCESS_KEY").expect("STORJ_GATEWAY_ACCESS_KEY required")
 });
 pub static STORJ_GATEWAY_SECRET_KEY: Lazy<String> = Lazy::new(|| {
-    std::env::var("STORJ_GATEWAY_SECRET_KEY")
-        .expect("STORJ_GATEWAY_SECRET_KEY required")
+    std::env::var("STORJ_GATEWAY_SECRET_KEY").expect("STORJ_GATEWAY_SECRET_KEY required")
 });
-pub static STORJ_SFW_BUCKET: Lazy<String> = Lazy::new(|| {
-    std::env::var("STORJ_SFW_BUCKET").unwrap_or_else(|_| "yral-sfw".to_string())
-});
+pub static STORJ_SFW_BUCKET: Lazy<String> =
+    Lazy::new(|| std::env::var("STORJ_SFW_BUCKET").unwrap_or_else(|_| "yral-sfw".to_string()));
 
 // Database
-pub static DATABASE_URL: Lazy<String> = Lazy::new(|| {
-    std::env::var("DATABASE_URL").expect("DATABASE_URL required")
-});
+pub static DATABASE_URL: Lazy<String> =
+    Lazy::new(|| std::env::var("DATABASE_URL").expect("DATABASE_URL required"));
 
 // Job tuning
 pub static PHASH_CONCURRENCY: Lazy<usize> = Lazy::new(|| {
@@ -99,6 +95,5 @@ pub static MAX_PHASH_RETRIES: Lazy<i32> = Lazy::new(|| {
         .and_then(|v| v.parse().ok())
         .unwrap_or(5)
 });
-pub static TEMP_KEY_PREFIX: Lazy<String> = Lazy::new(|| {
-    std::env::var("TEMP_KEY_PREFIX").unwrap_or_else(|_| "_pending/".to_string())
-});
+pub static TEMP_KEY_PREFIX: Lazy<String> =
+    Lazy::new(|| std::env::var("TEMP_KEY_PREFIX").unwrap_or_else(|_| "_pending/".to_string()));

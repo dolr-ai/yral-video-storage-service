@@ -119,7 +119,7 @@ jobs:
             });
             const marker = '<!-- deploy-preview-prakash -->';
             const existing = comments.find(c => c.body.includes(marker));
-            const body = `${marker}\n🚀 **Preview deployed:** ${{ env.PREVIEW_URL }}\n\n**Test commands:**\n\`\`\`bash\ncurl ${{ env.PREVIEW_URL }}/health\ncurl -H "Authorization: \$SERVICE_SECRET_TOKEN" ${{ env.PREVIEW_URL }}/mirror/audit\ncurl -X POST -H "Authorization: \$SERVICE_SECRET_TOKEN" ${{ env.PREVIEW_URL }}/mirror/jobs/scan-hetzner\n\`\`\``;
+            const body = `${marker}\n🚀 **Preview deployed:** ${{ env.PREVIEW_URL }}\n\n**Test commands (HMAC-SHA256 signed):**\n\`\`\`bash\n# Health check (no auth)\ncurl ${{ env.PREVIEW_URL }}/health\n\n# Signed request helper\nhmac_sign() {\n  local method=$1 path=$2\n  local ts=$(date +%s)\n  local sig=$(printf "%s\\n%s\\n%s" "$method" "$path" "$ts" | openssl dgst -sha256 -hmac "$SERVICE_SECRET_TOKEN" | awk '{ print $NF }')\n  echo "-H \\"X-Timestamp: $ts\\" -H \\"Authorization: HMAC-SHA256 $sig\\""\n}\n\n# Audit\ncurl $(hmac_sign GET /mirror/audit) ${{ env.PREVIEW_URL }}/mirror/audit\n\n# Trigger scan-hetzner\ncurl -X POST $(hmac_sign POST /mirror/jobs/scan-hetzner) ${{ env.PREVIEW_URL }}/mirror/jobs/scan-hetzner\n\`\`\``;
             if (existing) {
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,

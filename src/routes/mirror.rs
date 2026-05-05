@@ -42,10 +42,7 @@ pub async fn scan_storj(State(state): State<AppState>) -> StatusCode {
         let _guard = guard;
         if let Err(e) = jobs::scan_storj::run(storj, db_url, cancel).await {
             tracing::error!(error = %e, "Job 0 (scan-storj) error");
-            sentry::capture_message(
-                &format!("scan-storj job failed: {e}"),
-                sentry::Level::Error,
-            );
+            sentry::capture_message(&format!("scan-storj job failed: {e}"), sentry::Level::Error);
         }
     });
     StatusCode::ACCEPTED
@@ -114,18 +111,13 @@ pub async fn mirror(State(state): State<AppState>) -> StatusCode {
         let _guard = guard;
         if let Err(e) = jobs::mirror::run(s3, db_url, cancel).await {
             tracing::error!(error = %e, "Job 3 (mirror) error");
-            sentry::capture_message(
-                &format!("mirror job failed: {e}"),
-                sentry::Level::Error,
-            );
+            sentry::capture_message(&format!("mirror job failed: {e}"), sentry::Level::Error);
         }
     });
     StatusCode::ACCEPTED
 }
 
-pub async fn audit(
-    State(state): State<AppState>,
-) -> Result<Json<AuditResponse>, StatusCode> {
+pub async fn audit(State(state): State<AppState>) -> Result<Json<AuditResponse>, StatusCode> {
     let client = db::connect(&state.db_url)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

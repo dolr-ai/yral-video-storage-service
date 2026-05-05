@@ -1,10 +1,10 @@
-use futures::StreamExt;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, Config};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use std::collections::HashMap;
 use std::time::Duration;
 

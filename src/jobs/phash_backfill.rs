@@ -30,8 +30,8 @@ pub async fn run(s3: S3Client, db_url: String, cancel: CancellationToken) -> Res
             .map(|row| {
                 let s3 = s3.clone();
                 async move {
-                    let mut tmp = NamedTempFile::new()
-                        .map_err(|e| anyhow::anyhow!("tempfile: {e}"))?;
+                    let mut tmp =
+                        NamedTempFile::new().map_err(|e| anyhow::anyhow!("tempfile: {e}"))?;
                     {
                         let mut f = tokio::fs::File::from_std(
                             tmp.as_file()
@@ -45,12 +45,11 @@ pub async fn run(s3: S3Client, db_url: String, cancel: CancellationToken) -> Res
 
                     // Pass path only (not file handle) into blocking thread
                     let path = tmp.path().to_owned();
-                    let phash_result = tokio::task::spawn_blocking(move || {
-                        PHasher::new().compute_hash(&path)
-                    })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("spawn_blocking panic: {e}"))
-                    .and_then(|r| r.map_err(|e| anyhow::anyhow!("phash: {e}")));
+                    let phash_result =
+                        tokio::task::spawn_blocking(move || PHasher::new().compute_hash(&path))
+                            .await
+                            .map_err(|e| anyhow::anyhow!("spawn_blocking panic: {e}"))
+                            .and_then(|r| r.map_err(|e| anyhow::anyhow!("phash: {e}")));
 
                     // Always delete tempfile
                     drop(tmp);

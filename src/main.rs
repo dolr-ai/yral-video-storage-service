@@ -15,10 +15,7 @@ use consts::{
 use once_cell::sync::Lazy;
 use reqwest::{header::AUTHORIZATION, StatusCode};
 use sentry_tower::{NewSentryLayer, SentryHttpLayer};
-use std::sync::{
-    atomic::AtomicBool,
-    Arc,
-};
+use std::sync::{atomic::AtomicBool, Arc};
 use tokio::{signal, sync::Notify};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
@@ -31,8 +28,8 @@ mod db;
 mod jobs;
 mod routes;
 mod s3_client;
-mod storj_s3_client;
 pub(crate) mod sentry_utils;
+mod storj_s3_client;
 mod thumbnail;
 
 #[derive(Clone)]
@@ -253,18 +250,86 @@ async fn health() -> &'static str {
     "alive"
 }
 
-/// A dead simple authorization check based on a shared secret
+/// HMAC-SHA256 request signing. Accepts credentials via headers OR query params.
+///
+/// Headers:
+///   X-Timestamp: <unix_seconds>
+///   Authorization: HMAC-SHA256 <hex_sig>
+///
+/// Query params (for signed URLs):
+///   ?timestamp=<unix_seconds>&sig=<hex_sig>
+///
+/// Signature covers: HMAC-SHA256(SECRET, "METHOD\nPATH\nTIMESTAMP")
+/// Requests outside a 5-minute window are rejected.
 async fn authorize(
     headers: HeaderMap,
     request: Request,
     next: Next,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let auth = headers.get(AUTHORIZATION).ok_or(StatusCode::UNAUTHORIZED)?;
-    let auth = auth.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    if auth != SERVICE_SECRET_TOKEN.as_str() {
+    // Extract (timestamp, sig_hex) from headers, falling back to query params.
+    let (ts_str, sig_hex): (String, String) = if let (Some(ts_hdr), Some(auth_hdr)) =
+        (headers.get("x-timestamp"), headers.get(AUTHORIZATION))
+    {
+        let ts = ts_hdr
+            .to_str()
+            .map_err(|_| StatusCode::BAD_REQUEST)?
+            .to_string();
+        let auth = auth_hdr.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
+        let sig = auth
+            .strip_prefix("HMAC-SHA256 ")
+            .ok_or(StatusCode::UNAUTHORIZED)?
+            .to_string();
+        (ts, sig)
+    } else {
+        let query = request.uri().query().unwrap_or("");
+        let mut ts = None;
+        let mut sig = None;
+        for pair in query.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                match k {
+                    "timestamp" => ts = Some(v.to_string()),
+                    "sig" => sig = Some(v.to_string()),
+                    _ => {}
+                }
+            }
+        }
+        match (ts, sig) {
+            (Some(t), Some(s)) => (t, s),
+            _ => return Err(StatusCode::UNAUTHORIZED),
+        }
+    };
+
+    let ts: i64 = ts_str.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    if (now - ts).abs() > 300 {
         return Err(StatusCode::UNAUTHORIZED);
     }
+
+    let sig_bytes = hex::decode(&sig_hex).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let message = format!(
+        "{}\n{}\n{}",
+        request.method().as_str(),
+        request.uri().path(),
+        ts_str
+    );
+
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(SERVICE_SECRET_TOKEN.as_bytes())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    mac.update(message.as_bytes());
+
+    // constant-time comparison via subtle crate (prevents timing attacks)
+    mac.verify_slice(&sig_bytes)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     Ok(next.run(request).await)
 }

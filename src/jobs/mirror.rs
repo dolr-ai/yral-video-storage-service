@@ -77,7 +77,12 @@ async fn mirror_one(s3: &S3Client, hetzner_key: &str, bucket: &str, grant: &str)
             .await
             .map_err(|e| anyhow::anyhow!("download mp4 {hetzner_key}: {e}"))?;
     }
-    uplink_cp(tmp_mp4.path(), &format!("sj://{bucket}/{hetzner_key}"), grant).await?;
+    uplink_cp(
+        tmp_mp4.path(),
+        &format!("sj://{bucket}/{hetzner_key}"),
+        grant,
+    )
+    .await?;
     drop(tmp_mp4);
 
     // 2. Copy thumbnail (best-effort: warn if absent, hard fail if S3 check errors)
@@ -91,11 +96,19 @@ async fn mirror_one(s3: &S3Client, hetzner_key: &str, bucket: &str, grant: &str)
                         .await
                         .map_err(|e| anyhow::anyhow!("download thumb {thumb_key}: {e}"))?;
                 }
-                uplink_cp(tmp_thumb.path(), &format!("sj://{bucket}/{thumb_key}"), grant).await?;
+                uplink_cp(
+                    tmp_thumb.path(),
+                    &format!("sj://{bucket}/{thumb_key}"),
+                    grant,
+                )
+                .await?;
                 drop(tmp_thumb);
             }
             Ok(false) => {
-                tracing::warn!(hetzner_key, "thumbnail missing on Hetzner — mirroring MP4 only");
+                tracing::warn!(
+                    hetzner_key,
+                    "thumbnail missing on Hetzner — mirroring MP4 only"
+                );
             }
             Err(e) => {
                 // Transient S3 error checking thumbnail — abort this video, retry next run

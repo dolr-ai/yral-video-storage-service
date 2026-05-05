@@ -58,7 +58,8 @@ impl PHasher {
             // Convert from AV_TIME_BASE to stream time_base units
             let tb = stream.time_base();
             (fmt_duration as f64 * tb.denominator() as f64
-                / (ffmpeg_next::ffi::AV_TIME_BASE as f64 * tb.numerator() as f64)) as i64
+                / (ffmpeg_next::ffi::AV_TIME_BASE as f64 * tb.numerator() as f64))
+                as i64
         } else {
             stream.duration()
         };

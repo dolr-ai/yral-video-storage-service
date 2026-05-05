@@ -33,10 +33,7 @@ impl StorjS3Client {
         Self(inner)
     }
 
-    pub async fn list_objects(
-        &self,
-        prefix: Option<&str>,
-    ) -> Result<Vec<S3ObjectInfo>, String> {
+    pub async fn list_objects(&self, prefix: Option<&str>) -> Result<Vec<S3ObjectInfo>, String> {
         self.0.list_objects(prefix).await
     }
 
