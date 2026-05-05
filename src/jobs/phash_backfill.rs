@@ -35,31 +35,33 @@ pub async fn run(
             .map(|row| {
                 let s3 = s3.clone();
                 async move {
-                    let mut tmp =
-                        NamedTempFile::new().map_err(|e| anyhow::anyhow!("tempfile: {e}"))?;
-                    {
-                        let mut f = tokio::fs::File::from_std(
-                            tmp.as_file()
-                                .try_clone()
-                                .map_err(|e| anyhow::anyhow!("file clone: {e}"))?,
-                        );
-                        s3.download_to_file(&row.hetzner_key, &mut f)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("download {}: {e}", row.hetzner_key))?;
+                    let result: Result<String> = async {
+                        let tmp = NamedTempFile::new()
+                            .map_err(|e| anyhow::anyhow!("tempfile: {e}"))?;
+                        {
+                            let mut f = tokio::fs::File::from_std(
+                                tmp.as_file()
+                                    .try_clone()
+                                    .map_err(|e| anyhow::anyhow!("file clone: {e}"))?,
+                            );
+                            s3.download_to_file(&row.hetzner_key, &mut f)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("download {}: {e}", row.hetzner_key))?;
+                        }
+
+                        // Pass path only (not file handle) into blocking thread
+                        let path = tmp.path().to_owned();
+                        let phash_result =
+                            tokio::task::spawn_blocking(move || PHasher::new().compute_hash(&path))
+                                .await
+                                .map_err(|e| anyhow::anyhow!("spawn_blocking panic: {e}"))
+                                .and_then(|r| r.map_err(|e| anyhow::anyhow!("phash: {e}")))?;
+
+                        drop(tmp);
+                        Ok(phash_result)
                     }
-
-                    // Pass path only (not file handle) into blocking thread
-                    let path = tmp.path().to_owned();
-                    let phash_result =
-                        tokio::task::spawn_blocking(move || PHasher::new().compute_hash(&path))
-                            .await
-                            .map_err(|e| anyhow::anyhow!("spawn_blocking panic: {e}"))
-                            .and_then(|r| r.map_err(|e| anyhow::anyhow!("phash: {e}")));
-
-                    // Always delete tempfile
-                    drop(tmp);
-
-                    (row.video_id, phash_result)
+                    .await;
+                    (row.video_id, result)
                 }
             })
             .buffer_unordered(*PHASH_CONCURRENCY)

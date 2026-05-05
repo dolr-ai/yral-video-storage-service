@@ -79,7 +79,7 @@ pub async fn run(
 
 async fn mirror_one(s3: &S3Client, hetzner_key: &str, bucket: &str, grant: &str) -> Result<()> {
     // 1. Copy MP4
-    let mut tmp_mp4 = NamedTempFile::new()?;
+    let tmp_mp4 = NamedTempFile::new()?;
     {
         let mut f = tokio::fs::File::from_std(tmp_mp4.as_file().try_clone()?);
         s3.download_to_file(hetzner_key, &mut f)
@@ -98,7 +98,7 @@ async fn mirror_one(s3: &S3Client, hetzner_key: &str, bucket: &str, grant: &str)
     if let Some(thumb_key) = thumb_key_from_mp4_key(hetzner_key) {
         match s3.object_exists(&thumb_key).await {
             Ok(true) => {
-                let mut tmp_thumb = NamedTempFile::new()?;
+                let tmp_thumb = NamedTempFile::new()?;
                 {
                     let mut f = tokio::fs::File::from_std(tmp_thumb.as_file().try_clone()?);
                     s3.download_to_file(&thumb_key, &mut f)
