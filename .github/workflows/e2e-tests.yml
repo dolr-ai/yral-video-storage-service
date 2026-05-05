@@ -44,11 +44,23 @@ jobs:
           unzip -o uplink_linux_amd64.zip
           sudo install uplink /usr/local/bin/uplink
 
+      - name: Create hurl variables file
+        run: |
+          cat > /tmp/hurl.vars << EOF
+          host=$HURL_host
+          publisher=$HURL_publisher
+          api_token=$HURL_api_token
+          sfw_share=$HURL_sfw_share
+          nsfw_share=$HURL_nsfw_share
+          video_id=$HURL_video_id
+          hls_video_id=$HURL_hls_video_id
+          EOF
+
       - name: Run duplication tests
         run: |
-          hurl --test test/duplicate.hurl
-          hurl --test test/duplicate_raw_multipart.hurl
-          hurl --test test/confirm_duplicate.hurl
+          hurl --test --variables-file /tmp/hurl.vars test/duplicate.hurl
+          hurl --test --variables-file /tmp/hurl.vars test/duplicate_raw_multipart.hurl
+          hurl --test --variables-file /tmp/hurl.vars test/confirm_duplicate.hurl
 
       - name: Ensure metadata exists
         run: |
@@ -82,8 +94,8 @@ jobs:
 
       - name: Run move2nsfw tests
         run: |
-          hurl --test test/move.hurl
-          hurl --test test/confirm_move.hurl
+          hurl --test --variables-file /tmp/hurl.vars test/move.hurl
+          hurl --test --variables-file /tmp/hurl.vars test/confirm_move.hurl
 
       - name: Clean up buckets
         run: |
@@ -112,11 +124,11 @@ jobs:
 
       - name: Run HLS duplication tests
         run: |
-          # Update video_id environment variable for HLS tests
-          export HURL_video_id=$HURL_hls_video_id
+          # Create HLS vars file with video_id overridden to hls_video_id
+          sed "s/^video_id=.*/video_id=$HURL_hls_video_id/" /tmp/hurl.vars > /tmp/hurl_hls.vars
           # Add retry and longer timeout for streaming uploads
-          hurl --test --retry 3 --retry-interval 2000 --connect-timeout 30 test/duplicate_hls.hurl
-          hurl --test test/confirm_duplicate_hls.hurl
+          hurl --test --retry 3 --retry-interval 2000 --connect-timeout 30 --variables-file /tmp/hurl_hls.vars test/duplicate_hls.hurl
+          hurl --test --variables-file /tmp/hurl_hls.vars test/confirm_duplicate_hls.hurl
 
       - name: Verify all HLS files were uploaded
         run: |
