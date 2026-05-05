@@ -1,16 +1,3 @@
-# Stage 1: builder — needs ffmpeg dev headers to compile ffmpeg-next
-FROM rust:bookworm AS builder
-
-RUN apt-get update && apt-get install -y \
-    libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libavfilter-dev \
-    clang pkg-config curl unzip \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY . .
-RUN cargo build --release --target x86_64-unknown-linux-gnu
-
-# Stage 2: runtime — only ffmpeg runtime libs + uplink CLI
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
@@ -24,7 +11,7 @@ RUN curl -L https://github.com/storj/storj/releases/latest/download/uplink_linux
     && rm -rf /tmp/uplink /tmp/uplink.zip
 
 WORKDIR /app
-COPY --from=builder /app/target/x86_64-unknown-linux-gnu/release/storj-interface .
+COPY storj-interface .
 
 EXPOSE 3000
 ENTRYPOINT ["/app/storj-interface"]
