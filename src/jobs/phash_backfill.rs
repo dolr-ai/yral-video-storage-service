@@ -36,8 +36,8 @@ pub async fn run(
                 let s3 = s3.clone();
                 async move {
                     let result: Result<String> = async {
-                        let tmp = NamedTempFile::new()
-                            .map_err(|e| anyhow::anyhow!("tempfile: {e}"))?;
+                        let tmp =
+                            NamedTempFile::new().map_err(|e| anyhow::anyhow!("tempfile: {e}"))?;
                         {
                             let mut f = tokio::fs::File::from_std(
                                 tmp.as_file()
@@ -46,7 +46,9 @@ pub async fn run(
                             );
                             s3.download_to_file(&row.hetzner_key, &mut f)
                                 .await
-                                .map_err(|e| anyhow::anyhow!("download {}: {e}", row.hetzner_key))?;
+                                .map_err(|e| {
+                                    anyhow::anyhow!("download {}: {e}", row.hetzner_key)
+                                })?;
                         }
 
                         // Pass path only (not file handle) into blocking thread
