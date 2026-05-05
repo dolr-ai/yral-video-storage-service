@@ -17,6 +17,7 @@ use tokio::process::Command;
 
 use crate::breadcrumb;
 use crate::consts::{ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, YRAL_NSFW_VIDEOS, YRAL_VIDEOS};
+use crate::s3_client::S3Client;
 use crate::AppState;
 
 #[derive(thiserror::Error, Debug)]
