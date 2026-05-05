@@ -11,7 +11,12 @@ use crate::db;
 use crate::jobs::{thumb_key_from_mp4_key, uplink_cp};
 use crate::s3_client::S3Client;
 
-pub async fn run(s3: S3Client, db_url: String, cancel: CancellationToken, limit: Option<usize>) -> Result<()> {
+pub async fn run(
+    s3: S3Client,
+    db_url: String,
+    cancel: CancellationToken,
+    limit: Option<usize>,
+) -> Result<()> {
     tracing::info!("Job 3 (mirror): starting");
     let client = db::connect(&db_url).await?;
     let mut grand_total = 0usize;

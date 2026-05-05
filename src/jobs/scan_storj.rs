@@ -5,7 +5,12 @@ use crate::db;
 use crate::jobs::video_id_from_key;
 use crate::storj_s3_client::StorjS3Client;
 
-pub async fn run(storj: StorjS3Client, db_url: String, cancel: CancellationToken, limit: Option<usize>) -> Result<()> {
+pub async fn run(
+    storj: StorjS3Client,
+    db_url: String,
+    cancel: CancellationToken,
+    limit: Option<usize>,
+) -> Result<()> {
     tracing::info!("Job 0 (scan-storj): starting");
     let client = db::connect(&db_url).await?;
     let mut total = 0usize;

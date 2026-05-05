@@ -8,7 +8,12 @@ use crate::consts::{MAX_PHASH_RETRIES, PHASH_CONCURRENCY, SCAN_PAGE_SIZE};
 use crate::db;
 use crate::s3_client::S3Client;
 
-pub async fn run(s3: S3Client, db_url: String, cancel: CancellationToken, limit: Option<usize>) -> Result<()> {
+pub async fn run(
+    s3: S3Client,
+    db_url: String,
+    cancel: CancellationToken,
+    limit: Option<usize>,
+) -> Result<()> {
     tracing::info!("Job 2 (phash-backfill): starting");
     let client = db::connect(&db_url).await?;
     let mut grand_total = 0usize;

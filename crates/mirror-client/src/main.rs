@@ -28,10 +28,8 @@ async fn main() {
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
     let limit = parse_limit(&args);
 
-    let url = std::env::var("MIRROR_SERVICE_URL")
-        .expect("MIRROR_SERVICE_URL must be set");
-    let secret = std::env::var("SERVICE_SECRET_TOKEN")
-        .expect("SERVICE_SECRET_TOKEN must be set");
+    let url = std::env::var("MIRROR_SERVICE_URL").expect("MIRROR_SERVICE_URL must be set");
+    let secret = std::env::var("SERVICE_SECRET_TOKEN").expect("SERVICE_SECRET_TOKEN must be set");
 
     let client = MirrorClient::new(url, secret);
 
@@ -56,10 +54,22 @@ async fn main() {
             }
             Err(e) => Err(e),
         },
-        "scan-storj" => client.scan_storj(limit).await.map(|_| println!("scan-storj accepted")),
-        "scan-hetzner" => client.scan_hetzner(limit).await.map(|_| println!("scan-hetzner accepted")),
-        "phash" => client.phash_backfill(limit).await.map(|_| println!("phash accepted")),
-        "mirror" => client.mirror(limit).await.map(|_| println!("mirror accepted")),
+        "scan-storj" => client
+            .scan_storj(limit)
+            .await
+            .map(|_| println!("scan-storj accepted")),
+        "scan-hetzner" => client
+            .scan_hetzner(limit)
+            .await
+            .map(|_| println!("scan-hetzner accepted")),
+        "phash" => client
+            .phash_backfill(limit)
+            .await
+            .map(|_| println!("phash accepted")),
+        "mirror" => client
+            .mirror(limit)
+            .await
+            .map(|_| println!("mirror accepted")),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(1);
@@ -82,7 +92,10 @@ mod tests {
 
     #[test]
     fn parse_limit_returns_value() {
-        assert_eq!(parse_limit(&args(&["mirror-client", "mirror", "--limit", "10"])), Some(10));
+        assert_eq!(
+            parse_limit(&args(&["mirror-client", "mirror", "--limit", "10"])),
+            Some(10)
+        );
     }
 
     #[test]
@@ -92,7 +105,10 @@ mod tests {
 
     #[test]
     fn parse_limit_returns_none_for_invalid_value() {
-        assert_eq!(parse_limit(&args(&["mirror-client", "mirror", "--limit", "abc"])), None);
+        assert_eq!(
+            parse_limit(&args(&["mirror-client", "mirror", "--limit", "abc"])),
+            None
+        );
     }
 
     #[test]
