@@ -2,7 +2,7 @@
 FROM rust:bookworm AS builder
 
 RUN apt-get update && apt-get install -y \
-    libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
+    libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libavfilter-dev \
     clang pkg-config curl unzip \
     && rm -rf /var/lib/apt/lists/*
 
