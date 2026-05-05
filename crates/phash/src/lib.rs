@@ -93,7 +93,7 @@ impl PHasher {
                 }
                 decoder.send_packet(&packet).context("send packet")?;
                 let mut frame = ffmpeg::frame::Video::empty();
-                while decoder.receive_frame(&mut frame).is_ok() {
+                if decoder.receive_frame(&mut frame).is_ok() {
                     let image = frame_to_image(&frame)?;
                     let hash: ImageHash = hasher.hash_image(&image);
                     result.push_str(&bytes_to_hex(hash.as_bytes()));
