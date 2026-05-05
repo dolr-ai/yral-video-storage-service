@@ -19,7 +19,7 @@ services:
       HETZNER_S3_REGION: ${HETZNER_S3_REGION:-eu-central}
       SERVICE_SECRET_TOKEN: ${SERVICE_SECRET_TOKEN}
       ENVIRONMENT: ${ENVIRONMENT:-production}
-      DATABASE_URL: ${DATABASE_URL:-postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/video_fingerprint_index}
+      DATABASE_URL: postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/video_fingerprint_index
       STORJ_EU1_GATEWAY_ACCESS_KEY: ${STORJ_EU1_GATEWAY_ACCESS_KEY}
       STORJ_EU1_GATEWAY_SECRET_KEY: ${STORJ_EU1_GATEWAY_SECRET_KEY}
       STORJ_SFW_BUCKET: ${STORJ_SFW_BUCKET:-yral-sfw}

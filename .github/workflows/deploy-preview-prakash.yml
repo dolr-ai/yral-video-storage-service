@@ -21,6 +21,7 @@ jobs:
     if: github.event.pull_request.state == 'open'
     name: Deploy Preview
     runs-on: ubuntu-latest
+    environment: Deployment
     permissions:
       contents: read
       packages: write
