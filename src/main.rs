@@ -47,7 +47,7 @@ pub(crate) struct AppState {
 fn main() {
     // Initialize Sentry
     let _guard = sentry::init((
-        "https://9ce8dcaeb2b87f8603bbd6f5b7e8ac2a@apm.yral.com/16",
+        "https://9c27a9c734fcc4481e858a089f2c8fee@sentry.prakash.yral.com/7",
         sentry::ClientOptions {
             release: sentry::release_name!(),
             environment: Some(
