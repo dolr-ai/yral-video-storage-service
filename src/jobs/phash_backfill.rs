@@ -94,7 +94,7 @@ pub async fn run(
             }
             grand_total += 1;
             crate::jobs::log_progress(grand_total, "phash-backfill");
-            if limit.map_or(false, |n| grand_total >= n) {
+            if limit.is_some_and(|n| grand_total >= n) {
                 tracing::info!(grand_total, "Job 2 (phash-backfill): limit reached");
                 return Ok(());
             }

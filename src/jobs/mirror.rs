@@ -66,7 +66,7 @@ pub async fn run(
             }
             grand_total += 1;
             crate::jobs::log_progress(grand_total, "mirror");
-            if limit.map_or(false, |n| grand_total >= n) {
+            if limit.is_some_and(|n| grand_total >= n) {
                 tracing::info!(grand_total, "Job 3 (mirror): limit reached");
                 return Ok(());
             }

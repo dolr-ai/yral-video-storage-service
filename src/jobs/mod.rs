@@ -59,7 +59,7 @@ pub async fn uplink_cp(src: &Path, dst: &str, access_grant: &str) -> Result<()> 
 
 /// Log progress every 1000 items.
 pub fn log_progress(processed: usize, label: &str) {
-    if processed % 1000 == 0 && processed > 0 {
+    if processed.is_multiple_of(1000) && processed > 0 {
         tracing::info!(processed, "{label}: processed {processed} items");
     }
 }

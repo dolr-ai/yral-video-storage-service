@@ -37,7 +37,7 @@ pub async fn run(
 
         total += 1;
         crate::jobs::log_progress(total, "scan-storj");
-        if limit.map_or(false, |n| total >= n) {
+        if limit.is_some_and(|n| total >= n) {
             tracing::info!(total, "Job 0 (scan-storj): limit reached");
             break;
         }

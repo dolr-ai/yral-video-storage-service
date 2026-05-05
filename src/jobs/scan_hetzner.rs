@@ -42,7 +42,7 @@ pub async fn run(
 
         total += 1;
         crate::jobs::log_progress(total, "scan-hetzner");
-        if limit.map_or(false, |n| total >= n) {
+        if limit.is_some_and(|n| total >= n) {
             tracing::info!(total, "Job 1 (scan-hetzner): limit reached");
             break;
         }
