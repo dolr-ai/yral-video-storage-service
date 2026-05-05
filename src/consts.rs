@@ -57,11 +57,11 @@ pub static MIRROR_ACCESS_GRANT: Lazy<String> = Lazy::new(|| {
 });
 
 // Storj S3 gateway credentials (for listing/verifying, not uploads)
-pub static STORJ_GATEWAY_ACCESS_KEY: Lazy<String> = Lazy::new(|| {
-    std::env::var("STORJ_GATEWAY_ACCESS_KEY").expect("STORJ_GATEWAY_ACCESS_KEY required")
+pub static STORJ_EU1_GATEWAY_ACCESS_KEY: Lazy<String> = Lazy::new(|| {
+    std::env::var("STORJ_EU1_GATEWAY_ACCESS_KEY").expect("STORJ_EU1_GATEWAY_ACCESS_KEY required")
 });
-pub static STORJ_GATEWAY_SECRET_KEY: Lazy<String> = Lazy::new(|| {
-    std::env::var("STORJ_GATEWAY_SECRET_KEY").expect("STORJ_GATEWAY_SECRET_KEY required")
+pub static STORJ_EU1_GATEWAY_SECRET_KEY: Lazy<String> = Lazy::new(|| {
+    std::env::var("STORJ_EU1_GATEWAY_SECRET_KEY").expect("STORJ_EU1_GATEWAY_SECRET_KEY required")
 });
 pub static STORJ_SFW_BUCKET: Lazy<String> =
     Lazy::new(|| std::env::var("STORJ_SFW_BUCKET").unwrap_or_else(|_| "yral-sfw".to_string()));

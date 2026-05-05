@@ -111,8 +111,8 @@ async fn run_server() -> anyhow::Result<()> {
 
     // Force new lazy consts
     let _ = &*consts::DATABASE_URL;
-    let _ = &*consts::STORJ_GATEWAY_ACCESS_KEY;
-    let _ = &*consts::STORJ_GATEWAY_SECRET_KEY;
+    let _ = &*consts::STORJ_EU1_GATEWAY_ACCESS_KEY;
+    let _ = &*consts::STORJ_EU1_GATEWAY_SECRET_KEY;
     let _ = &*consts::MIRROR_ACCESS_GRANT;
 
     // Initialize S3 client

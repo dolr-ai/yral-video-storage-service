@@ -2,7 +2,7 @@ use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::Client;
 
-use crate::consts::{STORJ_GATEWAY_ACCESS_KEY, STORJ_GATEWAY_SECRET_KEY, STORJ_SFW_BUCKET};
+use crate::consts::{STORJ_EU1_GATEWAY_ACCESS_KEY, STORJ_EU1_GATEWAY_SECRET_KEY, STORJ_SFW_BUCKET};
 use crate::s3_client::{S3Client, S3ObjectInfo};
 
 pub const STORJ_GATEWAY_ENDPOINT: &str = "https://gateway.eu1.storjshare.io";
@@ -13,8 +13,8 @@ pub struct StorjS3Client(S3Client);
 impl StorjS3Client {
     pub async fn new() -> Self {
         let creds = Credentials::new(
-            STORJ_GATEWAY_ACCESS_KEY.as_str(),
-            STORJ_GATEWAY_SECRET_KEY.as_str(),
+            STORJ_EU1_GATEWAY_ACCESS_KEY.as_str(),
+            STORJ_EU1_GATEWAY_SECRET_KEY.as_str(),
             None,
             None,
             "storj_gateway",

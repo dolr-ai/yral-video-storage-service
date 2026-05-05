@@ -80,15 +80,15 @@ jobs:
       HETZNER_S3_REGION: ${{ secrets.HETZNER_S3_REGION }}
       SERVICE_SECRET_TOKEN: ${{ secrets.SERVICE_SECRET_TOKEN }}
       POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-      STORJ_GATEWAY_ACCESS_KEY: ${{ secrets.STORJ_GATEWAY_ACCESS_KEY }}
-      STORJ_GATEWAY_SECRET_KEY: ${{ secrets.STORJ_GATEWAY_SECRET_KEY }}
+      STORJ_EU1_GATEWAY_ACCESS_KEY: ${{ secrets.STORJ_EU1_GATEWAY_ACCESS_KEY }}
+      STORJ_EU1_GATEWAY_SECRET_KEY: ${{ secrets.STORJ_EU1_GATEWAY_SECRET_KEY }}
       STORJ_MIRROR_ACCESS_GRANT: ${{ secrets.STORJ_MIRROR_ACCESS_GRANT }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup SSHit p
+      - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY_PRAKASH }}" > ~/.ssh/id_rsa
@@ -117,8 +117,8 @@ jobs:
              export HETZNER_S3_REGION='${HETZNER_S3_REGION}'; \
              export SERVICE_SECRET_TOKEN='${SERVICE_SECRET_TOKEN}'; \
              export POSTGRES_PASSWORD='${POSTGRES_PASSWORD}'; \
-             export STORJ_GATEWAY_ACCESS_KEY='${STORJ_GATEWAY_ACCESS_KEY}'; \
-             export STORJ_GATEWAY_SECRET_KEY='${STORJ_GATEWAY_SECRET_KEY}'; \
+             export STORJ_EU1_GATEWAY_ACCESS_KEY='${STORJ_EU1_GATEWAY_ACCESS_KEY}'; \
+             export STORJ_EU1_GATEWAY_SECRET_KEY='${STORJ_EU1_GATEWAY_SECRET_KEY}'; \
              export STORJ_MIRROR_ACCESS_GRANT='${STORJ_MIRROR_ACCESS_GRANT}'; \
              export ENVIRONMENT='production'; \
              cd ${{ env.APP_DIR }} && \
