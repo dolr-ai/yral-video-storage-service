@@ -385,8 +385,17 @@ mod tests {
                 ])
                 .status()
                 .expect("docker run");
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             let url = format!("postgres://test:test@127.0.0.1:{port}/test");
+            // Poll until postgres is ready (up to 10s)
+            for _ in 0..20 {
+                if tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
             (Self { name }, url)
         }
     }
