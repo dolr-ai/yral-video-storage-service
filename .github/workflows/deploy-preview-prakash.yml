@@ -143,33 +143,14 @@ jobs:
           (ssh "deploy@${{ env.SERVER_1_IP }}" \
             "cd ${{ env.APP_DIR }} && docker compose logs --tail=50" && exit 1)
 
-      - name: Comment preview URL on PR
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            const marker = '<!-- deploy-preview-prakash -->';
-            const existing = comments.find(c => c.body.includes(marker));
-            const body = `${marker}\n🚀 **Preview deployed:** ${{ env.PREVIEW_URL }}\n\n**Test commands (HMAC-SHA256 signed):**\n\`\`\`bash\n# Health check (no auth)\ncurl ${{ env.PREVIEW_URL }}/health\n\n# Signed request helper\nhmac_sign() {\n  local method=$1 path=$2\n  local ts=$(date +%s)\n  local sig=$(printf "%s\\n%s\\n%s" "$method" "$path" "$ts" | openssl dgst -sha256 -hmac "$SERVICE_SECRET_TOKEN" | awk '{ print $NF }')\n  echo "-H \\"X-Timestamp: $ts\\" -H \\"Authorization: HMAC-SHA256 $sig\\""\n}\n\n# Audit\ncurl $(hmac_sign GET /mirror/audit) ${{ env.PREVIEW_URL }}/mirror/audit\n\n# Trigger scan-hetzner\ncurl -X POST $(hmac_sign POST /mirror/jobs/scan-hetzner) ${{ env.PREVIEW_URL }}/mirror/jobs/scan-hetzner\n\`\`\``;
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body,
-              });
-            }
+  e2e-tests:
+    if: github.event.pull_request.state == 'open'
+    needs: deploy-preview
+    uses: ./.github/workflows/e2e-tests.yml
+    secrets: inherit
+    with:
+      preview_url: https://storj-interface-preview.prakash.yral.com
+      publisher: testuser-${{ github.sha }}
 
   destroy-preview:
     if: github.event.pull_request.state == 'closed'
