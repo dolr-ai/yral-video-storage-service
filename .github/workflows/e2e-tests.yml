@@ -21,6 +21,7 @@ jobs:
       HURL_video_id: 7ec40a0b9aba4307a97e8666822ed563
       HURL_hls_video_id: hls_test_7ec40a0b9aba4307a97e8666822ed563
       ACCESS: ${{ secrets.STORJ_ACCESS_GRANT }}
+      ACCESS_NSFW: ${{ secrets.STORJ_ACCESS_GRANT_NSFW }}
 
     environment: Deployment
     steps:
@@ -70,28 +71,28 @@ jobs:
           # SFW videos now go to both Storj and Hetzner
           uplink meta get --access="$ACCESS" "sj://yral-videos/$HURL_publisher/$HURL_video_id.mp4"
           uplink meta get --access="$ACCESS" "sj://yral-videos/$HURL_publisher/$HURL_video_id.mp4" | jq -e 'select(.test == "value")'
-          uplink meta get --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/$HURL_video_id.mp4"
-          uplink meta get --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/$HURL_video_id.mp4" | jq -e 'select(.test == "value")'
+          uplink meta get --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/$HURL_publisher/$HURL_video_id.mp4"
+          uplink meta get --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/$HURL_publisher/$HURL_video_id.mp4" | jq -e 'select(.test == "value")'
 
           # Verify raw multipart uploaded videos exist and check metadata
           uplink meta get --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp.mp4"
           uplink meta get --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp.mp4" | jq -e 'select(.test == "multipart")'
-          uplink meta get --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw.mp4"
-          uplink meta get --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw.mp4" | jq -e 'select(.test == "multipart")'
+          uplink meta get --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw.mp4"
+          uplink meta get --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw.mp4" | jq -e 'select(.test == "multipart")'
 
           # Verify thumbnails were created for /duplicate endpoint
           echo "Checking thumbnails exist for /duplicate endpoint..."
           uplink ls --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_thumbnail.png"
-          uplink ls --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_thumbnail.png"
+          uplink ls --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_thumbnail.png"
 
           # Verify thumbnails were created for multipart uploads
           echo "Checking thumbnails exist for multipart uploads..."
           uplink ls --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp_thumbnail.png"
-          uplink ls --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw_thumbnail.png"
+          uplink ls --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw_thumbnail.png"
 
       - name: Setup for move2nsfw tests
         run: |
-          uplink rm --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/$HURL_video_id.mp4"
+          uplink rm --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/$HURL_publisher/$HURL_video_id.mp4"
 
       - name: Run move2nsfw tests
         run: |
@@ -102,26 +103,26 @@ jobs:
         run: |
           # Clean up both SFW and NSFW videos from Storj (from /duplicate endpoint)
           uplink rm --access="$ACCESS" "sj://yral-videos/$HURL_publisher/$HURL_video_id.mp4" || true
-          uplink rm --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/$HURL_video_id.mp4" || true
+          uplink rm --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/$HURL_publisher/$HURL_video_id.mp4" || true
 
           # Clean up /duplicate endpoint thumbnails
           uplink rm --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_thumbnail.png" || true
-          uplink rm --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_thumbnail.png" || true
+          uplink rm --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_thumbnail.png" || true
 
           # Clean up multipart uploaded videos
           uplink rm --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp.mp4" || true
-          uplink rm --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw.mp4" || true
+          uplink rm --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw.mp4" || true
 
           # Clean up multipart upload thumbnails
           uplink rm --access="$ACCESS" "sj://yral-videos/$HURL_publisher/${HURL_video_id}_raw_mp_thumbnail.png" || true
-          uplink rm --access="$ACCESS" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw_thumbnail.png" || true
+          uplink rm --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/$HURL_publisher/${HURL_video_id}_raw_mp_nsfw_thumbnail.png" || true
 
       # HLS Tests
       - name: Clean up any existing HLS test files
         run: |
           # Clean up both SFW and NSFW HLS files from Storj
           uplink rm --recursive --access="$ACCESS" "sj://yral-videos/${HURL_hls_video_id}/hls/" || true
-          uplink rm --recursive --access="$ACCESS" "sj://yral-nsfw-videos/${HURL_hls_video_id}_nsfw/hls/" || true
+          uplink rm --recursive --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/${HURL_hls_video_id}_nsfw/hls/" || true
 
       - name: Run HLS duplication tests
         run: |
@@ -141,7 +142,7 @@ jobs:
           uplink ls --recursive --access="$ACCESS" "sj://yral-videos/${HURL_hls_video_id}/hls/"
           
           echo "Files in NSFW bucket:"
-          uplink ls --recursive --access="$ACCESS" "sj://yral-nsfw-videos/${HURL_hls_video_id}_nsfw/hls/"
+          uplink ls --recursive --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/${HURL_hls_video_id}_nsfw/hls/"
 
       - name: Clean up HLS test files
         if: always()
@@ -149,7 +150,7 @@ jobs:
           # Clean up both SFW and NSFW HLS files from Storj
           uplink rm --recursive --access="$ACCESS" "sj://yral-videos/${HURL_hls_video_id}/hls/" || true
           # Clean up NSFW bucket
-          uplink rm --recursive --access="$ACCESS" "sj://yral-nsfw-videos/${HURL_hls_video_id}_nsfw/hls/" || true
+          uplink rm --recursive --access="$ACCESS_NSFW" "sj://yral-nsfw-videos/${HURL_hls_video_id}_nsfw/hls/" || true
       
       - name: Clean up S3 test files
         if: always()
