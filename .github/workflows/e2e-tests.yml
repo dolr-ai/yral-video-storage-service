@@ -16,7 +16,6 @@ jobs:
     env:
       HURL_host: ${{ inputs.preview_url }}
       HURL_publisher: ${{ inputs.publisher }}
-      HURL_api_token: ${{ secrets.SERVICE_SECRET_TOKEN }}
       HURL_sfw_share: ${{ secrets.SFW_SHARE }}
       HURL_nsfw_share: ${{ secrets.NSFW_SHARE }}
       HURL_video_id: 7ec40a0b9aba4307a97e8666822ed563
@@ -49,12 +48,14 @@ jobs:
           {
             echo "host=$HURL_host"
             echo "publisher=$HURL_publisher"
-            echo "api_token=${{ secrets.SERVICE_SECRET_TOKEN }}"
             echo "sfw_share=${{ secrets.SFW_SHARE }}"
             echo "nsfw_share=${{ secrets.NSFW_SHARE }}"
             echo "video_id=$HURL_video_id"
             echo "hls_video_id=$HURL_hls_video_id"
           } > /tmp/hurl.vars
+          # Append HMAC-SHA256 auth variables (hmac_ts, hmac_sig_dup, etc.)
+          chmod +x scripts/generate-hmac-vars.sh
+          ./scripts/generate-hmac-vars.sh "${{ secrets.SERVICE_SECRET_TOKEN }}" /tmp/hurl.vars
 
       - name: Run duplication tests
         run: |

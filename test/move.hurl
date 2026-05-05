@@ -1,6 +1,7 @@
 # proper input
 POST {{host}}/move-to-nsfw
-Authorization: Bearer {{api_token}}
+X-Timestamp: {{hmac_ts}}
+Authorization: HMAC-SHA256 {{hmac_sig_move}}
 {
   "publisher_user_id": "{{publisher}}",
   "video_id": "{{video_id}}"
@@ -15,9 +16,10 @@ POST {{host}}/move-to-nsfw
 }
 HTTP 401
 
-# With wrong token
+# With wrong signature
 POST {{host}}/move-to-nsfw
-Authorization: Bearer wrongtoken
+X-Timestamp: {{hmac_ts}}
+Authorization: HMAC-SHA256 0000000000000000000000000000000000000000000000000000000000000000
 {
   "publisher_user_id": "{{publisher}}",
   "video_id": "{{video_id}}"
@@ -26,13 +28,15 @@ HTTP 401
 
 # malformed input
 POST {{host}}/move-to-nsfw
-Authorization: Bearer {{api_token}}
+X-Timestamp: {{hmac_ts}}
+Authorization: HMAC-SHA256 {{hmac_sig_move}}
 `malformed json input`
 HTTP 415
 
 # missing required information
 POST {{host}}/move-to-nsfw
-Authorization: Bearer {{api_token}}
+X-Timestamp: {{hmac_ts}}
+Authorization: HMAC-SHA256 {{hmac_sig_move}}
 {
   "video_id": "{{video_id}}"
 }
