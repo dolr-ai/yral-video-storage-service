@@ -31,6 +31,8 @@ pub struct JobStatus {
     pub scan_hetzner: bool,
     pub phash: bool,
     pub mirror: bool,
+    #[serde(default)]
+    pub pipeline: bool,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

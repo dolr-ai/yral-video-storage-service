@@ -148,6 +148,10 @@ async fn main() {
                     "mirror:       {}",
                     if s.mirror { "running" } else { "idle" }
                 );
+                println!(
+                    "pipeline:     {}",
+                    if s.pipeline { "running" } else { "idle" }
+                );
                 Ok(())
             }
             Err(e) => Err(e),

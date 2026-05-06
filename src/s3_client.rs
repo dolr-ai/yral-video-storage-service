@@ -280,46 +280,58 @@ impl S3Client {
         &self.bucket
     }
 
+    /// Fetch a single S3 LIST page with retry. Returns (items, next_continuation_token).
+    pub async fn list_objects_page(
+        &self,
+        prefix: Option<&str>,
+        continuation_token: Option<&str>,
+    ) -> Result<(Vec<S3ObjectInfo>, Option<String>), String> {
+        let token = continuation_token.map(ToOwned::to_owned);
+        let response = retry_s3_op_string("list_objects_page", "", || {
+            let mut request = self.client.list_objects_v2().bucket(self.bucket.as_str());
+            if let Some(p) = prefix {
+                request = request.prefix(p);
+            }
+            if let Some(t) = token.as_deref() {
+                request = request.continuation_token(t);
+            }
+            async move { request.send().await.map_err(|e| e.to_string()) }
+        })
+        .await?;
+
+        let mut items = Vec::new();
+        for object in response.contents() {
+            let Some(key) = object.key() else {
+                continue;
+            };
+            let last_modified = object
+                .last_modified()
+                .and_then(|v| DateTime::<Utc>::from_timestamp(v.secs(), 0));
+            items.push(S3ObjectInfo {
+                key: key.to_string(),
+                last_modified,
+                size: object.size(),
+            });
+        }
+        let next_token = response.next_continuation_token().map(ToOwned::to_owned);
+        Ok((items, next_token))
+    }
+
     #[allow(dead_code)]
     pub async fn list_objects(&self, prefix: Option<&str>) -> Result<Vec<S3ObjectInfo>, String> {
-        let mut items = Vec::new();
+        let mut all_items = Vec::new();
         let mut continuation_token: Option<String> = None;
-
         loop {
-            let token = continuation_token.clone();
-            let response = retry_s3_op_string("list_objects", "", || {
-                let mut request = self.client.list_objects_v2().bucket(self.bucket.as_str());
-                if let Some(p) = prefix {
-                    request = request.prefix(p);
-                }
-                if let Some(t) = token.as_deref() {
-                    request = request.continuation_token(t);
-                }
-                async move { request.send().await.map_err(|e| e.to_string()) }
-            })
-            .await?;
-
-            for object in response.contents() {
-                let Some(key) = object.key() else {
-                    continue;
-                };
-                let last_modified = object
-                    .last_modified()
-                    .and_then(|value| DateTime::<Utc>::from_timestamp(value.secs(), 0));
-                items.push(S3ObjectInfo {
-                    key: key.to_string(),
-                    last_modified,
-                    size: object.size(),
-                });
-            }
-
-            continuation_token = response.next_continuation_token().map(ToOwned::to_owned);
+            let (items, next_token) = self
+                .list_objects_page(prefix, continuation_token.as_deref())
+                .await?;
+            all_items.extend(items);
+            continuation_token = next_token;
             if continuation_token.is_none() {
                 break;
             }
         }
-
-        Ok(items)
+        Ok(all_items)
     }
 
     #[allow(dead_code)]

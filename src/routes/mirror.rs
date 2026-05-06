@@ -182,7 +182,6 @@ pub async fn run_pipeline(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<JobParams>,
 ) -> StatusCode {
-    // Prevent two concurrent pipelines racing on shared job flags.
     if state
         .job_pipeline_running
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -207,91 +206,92 @@ pub async fn run_pipeline(
 
     tokio::spawn(async move {
         let _pipeline_guard = pipeline_guard;
-        // Step 1: scan_hetzner
-        if state
-            .job_scan_hetzner_running
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            let guard = crate::jobs::JobGuard(state.job_scan_hetzner_running.clone());
-            if let Err(e) = crate::jobs::scan_hetzner::run(
-                s3.clone(),
-                db_url.clone(),
-                cancel.clone(),
-                params.limit,
-                params.prefix.clone(),
-            )
-            .await
-            {
-                tracing::error!(error = %e, "Pipeline scan-hetzner error");
+
+        let db_client = match db::connect(&db_url).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "Pipeline DB connect failed");
+                return;
             }
-            drop(guard); // reset flag before next step acquires it
-        } else {
-            tracing::warn!("Pipeline scan-hetzner skipped: already running");
-        }
+        };
 
-        if cancel.is_cancelled() {
-            return;
-        }
+        let mut continuation_token: Option<String> = None;
+        let mut grand_total = 0usize;
 
-        // Step 2: phash — prefix intentionally not forwarded; phash operates on all DB rows
-        if state
-            .job_phash_running
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            let guard = crate::jobs::JobGuard(state.job_phash_running.clone());
-            if let Err(e) = crate::jobs::phash_backfill::run(
-                s3.clone(),
-                db_url.clone(),
-                cancel.clone(),
-                params.limit,
-            )
-            .await
+        loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+
+            // Step 1: fetch one S3 page from Hetzner
+            let (objects, next_token) = match s3
+                .list_objects_page(params.prefix.as_deref(), continuation_token.as_deref())
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(error = %e, "Pipeline scan-hetzner page error");
+                    sentry::capture_message(
+                        &format!("Pipeline scan-hetzner page failed: {e}"),
+                        sentry::Level::Error,
+                    );
+                    return;
+                }
+            };
+
+            // Step 2: upsert this page to DB
+            for obj in &objects {
+                if obj.key.ends_with("_thumbnail.png") || obj.key.ends_with("-thumbnail.png") {
+                    continue;
+                }
+                let Some(video_id) = jobs::video_id_from_key(&obj.key) else {
+                    continue;
+                };
+                let is_temp = obj.key.contains(crate::consts::TEMP_KEY_PREFIX.as_str());
+                if let Err(e) =
+                    db::upsert_hetzner_key(&db_client, &video_id, &obj.key, is_temp).await
+                {
+                    tracing::error!(error = %e, key = %obj.key, "Pipeline upsert error");
+                }
+                grand_total += 1;
+                jobs::log_progress(grand_total, "pipeline/scan");
+            }
+
+            if cancel.is_cancelled() {
+                return;
+            }
+
+            // Step 3: phash all pending rows (operates on full DB state, not just this page)
+            if let Err(e) =
+                crate::jobs::phash_backfill::run(s3.clone(), db_url.clone(), cancel.clone(), None)
+                    .await
             {
                 tracing::error!(error = %e, "Pipeline phash error");
             }
-            drop(guard); // reset flag before next step acquires it
-        } else {
-            tracing::warn!("Pipeline phash skipped: already running");
-        }
 
-        if cancel.is_cancelled() {
-            return;
-        }
+            if cancel.is_cancelled() {
+                return;
+            }
 
-        // Step 3: mirror — prefix intentionally not forwarded; mirror operates on all DB rows
-        if state
-            .job_mirror_running
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            let guard = crate::jobs::JobGuard(state.job_mirror_running.clone());
+            // Step 4: mirror all pending rows (operates on full DB state, not just this page)
             if let Err(e) =
-                crate::jobs::mirror::run(s3.clone(), db_url.clone(), cancel.clone(), params.limit)
-                    .await
+                crate::jobs::mirror::run(s3.clone(), db_url.clone(), cancel.clone(), None).await
             {
                 tracing::error!(error = %e, "Pipeline mirror error");
             }
-            drop(guard); // reset flag; _pipeline_guard drops after this block ends
-        } else {
-            tracing::warn!("Pipeline mirror skipped: already running");
+
+            if params.limit.is_some_and(|n| grand_total >= n) {
+                tracing::info!(grand_total, "Pipeline: scan limit reached");
+                return;
+            }
+
+            continuation_token = next_token;
+            if continuation_token.is_none() {
+                break;
+            }
         }
+
+        tracing::info!(grand_total, "Pipeline: complete");
     });
 
     StatusCode::ACCEPTED
@@ -415,6 +415,7 @@ pub struct JobStatus {
     pub scan_hetzner: bool,
     pub phash: bool,
     pub mirror: bool,
+    pub pipeline: bool,
 }
 
 pub async fn status(State(state): State<AppState>) -> Json<JobStatus> {
@@ -423,6 +424,7 @@ pub async fn status(State(state): State<AppState>) -> Json<JobStatus> {
         scan_hetzner: state.job_scan_hetzner_running.load(Ordering::Acquire),
         phash: state.job_phash_running.load(Ordering::Acquire),
         mirror: state.job_mirror_running.load(Ordering::Acquire),
+        pipeline: state.job_pipeline_running.load(Ordering::Acquire),
     })
 }
 
