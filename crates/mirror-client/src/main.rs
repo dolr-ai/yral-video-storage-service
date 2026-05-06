@@ -3,17 +3,18 @@ use mirror_client::{MirrorClient, MirrorError};
 const USAGE: &str = "Usage: mirror-client <command> [--limit N]
 
 Commands:
-  audit           Print index statistics
-  duplicates      List videos with identical perceptual hashes
-  scan-storj      Scan Storj bucket into index
-  scan-hetzner    Scan Hetzner bucket into index
-  phash           Compute missing perceptual hashes
-  mirror          Copy pending videos from Hetzner → Storj
-  run-pipeline    Run full pipeline: scan-hetzner → phash → mirror (requires --prefix)
-  cancel          Cancel all running background jobs
-  status          Show which jobs are currently running
-  config          Show dynamic configuration
-  config-set      Update configuration (use --phash, --mirror, --page)
+  audit                Print index statistics
+  duplicates           List videos with identical perceptual hashes
+  scan-storj           Scan Storj bucket into index
+  scan-hetzner         Scan Hetzner bucket into index
+  phash                Compute missing perceptual hashes
+  mirror               Copy pending videos from Hetzner → Storj
+  run-pipeline         Run full pipeline locally: scan-hetzner → phash → mirror (requires --prefix)
+  run-pipeline-async   Trigger full pipeline on server and return immediately; use status/audit to track
+  cancel               Cancel all running background jobs
+  status               Show which jobs are currently running
+  config               Show dynamic configuration
+  config-set           Update configuration (use --phash, --mirror, --page)
 
 Options:
   --limit N       Stop after processing N items (scan/phash/mirror/run-pipeline)
@@ -117,6 +118,9 @@ async fn main() {
             };
             run_pipeline(&client, limit, pfx).await
         }
+        "run-pipeline-async" => client.trigger_pipeline(limit, prefix).await.map(|_| {
+            println!("run-pipeline accepted by server. Use 'status' or 'audit' to check progress.")
+        }),
         "cancel" => match client.cancel_all().await {
             Ok(r) => {
                 println!("{}", r.message);

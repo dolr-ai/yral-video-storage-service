@@ -178,6 +178,125 @@ pub async fn mirror(
     StatusCode::ACCEPTED
 }
 
+pub async fn run_pipeline(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<JobParams>,
+) -> StatusCode {
+    // Prevent two concurrent pipelines racing on shared job flags.
+    if state
+        .job_pipeline_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return StatusCode::CONFLICT;
+    }
+    let pipeline_guard = JobGuard(state.job_pipeline_running.clone());
+
+    let s3 = state.s3_client.clone();
+    let db_url = state.db_url.clone();
+    let cancel = state
+        .job_cancel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+
+    if cancel.is_cancelled() {
+        drop(pipeline_guard);
+        return StatusCode::CONFLICT;
+    }
+
+    tokio::spawn(async move {
+        let _pipeline_guard = pipeline_guard;
+        // Step 1: scan_hetzner
+        if state
+            .job_scan_hetzner_running
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            let guard = crate::jobs::JobGuard(state.job_scan_hetzner_running.clone());
+            if let Err(e) = crate::jobs::scan_hetzner::run(
+                s3.clone(),
+                db_url.clone(),
+                cancel.clone(),
+                params.limit,
+                params.prefix.clone(),
+            )
+            .await
+            {
+                tracing::error!(error = %e, "Pipeline scan-hetzner error");
+            }
+            drop(guard); // reset flag before next step acquires it
+        } else {
+            tracing::warn!("Pipeline scan-hetzner skipped: already running");
+        }
+
+        if cancel.is_cancelled() {
+            return;
+        }
+
+        // Step 2: phash — prefix intentionally not forwarded; phash operates on all DB rows
+        if state
+            .job_phash_running
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            let guard = crate::jobs::JobGuard(state.job_phash_running.clone());
+            if let Err(e) = crate::jobs::phash_backfill::run(
+                s3.clone(),
+                db_url.clone(),
+                cancel.clone(),
+                params.limit,
+            )
+            .await
+            {
+                tracing::error!(error = %e, "Pipeline phash error");
+            }
+            drop(guard); // reset flag before next step acquires it
+        } else {
+            tracing::warn!("Pipeline phash skipped: already running");
+        }
+
+        if cancel.is_cancelled() {
+            return;
+        }
+
+        // Step 3: mirror — prefix intentionally not forwarded; mirror operates on all DB rows
+        if state
+            .job_mirror_running
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            let guard = crate::jobs::JobGuard(state.job_mirror_running.clone());
+            if let Err(e) =
+                crate::jobs::mirror::run(s3.clone(), db_url.clone(), cancel.clone(), params.limit)
+                    .await
+            {
+                tracing::error!(error = %e, "Pipeline mirror error");
+            }
+            drop(guard); // reset flag; _pipeline_guard drops after this block ends
+        } else {
+            tracing::warn!("Pipeline mirror skipped: already running");
+        }
+    });
+
+    StatusCode::ACCEPTED
+}
+
 pub async fn audit(State(state): State<AppState>) -> Result<Json<AuditResponse>, StatusCode> {
     let client = db::connect(&state.db_url)
         .await

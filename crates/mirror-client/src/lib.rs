@@ -185,6 +185,17 @@ impl MirrorClient {
         self.post_job("/mirror/jobs/mirror", limit, None).await
     }
 
+    /// Trigger full pipeline on the server and return immediately (fire-and-forget).
+    /// Use `job_status` or `audit` to track progress.
+    pub async fn trigger_pipeline(
+        &self,
+        limit: Option<u64>,
+        prefix: Option<&str>,
+    ) -> Result<(), MirrorError> {
+        self.post_job("/mirror/jobs/run-pipeline", limit, prefix)
+            .await
+    }
+
     pub async fn audit(&self) -> Result<AuditResponse, MirrorError> {
         let path = "/mirror/audit";
         let (ts, sig) = self.sign("GET", path);

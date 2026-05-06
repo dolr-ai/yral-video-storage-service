@@ -44,6 +44,7 @@ pub(crate) struct AppState {
     pub job_scan_hetzner_running: Arc<AtomicBool>,
     pub job_phash_running: Arc<AtomicBool>,
     pub job_mirror_running: Arc<AtomicBool>,
+    pub job_pipeline_running: Arc<AtomicBool>,
 }
 
 fn main() {
@@ -145,6 +146,7 @@ async fn run_server() -> anyhow::Result<()> {
         job_scan_hetzner_running: Arc::new(AtomicBool::new(false)),
         job_phash_running: Arc::new(AtomicBool::new(false)),
         job_mirror_running: Arc::new(AtomicBool::new(false)),
+        job_pipeline_running: Arc::new(AtomicBool::new(false)),
     };
 
     // Configure CORS to allow cross-origin requests
@@ -210,6 +212,12 @@ async fn run_server() -> anyhow::Result<()> {
         .route(
             "/mirror/jobs/mirror",
             post(routes::mirror::mirror)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/mirror/jobs/run-pipeline",
+            post(routes::mirror::run_pipeline)
                 .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
         )
