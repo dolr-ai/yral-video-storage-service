@@ -17,7 +17,7 @@ jobs:
       HURL_host: ${{ inputs.preview_url }}
       HURL_publisher: ${{ inputs.publisher }}
       HURL_sfw_share: ${{ secrets.SFW_SHARE }}
-      HURL_nsfw_share: ${{ secrets.NSFW_SHARE }}
+      HURL_nsfw_share: ${{ secrets.NSFW_SHARE_EU1_URL }}
       HURL_video_id: 7ec40a0b9aba4307a97e8666822ed563
       HURL_hls_video_id: hls_test_7ec40a0b9aba4307a97e8666822ed563
       ACCESS: ${{ secrets.STORJ_ACCESS_GRANT }}
@@ -50,7 +50,7 @@ jobs:
             echo "host=$HURL_host"
             echo "publisher=$HURL_publisher"
             echo "sfw_share=${{ secrets.SFW_SHARE }}"
-            echo "nsfw_share=${{ secrets.NSFW_SHARE }}"
+            echo "nsfw_share=${{ secrets.NSFW_SHARE_EU1_URL }}"
             echo "video_id=$HURL_video_id"
             echo "hls_video_id=$HURL_hls_video_id"
           } > /tmp/hurl.vars

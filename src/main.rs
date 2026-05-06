@@ -15,7 +15,7 @@ use consts::{
 use once_cell::sync::Lazy;
 use reqwest::{header::AUTHORIZATION, StatusCode};
 use sentry_tower::{NewSentryLayer, SentryHttpLayer};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use tokio::{signal, sync::Notify};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
@@ -38,6 +38,9 @@ pub(crate) struct AppState {
     pub storj_client: storj_s3_client::StorjS3Client,
     pub db_url: String,
     pub cancel: CancellationToken,
+    /// Token for cancelling running background jobs without shutting down the server.
+    /// Wrapped in Mutex so it can be swapped for a fresh token after cancel_all().
+    pub job_cancel: Arc<Mutex<CancellationToken>>,
     pub job_scan_storj_running: Arc<AtomicBool>,
     pub job_scan_hetzner_running: Arc<AtomicBool>,
     pub job_phash_running: Arc<AtomicBool>,
@@ -129,12 +132,17 @@ async fn run_server() -> anyhow::Result<()> {
 
     let storj_client = storj_s3_client::StorjS3Client::new().await;
     let cancel = CancellationToken::new();
+    let job_cancel = CancellationToken::new();
+
+    // Server shutdown also cancels running jobs
+    let _job_cancel_on_shutdown = cancel.clone().drop_guard();
 
     let app_state = AppState {
         s3_client,
         storj_client,
         db_url: consts::DATABASE_URL.clone(),
         cancel: cancel.clone(),
+        job_cancel: Arc::new(Mutex::new(job_cancel)),
         job_scan_storj_running: Arc::new(AtomicBool::new(false)),
         job_scan_hetzner_running: Arc::new(AtomicBool::new(false)),
         job_phash_running: Arc::new(AtomicBool::new(false)),
@@ -210,6 +218,18 @@ async fn run_server() -> anyhow::Result<()> {
         .route(
             "/mirror/audit",
             get(routes::mirror::audit)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/mirror/jobs/cancel",
+            post(routes::mirror::cancel_all)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/mirror/jobs/status",
+            get(routes::mirror::status)
                 .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
         )

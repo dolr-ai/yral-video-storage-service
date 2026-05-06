@@ -1,6 +1,7 @@
 use axum::{extract::State, http::StatusCode, Json};
 use serde::Serialize;
 use std::sync::atomic::Ordering;
+use tokio_util::sync::CancellationToken;
 
 use crate::db;
 use crate::jobs;
@@ -44,7 +45,11 @@ pub async fn scan_storj(
     }
     let storj = state.storj_client.clone();
     let db_url = state.db_url.clone();
-    let cancel = state.cancel.clone();
+    let cancel = state
+        .job_cancel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let guard = JobGuard(state.job_scan_storj_running.clone());
     tokio::spawn(async move {
         let _guard = guard;
@@ -69,7 +74,11 @@ pub async fn scan_hetzner(
     }
     let s3 = state.s3_client.clone();
     let db_url = state.db_url.clone();
-    let cancel = state.cancel.clone();
+    let cancel = state
+        .job_cancel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let guard = JobGuard(state.job_scan_hetzner_running.clone());
     tokio::spawn(async move {
         let _guard = guard;
@@ -97,7 +106,11 @@ pub async fn phash_backfill(
     }
     let s3 = state.s3_client.clone();
     let db_url = state.db_url.clone();
-    let cancel = state.cancel.clone();
+    let cancel = state
+        .job_cancel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let guard = JobGuard(state.job_phash_running.clone());
     tokio::spawn(async move {
         let _guard = guard;
@@ -122,7 +135,11 @@ pub async fn mirror(
     }
     let s3 = state.s3_client.clone();
     let db_url = state.db_url.clone();
-    let cancel = state.cancel.clone();
+    let cancel = state
+        .job_cancel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let guard = JobGuard(state.job_mirror_running.clone());
     tokio::spawn(async move {
         let _guard = guard;
@@ -164,6 +181,54 @@ pub async fn audit(State(state): State<AppState>) -> Result<Json<AuditResponse>,
             })
             .collect(),
     }))
+}
+
+/// Cancel all running background jobs.
+/// The token is replaced so subsequently started jobs get a fresh token.
+pub async fn cancel_all(State(state): State<AppState>) -> Json<serde_json::Value> {
+    // Cancel the current token and replace with a fresh one
+    let old_token = {
+        let mut token = state.job_cancel.lock().unwrap_or_else(|e| e.into_inner());
+        let old = token.clone();
+        *token = CancellationToken::new();
+        old
+    };
+    old_token.cancel();
+
+    let cancelled: Vec<&str> = [
+        ("scan-storj", &state.job_scan_storj_running),
+        ("scan-hetzner", &state.job_scan_hetzner_running),
+        ("phash", &state.job_phash_running),
+        ("mirror", &state.job_mirror_running),
+    ]
+    .iter()
+    .filter(|(_, flag)| flag.load(Ordering::Acquire))
+    .map(|(name, _)| *name)
+    .collect();
+
+    tracing::info!("Cancellation requested for jobs: {:?}", cancelled);
+    Json(serde_json::json!({
+        "message": "cancellation signal sent",
+        "jobs_running_at_cancel": cancelled,
+    }))
+}
+
+/// Report the current status of all background jobs.
+#[derive(Serialize)]
+pub struct JobStatus {
+    pub scan_storj: bool,
+    pub scan_hetzner: bool,
+    pub phash: bool,
+    pub mirror: bool,
+}
+
+pub async fn status(State(state): State<AppState>) -> Json<JobStatus> {
+    Json(JobStatus {
+        scan_storj: state.job_scan_storj_running.load(Ordering::Acquire),
+        scan_hetzner: state.job_scan_hetzner_running.load(Ordering::Acquire),
+        phash: state.job_phash_running.load(Ordering::Acquire),
+        mirror: state.job_mirror_running.load(Ordering::Acquire),
+    })
 }
 
 #[cfg(test)]

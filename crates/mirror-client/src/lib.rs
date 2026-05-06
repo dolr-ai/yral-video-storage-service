@@ -17,6 +17,22 @@ pub enum MirrorError {
     Http(#[from] reqwest::Error),
 }
 
+/// Response from cancel_all endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct CancelResponse {
+    pub message: String,
+    pub jobs_running_at_cancel: Vec<String>,
+}
+
+/// Response from status endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct JobStatus {
+    pub scan_storj: bool,
+    pub scan_hetzner: bool,
+    pub phash: bool,
+    pub mirror: bool,
+}
+
 /// Mirrors the server-side AuditResponse.
 #[derive(Debug, serde::Deserialize)]
 pub struct AuditResponse {
@@ -127,6 +143,50 @@ impl MirrorClient {
 
         match resp.status().as_u16() {
             200 => Ok(resp.json::<AuditResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Cancel all running background jobs.
+    pub async fn cancel_all(&self) -> Result<CancelResponse, MirrorError> {
+        let path = "/mirror/jobs/cancel";
+        let (ts, sig) = self.sign("POST", path);
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<CancelResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Get the status of all background jobs.
+    pub async fn job_status(&self) -> Result<JobStatus, MirrorError> {
+        let path = "/mirror/jobs/status";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<JobStatus>().await?),
             401 | 403 => Err(MirrorError::Unauthorized),
             status => {
                 let body = resp.text().await.unwrap_or_default();

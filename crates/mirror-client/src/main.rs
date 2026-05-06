@@ -8,6 +8,8 @@ Commands:
   scan-hetzner    Scan Hetzner bucket into index
   phash           Compute missing perceptual hashes
   mirror          Copy pending videos from Hetzner → Storj
+  cancel          Cancel all running background jobs
+  status          Show which jobs are currently running
 
 Options:
   --limit N       Stop after processing N items (scan/phash/mirror commands only)
@@ -70,6 +72,37 @@ async fn main() {
             .mirror(limit)
             .await
             .map(|_| println!("mirror accepted")),
+        "cancel" => match client.cancel_all().await {
+            Ok(r) => {
+                println!("{}", r.message);
+                if !r.jobs_running_at_cancel.is_empty() {
+                    println!("jobs running at cancel: {:?}", r.jobs_running_at_cancel);
+                } else {
+                    println!("no jobs were running");
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "status" => match client.job_status().await {
+            Ok(s) => {
+                println!(
+                    "scan-storj:   {}",
+                    if s.scan_storj { "running" } else { "idle" }
+                );
+                println!(
+                    "scan-hetzner: {}",
+                    if s.scan_hetzner { "running" } else { "idle" }
+                );
+                println!("phash:        {}", if s.phash { "running" } else { "idle" });
+                println!(
+                    "mirror:       {}",
+                    if s.mirror { "running" } else { "idle" }
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(1);
