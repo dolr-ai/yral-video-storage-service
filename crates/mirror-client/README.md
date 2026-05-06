@@ -24,6 +24,8 @@ set -a && source .env && set +a && cargo run -p mirror-client -- <command> [opti
 | `audit` | Print index statistics (total, mirrored, missing, duplicates) | No | No |
 | `duplicates` | List videos sharing identical perceptual hashes with their Storj and Hetzner keys | No | No |
 | `status` | Show which background jobs are currently running | No | No |
+| `config` | Show dynamic concurrency configuration | No | No |
+| `config-set` | Update concurrency config (`--phash`, `--mirror`, `--page`) | No | No |
 | `scan-storj` | Scan Storj bucket and index all video keys into the DB | Yes | Yes |
 | `scan-hetzner` | Scan Hetzner S3 bucket and index all video keys into the DB | Yes | Yes |
 | `phash` | Compute perceptual hashes for videos missing them | Yes | Yes |
@@ -57,6 +59,12 @@ set -a && source .env && set +a && cargo run -p mirror-client -- status
 
 # Cancel all running jobs
 set -a && source .env && set +a && cargo run -p mirror-client -- cancel
+
+# Show dynamic concurrency config
+set -a && source .env && set +a && cargo run -p mirror-client -- config
+
+# Update concurrency config dynamically (without restarting the server)
+set -a && source .env && set +a && cargo run -p mirror-client -- config-set --phash 10 --mirror 30 --page 2500
 ```
 
 ## Notes

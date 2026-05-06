@@ -1,4 +1,5 @@
 use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicI64, AtomicUsize};
 
 // Storj configuration
 pub static YRAL_VIDEOS: Lazy<String> = Lazy::new(|| {
@@ -67,23 +68,26 @@ pub static DATABASE_URL: Lazy<String> =
     Lazy::new(|| std::env::var("DATABASE_URL").expect("DATABASE_URL required"));
 
 // Job tuning
-pub static PHASH_CONCURRENCY: Lazy<usize> = Lazy::new(|| {
-    std::env::var("PHASH_CONCURRENCY")
+pub static PHASH_CONCURRENCY: Lazy<AtomicUsize> = Lazy::new(|| {
+    let val = std::env::var("PHASH_CONCURRENCY")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(4)
+        .unwrap_or(10);
+    AtomicUsize::new(val)
 });
-pub static MIRROR_CONCURRENCY: Lazy<usize> = Lazy::new(|| {
-    std::env::var("MIRROR_CONCURRENCY")
+pub static MIRROR_CONCURRENCY: Lazy<AtomicUsize> = Lazy::new(|| {
+    let val = std::env::var("MIRROR_CONCURRENCY")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(8)
+        .unwrap_or(30);
+    AtomicUsize::new(val)
 });
-pub static SCAN_PAGE_SIZE: Lazy<i64> = Lazy::new(|| {
-    std::env::var("SCAN_PAGE_SIZE")
+pub static SCAN_PAGE_SIZE: Lazy<AtomicI64> = Lazy::new(|| {
+    let val = std::env::var("SCAN_PAGE_SIZE")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(1000)
+        .unwrap_or(2500);
+    AtomicI64::new(val)
 });
 pub static MAX_PHASH_RETRIES: Lazy<i32> = Lazy::new(|| {
     std::env::var("MAX_PHASH_RETRIES")

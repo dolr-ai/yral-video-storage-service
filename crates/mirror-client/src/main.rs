@@ -12,6 +12,8 @@ Commands:
   run-pipeline    Run full pipeline: scan-hetzner → phash → mirror (requires --prefix)
   cancel          Cancel all running background jobs
   status          Show which jobs are currently running
+  config          Show dynamic configuration
+  config-set      Update configuration (use --phash, --mirror, --page)
 
 Options:
   --limit N       Stop after processing N items (scan/phash/mirror/run-pipeline)
@@ -56,6 +58,12 @@ async fn main() {
                 println!("cleanup_pending:  {}", r.cleanup_pending);
                 println!("failed:           {}", r.failed);
                 println!("error_count:      {}", r.error_count);
+                if !r.status_breakdown.is_empty() {
+                    println!("\nstatus breakdown:");
+                    for (status, count) in &r.status_breakdown {
+                        println!("  {:<16} {}", status, count);
+                    }
+                }
                 if !r.duplicate_phashes.is_empty() {
                     println!("\nduplicate phashes ({}):", r.duplicate_phashes.len());
                     for d in &r.duplicate_phashes {
@@ -140,6 +148,44 @@ async fn main() {
             }
             Err(e) => Err(e),
         },
+        "config" => match client.config_get().await {
+            Ok(c) => {
+                println!("phash_concurrency:  {}", c.phash_concurrency);
+                println!("mirror_concurrency: {}", c.mirror_concurrency);
+                println!("scan_page_size:     {}", c.scan_page_size);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "config-set" => {
+            let p_phash = args
+                .windows(2)
+                .find(|w| w[0] == "--phash")
+                .and_then(|w| w[1].parse().ok());
+            let p_mirror = args
+                .windows(2)
+                .find(|w| w[0] == "--mirror")
+                .and_then(|w| w[1].parse().ok());
+            let p_page = args
+                .windows(2)
+                .find(|w| w[0] == "--page")
+                .and_then(|w| w[1].parse().ok());
+            let update = mirror_client::ConfigUpdate {
+                phash_concurrency: p_phash,
+                mirror_concurrency: p_mirror,
+                scan_page_size: p_page,
+            };
+            match client.config_update(&update).await {
+                Ok(c) => {
+                    println!("updated:");
+                    println!("phash_concurrency:  {}", c.phash_concurrency);
+                    println!("mirror_concurrency: {}", c.mirror_concurrency);
+                    println!("scan_page_size:     {}", c.scan_page_size);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(1);
@@ -218,6 +264,12 @@ async fn run_pipeline(
             println!("missing_storj:    {}", r.missing_storj);
             println!("failed:           {}", r.failed);
             println!("error_count:      {}", r.error_count);
+            if !r.status_breakdown.is_empty() {
+                println!("\nstatus breakdown:");
+                for (status, count) in &r.status_breakdown {
+                    println!("  {:<16} {}", status, count);
+                }
+            }
         }
         Err(e) => eprintln!("audit failed: {e}"),
     }

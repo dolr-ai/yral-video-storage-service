@@ -27,7 +27,11 @@ pub async fn run(
             return Ok(());
         }
 
-        let rows = db::fetch_pending_mirror_batch(&client, *SCAN_PAGE_SIZE).await?;
+        let rows = db::fetch_pending_mirror_batch(
+            &client,
+            crate::consts::SCAN_PAGE_SIZE.load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .await?;
         if rows.is_empty() {
             break;
         }
@@ -44,7 +48,9 @@ pub async fn run(
                     (row.video_id, row.hetzner_key, result)
                 }
             })
-            .buffer_unordered(*MIRROR_CONCURRENCY)
+            .buffer_unordered(
+                crate::consts::MIRROR_CONCURRENCY.load(std::sync::atomic::Ordering::Relaxed),
+            )
             .collect()
             .await;
 

@@ -237,6 +237,12 @@ async fn run_server() -> anyhow::Result<()> {
                 .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
         )
+        .route(
+            "/mirror/config",
+            get(routes::mirror::get_config)
+                .post(routes::mirror::update_config)
+                .layer(middleware::from_fn(authorize)),
+        )
         .route("/health", get(health))
         .layer(middleware::from_fn(sentry_utils::sentry_request_logger))
         .layer(cors)

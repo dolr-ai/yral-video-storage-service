@@ -33,6 +33,23 @@ pub struct JobStatus {
     pub mirror: bool,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ConfigResponse {
+    pub phash_concurrency: usize,
+    pub mirror_concurrency: usize,
+    pub scan_page_size: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ConfigUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phash_concurrency: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror_concurrency: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_page_size: Option<i64>,
+}
+
 /// Mirrors the server-side AuditResponse.
 #[derive(Debug, serde::Deserialize)]
 pub struct AuditResponse {
@@ -44,6 +61,7 @@ pub struct AuditResponse {
     pub cleanup_pending: i64,
     pub failed: i64,
     pub error_count: i64,
+    pub status_breakdown: std::collections::HashMap<String, i64>,
     pub duplicate_phashes: Vec<DuplicateEntry>,
 }
 
@@ -245,6 +263,52 @@ impl MirrorClient {
 
         match resp.status().as_u16() {
             200 => Ok(resp.json::<JobStatus>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    pub async fn config_get(&self) -> Result<ConfigResponse, MirrorError> {
+        let path = "/mirror/config";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<ConfigResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    pub async fn config_update(
+        &self,
+        payload: &ConfigUpdate,
+    ) -> Result<ConfigResponse, MirrorError> {
+        let path = "/mirror/config";
+        let (ts, sig) = self.sign("POST", path);
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .json(payload)
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<ConfigResponse>().await?),
             401 | 403 => Err(MirrorError::Unauthorized),
             status => {
                 let body = resp.text().await.unwrap_or_default();

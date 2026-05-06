@@ -24,7 +24,11 @@ pub async fn run(
             return Ok(());
         }
 
-        let rows = db::fetch_pending_phash_batch(&client, *SCAN_PAGE_SIZE).await?;
+        let rows = db::fetch_pending_phash_batch(
+            &client,
+            crate::consts::SCAN_PAGE_SIZE.load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .await?;
         if rows.is_empty() {
             break;
         }
@@ -66,7 +70,9 @@ pub async fn run(
                     (row.video_id, result)
                 }
             })
-            .buffer_unordered(*PHASH_CONCURRENCY)
+            .buffer_unordered(
+                crate::consts::PHASH_CONCURRENCY.load(std::sync::atomic::Ordering::Relaxed),
+            )
             .collect()
             .await;
 

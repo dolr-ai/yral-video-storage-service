@@ -31,6 +31,7 @@ pub struct AuditResponse {
     pub cleanup_pending: i64,
     pub failed: i64,
     pub error_count: i64,
+    pub status_breakdown: std::collections::HashMap<String, i64>,
     pub duplicate_phashes: Vec<DuplicateEntry>,
 }
 
@@ -199,6 +200,7 @@ pub async fn audit(State(state): State<AppState>) -> Result<Json<AuditResponse>,
         cleanup_pending: stats.cleanup_pending,
         failed: stats.failed,
         error_count: stats.error_count,
+        status_breakdown: stats.status_breakdown,
         duplicate_phashes: dups
             .into_iter()
             .map(|d| DuplicateEntry {
@@ -303,6 +305,43 @@ pub async fn status(State(state): State<AppState>) -> Json<JobStatus> {
         phash: state.job_phash_running.load(Ordering::Acquire),
         mirror: state.job_mirror_running.load(Ordering::Acquire),
     })
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ConfigResponse {
+    pub phash_concurrency: usize,
+    pub mirror_concurrency: usize,
+    pub scan_page_size: i64,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ConfigUpdate {
+    pub phash_concurrency: Option<usize>,
+    pub mirror_concurrency: Option<usize>,
+    pub scan_page_size: Option<i64>,
+}
+
+pub async fn get_config() -> Json<ConfigResponse> {
+    Json(ConfigResponse {
+        phash_concurrency: crate::consts::PHASH_CONCURRENCY
+            .load(std::sync::atomic::Ordering::Relaxed),
+        mirror_concurrency: crate::consts::MIRROR_CONCURRENCY
+            .load(std::sync::atomic::Ordering::Relaxed),
+        scan_page_size: crate::consts::SCAN_PAGE_SIZE.load(std::sync::atomic::Ordering::Relaxed),
+    })
+}
+
+pub async fn update_config(Json(payload): Json<ConfigUpdate>) -> Json<ConfigResponse> {
+    if let Some(v) = payload.phash_concurrency {
+        crate::consts::PHASH_CONCURRENCY.store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(v) = payload.mirror_concurrency {
+        crate::consts::MIRROR_CONCURRENCY.store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(v) = payload.scan_page_size {
+        crate::consts::SCAN_PAGE_SIZE.store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+    get_config().await
 }
 
 #[cfg(test)]

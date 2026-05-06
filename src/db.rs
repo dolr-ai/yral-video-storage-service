@@ -82,6 +82,7 @@ pub struct AuditStats {
     pub cleanup_pending: i64,
     pub failed: i64,
     pub error_count: i64,
+    pub status_breakdown: std::collections::HashMap<String, i64>,
 }
 
 pub struct DuplicateVideo {
@@ -353,6 +354,21 @@ pub async fn get_audit_stats(client: &Client) -> Result<AuditStats, tokio_postgr
         )
         .await?;
 
+    let status_rows = client
+        .query(
+            "SELECT COALESCE(mj.status, 'no_mirror_job'), COUNT(*)
+             FROM video_index vi
+             LEFT JOIN mirror_jobs mj ON vi.video_id = mj.video_id
+             GROUP BY mj.status",
+            &[],
+        )
+        .await?;
+
+    let mut status_breakdown = std::collections::HashMap::new();
+    for r in status_rows {
+        status_breakdown.insert(r.get(0), r.get(1));
+    }
+
     Ok(AuditStats {
         total: row.get(0),
         phash_computed: row.get(1),
@@ -362,6 +378,7 @@ pub async fn get_audit_stats(client: &Client) -> Result<AuditStats, tokio_postgr
         cleanup_pending: row.get(5),
         failed: row.get(6),
         error_count: row.get(7),
+        status_breakdown,
     })
 }
 
