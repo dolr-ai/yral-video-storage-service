@@ -4,7 +4,7 @@ use phash::PHasher;
 use tempfile::NamedTempFile;
 use tokio_util::sync::CancellationToken;
 
-use crate::consts::{MAX_PHASH_RETRIES, PHASH_CONCURRENCY, SCAN_PAGE_SIZE};
+use crate::consts::MAX_PHASH_RETRIES;
 use crate::db;
 use crate::s3_client::S3Client;
 

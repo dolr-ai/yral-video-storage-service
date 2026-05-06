@@ -6,7 +6,7 @@ use futures::StreamExt;
 use tempfile::NamedTempFile;
 use tokio_util::sync::CancellationToken;
 
-use crate::consts::{MIRROR_ACCESS_GRANT, MIRROR_CONCURRENCY, SCAN_PAGE_SIZE, STORJ_SFW_BUCKET};
+use crate::consts::{MIRROR_ACCESS_GRANT, STORJ_SFW_BUCKET};
 use crate::db;
 use crate::jobs::{thumb_key_from_mp4_key, uplink_cp};
 use crate::s3_client::S3Client;
