@@ -4,6 +4,7 @@ const USAGE: &str = "Usage: mirror-client <command> [--limit N]
 
 Commands:
   audit           Print index statistics
+  duplicates      List videos with identical perceptual hashes
   scan-storj      Scan Storj bucket into index
   scan-hetzner    Scan Hetzner bucket into index
   phash           Compute missing perceptual hashes
@@ -13,6 +14,7 @@ Commands:
 
 Options:
   --limit N       Stop after processing N items (scan/phash/mirror commands only)
+  --prefix PREFIX Filter by object key prefix, e.g. publisher-id/  (scan commands only)
 
 Environment:
   MIRROR_SERVICE_URL    Base URL of the service (required)
@@ -24,11 +26,18 @@ fn parse_limit(args: &[String]) -> Option<u64> {
         .and_then(|w| w[1].parse().ok())
 }
 
+fn parse_prefix(args: &[String]) -> Option<&str> {
+    args.windows(2)
+        .find(|w| w[0] == "--prefix")
+        .map(|w| w[1].as_str())
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
     let limit = parse_limit(&args);
+    let prefix = parse_prefix(&args);
 
     let url = std::env::var("MIRROR_SERVICE_URL").expect("MIRROR_SERVICE_URL must be set");
     let secret = std::env::var("SERVICE_SECRET_TOKEN").expect("SERVICE_SECRET_TOKEN must be set");
@@ -49,7 +58,27 @@ async fn main() {
                 if !r.duplicate_phashes.is_empty() {
                     println!("\nduplicate phashes ({}):", r.duplicate_phashes.len());
                     for d in &r.duplicate_phashes {
-                        println!("  {} → {:?}", d.phash, d.video_ids);
+                        let ids: Vec<&str> = d.videos.iter().map(|v| v.video_id.as_str()).collect();
+                        println!("  {} → {:?}", d.phash, ids);
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "duplicates" => match client.duplicates().await {
+            Ok(r) => {
+                println!("duplicate groups:  {}", r.total_groups);
+                println!("duplicate videos:  {}", r.total_duplicate_videos);
+                for g in &r.groups {
+                    println!("\n  phash: {} ({} videos)", g.phash, g.count);
+                    for v in &g.videos {
+                        println!("    video_id:    {}", v.video_id);
+                        println!("    storj_key:   {}", v.storj_key.as_deref().unwrap_or("—"));
+                        println!(
+                            "    hetzner_key: {}",
+                            v.hetzner_key.as_deref().unwrap_or("—")
+                        );
                     }
                 }
                 Ok(())
@@ -57,11 +86,11 @@ async fn main() {
             Err(e) => Err(e),
         },
         "scan-storj" => client
-            .scan_storj(limit)
+            .scan_storj(limit, prefix)
             .await
             .map(|_| println!("scan-storj accepted")),
         "scan-hetzner" => client
-            .scan_hetzner(limit)
+            .scan_hetzner(limit, prefix)
             .await
             .map(|_| println!("scan-hetzner accepted")),
         "phash" => client

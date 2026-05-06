@@ -48,9 +48,30 @@ pub struct AuditResponse {
 }
 
 #[derive(Debug, serde::Deserialize)]
+pub struct VideoEntry {
+    pub video_id: String,
+    pub storj_key: Option<String>,
+    pub hetzner_key: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
 pub struct DuplicateEntry {
     pub phash: String,
-    pub video_ids: Vec<String>,
+    pub videos: Vec<VideoEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DuplicatesResponse {
+    pub total_groups: usize,
+    pub total_duplicate_videos: usize,
+    pub groups: Vec<DuplicateGroup>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DuplicateGroup {
+    pub phash: String,
+    pub count: usize,
+    pub videos: Vec<VideoEntry>,
 }
 
 pub struct MirrorClient {
@@ -82,15 +103,21 @@ impl MirrorClient {
         (ts, sig)
     }
 
-    async fn post_job(&self, path: &str, limit: Option<u64>) -> Result<(), MirrorError> {
-        let url = match limit {
-            Some(n) => format!("{}{}?limit={}", self.base_url, path, n),
-            None => format!("{}{}", self.base_url, path),
-        };
+    async fn post_job(
+        &self,
+        path: &str,
+        limit: Option<u64>,
+        prefix: Option<&str>,
+    ) -> Result<(), MirrorError> {
+        let mut url = self.http.post(format!("{}{}", self.base_url, path));
+        if let Some(n) = limit {
+            url = url.query(&[("limit", n.to_string())]);
+        }
+        if let Some(p) = prefix {
+            url = url.query(&[("prefix", p)]);
+        }
         let (ts, sig) = self.sign("POST", path);
-        let resp = self
-            .http
-            .post(url)
+        let resp = url
             .header("X-Timestamp", &ts)
             .header("Authorization", format!("HMAC-SHA256 {sig}"))
             .send()
@@ -114,20 +141,30 @@ impl MirrorClient {
         format!("{}{}?timestamp={}&sig={}", self.base_url, path, ts, sig)
     }
 
-    pub async fn scan_storj(&self, limit: Option<u64>) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/scan-storj", limit).await
+    pub async fn scan_storj(
+        &self,
+        limit: Option<u64>,
+        prefix: Option<&str>,
+    ) -> Result<(), MirrorError> {
+        self.post_job("/mirror/jobs/scan-storj", limit, prefix)
+            .await
     }
 
-    pub async fn scan_hetzner(&self, limit: Option<u64>) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/scan-hetzner", limit).await
+    pub async fn scan_hetzner(
+        &self,
+        limit: Option<u64>,
+        prefix: Option<&str>,
+    ) -> Result<(), MirrorError> {
+        self.post_job("/mirror/jobs/scan-hetzner", limit, prefix)
+            .await
     }
 
     pub async fn phash_backfill(&self, limit: Option<u64>) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/phash", limit).await
+        self.post_job("/mirror/jobs/phash", limit, None).await
     }
 
     pub async fn mirror(&self, limit: Option<u64>) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/mirror", limit).await
+        self.post_job("/mirror/jobs/mirror", limit, None).await
     }
 
     pub async fn audit(&self) -> Result<AuditResponse, MirrorError> {
@@ -143,6 +180,27 @@ impl MirrorClient {
 
         match resp.status().as_u16() {
             200 => Ok(resp.json::<AuditResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    pub async fn duplicates(&self) -> Result<DuplicatesResponse, MirrorError> {
+        let path = "/mirror/duplicates";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<DuplicatesResponse>().await?),
             401 | 403 => Err(MirrorError::Unauthorized),
             status => {
                 let body = resp.text().await.unwrap_or_default();

@@ -1,43 +1,54 @@
 use tokio_postgres::{Client, NoTls};
 
 const SCHEMA_SQL: &str = "
+-- Migration: columns moved from video_index to mirror_jobs table.
+-- IF EXISTS makes these no-ops on a fresh DB.
+ALTER TABLE video_index DROP COLUMN IF EXISTS is_temp;
+ALTER TABLE video_index DROP COLUMN IF EXISTS retry_count;
+ALTER TABLE video_index DROP COLUMN IF EXISTS status;
+ALTER TABLE video_index DROP COLUMN IF EXISTS error_message;
+ALTER TABLE video_index DROP COLUMN IF EXISTS updated_at;
+
 CREATE TABLE IF NOT EXISTS video_index (
-    video_id      TEXT PRIMARY KEY,
-    hetzner_key   TEXT,
-    storj_key     TEXT,
-    phash         TEXT,
+    video_id    TEXT PRIMARY KEY,
+    storj_key   TEXT,
+    hetzner_key TEXT,
+    phash       TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_phash_val ON video_index (phash)
+    WHERE phash IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS mirror_jobs (
+    video_id      TEXT PRIMARY KEY REFERENCES video_index(video_id),
     is_temp       BOOLEAN NOT NULL DEFAULT FALSE,
     retry_count   INTEGER NOT NULL DEFAULT 0,
     status        TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending','phash_computed','mirrored','failed','done')),
     error_message TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_phash_null ON video_index (video_id, hetzner_key)
-    WHERE phash IS NULL AND hetzner_key IS NOT NULL AND status != 'failed';
+CREATE INDEX IF NOT EXISTS idx_status ON mirror_jobs (status);
 
-CREATE INDEX IF NOT EXISTS idx_missing_storj ON video_index (video_id, hetzner_key)
-    WHERE storj_key IS NULL AND is_temp = FALSE
-      AND hetzner_key IS NOT NULL AND status = 'phash_computed';
+CREATE INDEX IF NOT EXISTS idx_phash_pending ON mirror_jobs (video_id)
+    WHERE status = 'pending';
 
-CREATE INDEX IF NOT EXISTS idx_temp_cleanup ON video_index (video_id)
+CREATE INDEX IF NOT EXISTS idx_mirror_pending ON mirror_jobs (video_id)
+    WHERE is_temp = FALSE AND status = 'phash_computed';
+
+CREATE INDEX IF NOT EXISTS idx_temp_cleanup ON mirror_jobs (video_id)
     WHERE is_temp = TRUE AND status = 'mirrored';
-
-CREATE INDEX IF NOT EXISTS idx_status ON video_index (status);
-
-CREATE INDEX IF NOT EXISTS idx_phash_val ON video_index (phash)
-    WHERE phash IS NOT NULL;
 
 CREATE OR REPLACE FUNCTION update_updated_at()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
 $$;
 
-DROP TRIGGER IF EXISTS video_index_updated_at ON video_index;
-CREATE TRIGGER video_index_updated_at
-    BEFORE UPDATE ON video_index
+DROP TRIGGER IF EXISTS mirror_jobs_updated_at ON mirror_jobs;
+CREATE TRIGGER mirror_jobs_updated_at
+    BEFORE UPDATE ON mirror_jobs
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 ";
 
@@ -64,9 +75,15 @@ pub struct AuditStats {
     pub error_count: i64,
 }
 
+pub struct DuplicateVideo {
+    pub video_id: String,
+    pub storj_key: Option<String>,
+    pub hetzner_key: Option<String>,
+}
+
 pub struct DuplicatePhash {
     pub phash: String,
-    pub video_ids: Vec<String>,
+    pub videos: Vec<DuplicateVideo>,
 }
 
 pub async fn connect(url: &str) -> Result<Client, tokio_postgres::Error> {
@@ -95,8 +112,7 @@ pub async fn upsert_storj_key(
             "INSERT INTO video_index (video_id, storj_key)
              VALUES ($1, $2)
              ON CONFLICT (video_id) DO UPDATE
-             SET storj_key = EXCLUDED.storj_key,
-                 error_message = NULL",
+             SET storj_key = EXCLUDED.storj_key",
             &[&video_id, &storj_key],
         )
         .await?;
@@ -111,14 +127,20 @@ pub async fn upsert_hetzner_key(
     hetzner_key: &str,
     is_temp: bool,
 ) -> Result<(), tokio_postgres::Error> {
+    // Atomic: upsert video_index, then upsert mirror_jobs.
+    // CTE ensures both run in one statement.
     client
         .execute(
-            "INSERT INTO video_index (video_id, hetzner_key, is_temp)
-             VALUES ($1, $2, $3)
+            "WITH vi AS (
+                INSERT INTO video_index (video_id, hetzner_key)
+                VALUES ($1, $2)
+                ON CONFLICT (video_id) DO UPDATE
+                SET hetzner_key = EXCLUDED.hetzner_key
+             )
+             INSERT INTO mirror_jobs (video_id, is_temp)
+             VALUES ($1, $3)
              ON CONFLICT (video_id) DO UPDATE
-             SET hetzner_key = EXCLUDED.hetzner_key,
-                 is_temp = EXCLUDED.is_temp,
-                 error_message = NULL",
+             SET is_temp = EXCLUDED.is_temp",
             &[&video_id, &hetzner_key, &is_temp],
         )
         .await?;
@@ -133,10 +155,12 @@ pub async fn fetch_pending_phash_batch(
 ) -> Result<Vec<VideoRow>, tokio_postgres::Error> {
     let rows = client
         .query(
-            "SELECT video_id, hetzner_key FROM video_index
-             WHERE phash IS NULL
-               AND hetzner_key IS NOT NULL
-               AND status = 'pending'
+            "SELECT vi.video_id, vi.hetzner_key
+             FROM mirror_jobs mj
+             JOIN video_index vi ON vi.video_id = mj.video_id
+             WHERE mj.status = 'pending'
+               AND vi.hetzner_key IS NOT NULL
+               AND vi.phash IS NULL
              LIMIT $1",
             &[&limit],
         )
@@ -157,8 +181,11 @@ pub async fn update_phash_success(
 ) -> Result<(), tokio_postgres::Error> {
     client
         .execute(
-            "UPDATE video_index
-             SET phash = $1, status = 'phash_computed', error_message = NULL
+            "WITH _ AS (
+                UPDATE video_index SET phash = $1 WHERE video_id = $2
+             )
+             UPDATE mirror_jobs
+             SET status = 'phash_computed', error_message = NULL
              WHERE video_id = $2 AND status = 'pending'",
             &[&phash, &video_id],
         )
@@ -176,7 +203,7 @@ pub async fn update_phash_failure(
 ) -> Result<i32, tokio_postgres::Error> {
     let row = client
         .query_one(
-            "UPDATE video_index
+            "UPDATE mirror_jobs
              SET retry_count = retry_count + 1,
                  status = CASE WHEN retry_count + 1 >= $3
                                THEN 'failed' ELSE 'pending' END,
@@ -197,11 +224,13 @@ pub async fn fetch_pending_mirror_batch(
 ) -> Result<Vec<VideoRow>, tokio_postgres::Error> {
     let rows = client
         .query(
-            "SELECT video_id, hetzner_key FROM video_index
-             WHERE storj_key IS NULL
-               AND hetzner_key IS NOT NULL
-               AND is_temp = FALSE
-               AND status = 'phash_computed'
+            "SELECT vi.video_id, vi.hetzner_key
+             FROM mirror_jobs mj
+             JOIN video_index vi ON vi.video_id = mj.video_id
+             WHERE mj.status = 'phash_computed'
+               AND mj.is_temp = FALSE
+               AND vi.storj_key IS NULL
+               AND vi.hetzner_key IS NOT NULL
              LIMIT $1",
             &[&limit],
         )
@@ -222,8 +251,11 @@ pub async fn update_mirror_success(
 ) -> Result<(), tokio_postgres::Error> {
     client
         .execute(
-            "UPDATE video_index
-             SET storj_key = $1, status = 'mirrored', error_message = NULL
+            "WITH _ AS (
+                UPDATE video_index SET storj_key = $1 WHERE video_id = $2
+             )
+             UPDATE mirror_jobs
+             SET status = 'mirrored', error_message = NULL
              WHERE video_id = $2 AND status = 'phash_computed'",
             &[&storj_key, &video_id],
         )
@@ -238,7 +270,7 @@ pub async fn update_error(
 ) -> Result<(), tokio_postgres::Error> {
     client
         .execute(
-            "UPDATE video_index SET error_message = $1 WHERE video_id = $2",
+            "UPDATE mirror_jobs SET error_message = $1 WHERE video_id = $2",
             &[&error, &video_id],
         )
         .await?;
@@ -254,9 +286,11 @@ pub async fn fetch_pending_cleanup_batch(
 ) -> Result<Vec<CleanupRow>, tokio_postgres::Error> {
     let rows = client
         .query(
-            "SELECT video_id, hetzner_key, storj_key FROM video_index
-             WHERE is_temp = TRUE AND status = 'mirrored'
-               AND hetzner_key IS NOT NULL AND storj_key IS NOT NULL
+            "SELECT vi.video_id, vi.hetzner_key, vi.storj_key
+             FROM mirror_jobs mj
+             JOIN video_index vi ON vi.video_id = mj.video_id
+             WHERE mj.is_temp = TRUE AND mj.status = 'mirrored'
+               AND vi.hetzner_key IS NOT NULL AND vi.storj_key IS NOT NULL
              LIMIT $1",
             &[&limit],
         )
@@ -278,9 +312,11 @@ pub async fn update_cleanup_done(
 ) -> Result<(), tokio_postgres::Error> {
     client
         .execute(
-            "UPDATE video_index
-             SET hetzner_key = NULL, is_temp = FALSE,
-                 status = 'done', error_message = NULL
+            "WITH _ AS (
+                UPDATE video_index SET hetzner_key = NULL WHERE video_id = $1
+             )
+             UPDATE mirror_jobs
+             SET is_temp = FALSE, status = 'done', error_message = NULL
              WHERE video_id = $1",
             &[&video_id],
         )
@@ -295,14 +331,15 @@ pub async fn get_audit_stats(client: &Client) -> Result<AuditStats, tokio_postgr
         .query_one(
             "SELECT
                 COUNT(*),
-                COUNT(phash),
-                COUNT(*) FILTER (WHERE status IN ('mirrored','done')),
-                COUNT(*) FILTER (WHERE storj_key IS NULL AND is_temp = FALSE),
-                COUNT(*) FILTER (WHERE hetzner_key IS NULL AND is_temp = FALSE AND status != 'done'),
-                COUNT(*) FILTER (WHERE is_temp = TRUE AND status = 'mirrored'),
-                COUNT(*) FILTER (WHERE status = 'failed'),
-                COUNT(*) FILTER (WHERE error_message IS NOT NULL)
-             FROM video_index",
+                COUNT(vi.phash),
+                COUNT(*) FILTER (WHERE mj.status IN ('mirrored','done')),
+                COUNT(*) FILTER (WHERE vi.storj_key IS NULL AND mj.is_temp = FALSE),
+                COUNT(*) FILTER (WHERE vi.hetzner_key IS NULL AND mj.is_temp = FALSE AND mj.status != 'done'),
+                COUNT(*) FILTER (WHERE mj.is_temp = TRUE AND mj.status = 'mirrored'),
+                COUNT(*) FILTER (WHERE mj.status = 'failed'),
+                COUNT(*) FILTER (WHERE mj.error_message IS NOT NULL)
+             FROM video_index vi
+             LEFT JOIN mirror_jobs mj ON vi.video_id = mj.video_id",
             &[],
         )
         .await?;
@@ -324,9 +361,15 @@ pub async fn get_duplicate_phashes(
 ) -> Result<Vec<DuplicatePhash>, tokio_postgres::Error> {
     let rows = client
         .query(
-            "SELECT phash, array_agg(video_id) FROM video_index
-             WHERE phash IS NOT NULL
-             GROUP BY phash HAVING COUNT(*) > 1
+            "SELECT vi.phash,
+                    array_agg(vi.video_id   ORDER BY vi.video_id) AS video_ids,
+                    array_agg(vi.storj_key  ORDER BY vi.video_id) AS storj_keys,
+                    array_agg(vi.hetzner_key ORDER BY vi.video_id) AS hetzner_keys
+             FROM video_index vi
+             WHERE vi.phash IS NOT NULL
+             GROUP BY vi.phash
+             HAVING COUNT(*) > 1
+             ORDER BY COUNT(*) DESC
              LIMIT 100",
             &[],
         )
@@ -334,9 +377,22 @@ pub async fn get_duplicate_phashes(
 
     Ok(rows
         .into_iter()
-        .map(|r| DuplicatePhash {
-            phash: r.get(0),
-            video_ids: r.get(1),
+        .map(|r| {
+            let phash: String = r.get(0);
+            let video_ids: Vec<String> = r.get(1);
+            let storj_keys: Vec<Option<String>> = r.get(2);
+            let hetzner_keys: Vec<Option<String>> = r.get(3);
+            let videos = video_ids
+                .into_iter()
+                .zip(storj_keys)
+                .zip(hetzner_keys)
+                .map(|((video_id, storj_key), hetzner_key)| DuplicateVideo {
+                    video_id,
+                    storj_key,
+                    hetzner_key,
+                })
+                .collect();
+            DuplicatePhash { phash, videos }
         })
         .collect())
 }
@@ -386,7 +442,6 @@ mod tests {
                 .status()
                 .expect("docker run");
             let url = format!("postgres://test:test@127.0.0.1:{port}/test");
-            // Poll until postgres is ready (up to 10s)
             for _ in 0..20 {
                 if tokio_postgres::connect(&url, tokio_postgres::NoTls)
                     .await
@@ -414,7 +469,7 @@ mod tests {
         let (pg, url) = PgContainer::spawn().await;
         let client = connect(&url).await.unwrap();
         init_schema(&client).await.unwrap();
-        init_schema(&client).await.unwrap(); // second call must not error
+        init_schema(&client).await.unwrap();
         drop(pg);
     }
 
@@ -440,6 +495,31 @@ mod tests {
             .unwrap();
         let storj_key: String = row.get(0);
         assert_eq!(storj_key, "user/abc-v2.mp4");
+        drop(pg);
+    }
+
+    #[tokio::test]
+    async fn upsert_hetzner_key_creates_mirror_job() {
+        let (pg, url) = PgContainer::spawn().await;
+        let client = connect(&url).await.unwrap();
+        init_schema(&client).await.unwrap();
+
+        upsert_hetzner_key(&client, "user/vid", "user/vid.mp4", false)
+            .await
+            .unwrap();
+
+        let row = client
+            .query_one(
+                "SELECT vi.hetzner_key, mj.status, mj.is_temp
+                 FROM video_index vi JOIN mirror_jobs mj ON vi.video_id = mj.video_id
+                 WHERE vi.video_id = $1",
+                &[&"user/vid"],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, String>(0), "user/vid.mp4");
+        assert_eq!(row.get::<_, String>(1), "pending");
+        assert!(!row.get::<_, bool>(2));
         drop(pg);
     }
 
@@ -499,6 +579,91 @@ mod tests {
         let stats = get_audit_stats(&client).await.unwrap();
         assert_eq!(stats.total, 2);
         assert_eq!(stats.missing_storj, 1);
+        drop(pg);
+    }
+
+    #[tokio::test]
+    async fn phash_success_updates_both_tables() {
+        let (pg, url) = PgContainer::spawn().await;
+        let client = connect(&url).await.unwrap();
+        init_schema(&client).await.unwrap();
+
+        upsert_hetzner_key(&client, "user/vid", "user/vid.mp4", false)
+            .await
+            .unwrap();
+        update_phash_success(&client, "user/vid", "aabbccdd")
+            .await
+            .unwrap();
+
+        let row = client
+            .query_one(
+                "SELECT vi.phash, mj.status FROM video_index vi
+                 JOIN mirror_jobs mj ON vi.video_id = mj.video_id
+                 WHERE vi.video_id = $1",
+                &[&"user/vid"],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, String>(0), "aabbccdd");
+        assert_eq!(row.get::<_, String>(1), "phash_computed");
+        drop(pg);
+    }
+
+    #[tokio::test]
+    async fn mirror_success_updates_both_tables() {
+        let (pg, url) = PgContainer::spawn().await;
+        let client = connect(&url).await.unwrap();
+        init_schema(&client).await.unwrap();
+
+        upsert_hetzner_key(&client, "user/vid", "user/vid.mp4", false)
+            .await
+            .unwrap();
+        update_phash_success(&client, "user/vid", "aabbccdd")
+            .await
+            .unwrap();
+        update_mirror_success(&client, "user/vid", "user/vid.mp4")
+            .await
+            .unwrap();
+
+        let row = client
+            .query_one(
+                "SELECT vi.storj_key, mj.status FROM video_index vi
+                 JOIN mirror_jobs mj ON vi.video_id = mj.video_id
+                 WHERE vi.video_id = $1",
+                &[&"user/vid"],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, String>(0), "user/vid.mp4");
+        assert_eq!(row.get::<_, String>(1), "mirrored");
+        drop(pg);
+    }
+
+    #[tokio::test]
+    async fn get_duplicate_phashes_returns_keys() {
+        let (pg, url) = PgContainer::spawn().await;
+        let client = connect(&url).await.unwrap();
+        init_schema(&client).await.unwrap();
+
+        upsert_storj_key(&client, "user/a", "user/a.mp4")
+            .await
+            .unwrap();
+        upsert_storj_key(&client, "user/b", "user/b.mp4")
+            .await
+            .unwrap();
+        client
+            .execute(
+                "UPDATE video_index SET phash = 'deadbeef' WHERE video_id = ANY($1)",
+                &[&vec!["user/a", "user/b"]],
+            )
+            .await
+            .unwrap();
+
+        let dups = get_duplicate_phashes(&client).await.unwrap();
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].phash, "deadbeef");
+        assert_eq!(dups[0].videos.len(), 2);
+        assert!(dups[0].videos.iter().any(|v| v.video_id == "user/a"));
         drop(pg);
     }
 }

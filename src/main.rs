@@ -220,6 +220,12 @@ async fn run_server() -> anyhow::Result<()> {
                 .layer(middleware::from_fn(authorize)),
         )
         .route(
+            "/mirror/duplicates",
+            get(routes::mirror::duplicates)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
             "/mirror/jobs/cancel",
             post(routes::mirror::cancel_all)
                 .with_state(app_state.clone())

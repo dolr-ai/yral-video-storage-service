@@ -11,6 +11,14 @@ use crate::AppState;
 #[derive(serde::Deserialize, Default)]
 pub struct JobParams {
     pub limit: Option<usize>,
+    pub prefix: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct VideoEntry {
+    pub video_id: String,
+    pub storj_key: Option<String>,
+    pub hetzner_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -29,7 +37,21 @@ pub struct AuditResponse {
 #[derive(Serialize)]
 pub struct DuplicateEntry {
     pub phash: String,
-    pub video_ids: Vec<String>,
+    pub videos: Vec<VideoEntry>,
+}
+
+#[derive(Serialize)]
+pub struct DuplicatesResponse {
+    pub total_groups: usize,
+    pub total_duplicate_videos: usize,
+    pub groups: Vec<DuplicateGroup>,
+}
+
+#[derive(Serialize)]
+pub struct DuplicateGroup {
+    pub phash: String,
+    pub count: usize,
+    pub videos: Vec<VideoEntry>,
 }
 
 pub async fn scan_storj(
@@ -53,7 +75,9 @@ pub async fn scan_storj(
     let guard = JobGuard(state.job_scan_storj_running.clone());
     tokio::spawn(async move {
         let _guard = guard;
-        if let Err(e) = jobs::scan_storj::run(storj, db_url, cancel, params.limit).await {
+        if let Err(e) =
+            jobs::scan_storj::run(storj, db_url, cancel, params.limit, params.prefix).await
+        {
             tracing::error!(error = %e, "Job 0 (scan-storj) error");
             sentry::capture_message(&format!("scan-storj job failed: {e}"), sentry::Level::Error);
         }
@@ -82,7 +106,9 @@ pub async fn scan_hetzner(
     let guard = JobGuard(state.job_scan_hetzner_running.clone());
     tokio::spawn(async move {
         let _guard = guard;
-        if let Err(e) = jobs::scan_hetzner::run(s3, db_url, cancel, params.limit).await {
+        if let Err(e) =
+            jobs::scan_hetzner::run(s3, db_url, cancel, params.limit, params.prefix).await
+        {
             tracing::error!(error = %e, "Job 1 (scan-hetzner) error");
             sentry::capture_message(
                 &format!("scan-hetzner job failed: {e}"),
@@ -177,9 +203,57 @@ pub async fn audit(State(state): State<AppState>) -> Result<Json<AuditResponse>,
             .into_iter()
             .map(|d| DuplicateEntry {
                 phash: d.phash,
-                video_ids: d.video_ids,
+                videos: d
+                    .videos
+                    .into_iter()
+                    .map(|v| VideoEntry {
+                        video_id: v.video_id,
+                        storj_key: v.storj_key,
+                        hetzner_key: v.hetzner_key,
+                    })
+                    .collect(),
             })
             .collect(),
+    }))
+}
+
+pub async fn duplicates(
+    State(state): State<AppState>,
+) -> Result<Json<DuplicatesResponse>, StatusCode> {
+    let client = db::connect(&state.db_url)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let dups = db::get_duplicate_phashes(&client)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let groups: Vec<DuplicateGroup> = dups
+        .into_iter()
+        .map(|d| {
+            let count = d.videos.len();
+            DuplicateGroup {
+                phash: d.phash,
+                count,
+                videos: d
+                    .videos
+                    .into_iter()
+                    .map(|v| VideoEntry {
+                        video_id: v.video_id,
+                        storj_key: v.storj_key,
+                        hetzner_key: v.hetzner_key,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
+    let total_duplicate_videos = groups.iter().map(|g| g.count).sum();
+
+    Ok(Json(DuplicatesResponse {
+        total_groups: groups.len(),
+        total_duplicate_videos,
+        groups,
     }))
 }
 

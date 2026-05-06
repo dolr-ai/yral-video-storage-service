@@ -10,6 +10,7 @@ pub async fn run(
     db_url: String,
     cancel: CancellationToken,
     limit: Option<usize>,
+    prefix: Option<String>,
 ) -> Result<()> {
     tracing::info!("Job 0 (scan-storj): starting");
     let client = db::connect(&db_url).await?;
@@ -22,7 +23,7 @@ pub async fn run(
 
     // S3Client::list_objects paginates internally — returns all keys in one Vec
     let objects = storj
-        .list_objects(None)
+        .list_objects(prefix.as_deref())
         .await
         .map_err(|e| anyhow::anyhow!("Storj list failed: {e}"))?;
 
