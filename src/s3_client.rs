@@ -283,18 +283,21 @@ impl S3Client {
     #[allow(dead_code)]
     pub async fn list_objects(&self, prefix: Option<&str>) -> Result<Vec<S3ObjectInfo>, String> {
         let mut items = Vec::new();
-        let mut continuation_token = None;
+        let mut continuation_token: Option<String> = None;
 
         loop {
-            let mut request = self.client.list_objects_v2().bucket(&self.bucket);
-            if let Some(prefix) = prefix {
-                request = request.prefix(prefix);
-            }
-            if let Some(token) = continuation_token.as_deref() {
-                request = request.continuation_token(token);
-            }
-
-            let response = request.send().await.map_err(|err| err.to_string())?;
+            let token = continuation_token.clone();
+            let response = retry_s3_op_string("list_objects", "", || {
+                let mut request = self.client.list_objects_v2().bucket(self.bucket.as_str());
+                if let Some(p) = prefix {
+                    request = request.prefix(p);
+                }
+                if let Some(t) = token.as_deref() {
+                    request = request.continuation_token(t);
+                }
+                async move { request.send().await.map_err(|e| e.to_string()) }
+            })
+            .await?;
 
             for object in response.contents() {
                 let Some(key) = object.key() else {

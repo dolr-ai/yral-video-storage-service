@@ -51,6 +51,9 @@ set -a && source .env && set +a && cargo run -p mirror-client -- scan-hetzner --
 # Run the full pipeline for a publisher (scan → phash → mirror, waits between steps)
 set -a && source .env && set +a && cargo run -p mirror-client -- run-pipeline --prefix "prefix/"
 
+# Run the full pipeline for a publisher (scan → phash → mirror, no waits between steps)
+set -a && source .env && set +a && cargo run -p mirror-client -- run-pipeline-async --prefix "prefix/"
+
 # List duplicate videos (same perceptual hash)
 set -a && source .env && set +a && cargo run -p mirror-client -- duplicates
 
