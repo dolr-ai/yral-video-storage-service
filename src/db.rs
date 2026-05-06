@@ -1,14 +1,7 @@
 use tokio_postgres::{Client, NoTls};
 
 const SCHEMA_SQL: &str = "
--- Migration: columns moved from video_index to mirror_jobs table.
--- IF EXISTS makes these no-ops on a fresh DB.
-ALTER TABLE video_index DROP COLUMN IF EXISTS is_temp;
-ALTER TABLE video_index DROP COLUMN IF EXISTS retry_count;
-ALTER TABLE video_index DROP COLUMN IF EXISTS status;
-ALTER TABLE video_index DROP COLUMN IF EXISTS error_message;
-ALTER TABLE video_index DROP COLUMN IF EXISTS updated_at;
-
+-- Create tables first so that the migration ALTER statements have something to target.
 CREATE TABLE IF NOT EXISTS video_index (
     video_id    TEXT PRIMARY KEY,
     storj_key   TEXT,
@@ -19,6 +12,14 @@ CREATE TABLE IF NOT EXISTS video_index (
 
 CREATE INDEX IF NOT EXISTS idx_phash_val ON video_index (phash)
     WHERE phash IS NOT NULL;
+
+-- Migration: columns moved from video_index to mirror_jobs table.
+-- IF EXISTS makes these no-ops on a fresh DB.
+ALTER TABLE video_index DROP COLUMN IF EXISTS is_temp;
+ALTER TABLE video_index DROP COLUMN IF EXISTS retry_count;
+ALTER TABLE video_index DROP COLUMN IF EXISTS status;
+ALTER TABLE video_index DROP COLUMN IF EXISTS error_message;
+ALTER TABLE video_index DROP COLUMN IF EXISTS updated_at;
 
 CREATE TABLE IF NOT EXISTS mirror_jobs (
     video_id      TEXT PRIMARY KEY REFERENCES video_index(video_id),
