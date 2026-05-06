@@ -28,6 +28,7 @@ set -a && source .env && set +a && cargo run -p mirror-client -- <command> [opti
 | `scan-hetzner` | Scan Hetzner S3 bucket and index all video keys into the DB | Yes | Yes |
 | `phash` | Compute perceptual hashes for videos missing them | Yes | Yes |
 | `mirror` | Copy pending videos from Hetzner → Storj | Yes | Yes |
+| `run-pipeline` | Run full pipeline: scan-hetzner → phash → mirror (requires `--prefix`) | Yes | Yes |
 | `cancel` | Cancel all running background jobs | No | No |
 
 ## Examples
@@ -38,6 +39,15 @@ set -a && source .env && set +a && cargo run -p mirror-client -- audit
 
 # Scan first 10 videos from Hetzner into the index
 set -a && source .env && set +a && cargo run -p mirror-client -- scan-hetzner --limit 10
+
+# Scan only a specific publisher's videos from Storj
+set -a && source .env && set +a && cargo run -p mirror-client -- scan-storj --prefix "prefix/"
+
+# Combine --prefix with --limit to scan a subset
+set -a && source .env && set +a && cargo run -p mirror-client -- scan-hetzner --prefix "prefix/" --limit 5
+
+# Run the full pipeline for a publisher (scan → phash → mirror, waits between steps)
+set -a && source .env && set +a && cargo run -p mirror-client -- run-pipeline --prefix "prefix/"
 
 # List duplicate videos (same perceptual hash)
 set -a && source .env && set +a && cargo run -p mirror-client -- duplicates

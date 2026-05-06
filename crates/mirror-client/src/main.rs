@@ -1,4 +1,4 @@
-use mirror_client::MirrorClient;
+use mirror_client::{MirrorClient, MirrorError};
 
 const USAGE: &str = "Usage: mirror-client <command> [--limit N]
 
@@ -9,12 +9,13 @@ Commands:
   scan-hetzner    Scan Hetzner bucket into index
   phash           Compute missing perceptual hashes
   mirror          Copy pending videos from Hetzner → Storj
+  run-pipeline    Run full pipeline: scan-hetzner → phash → mirror (requires --prefix)
   cancel          Cancel all running background jobs
   status          Show which jobs are currently running
 
 Options:
-  --limit N       Stop after processing N items (scan/phash/mirror commands only)
-  --prefix PREFIX Filter by object key prefix, e.g. publisher-id/  (scan commands only)
+  --limit N       Stop after processing N items (scan/phash/mirror/run-pipeline)
+  --prefix PREFIX Filter by object key prefix, e.g. publisher-id/  (scan/run-pipeline)
 
 Environment:
   MIRROR_SERVICE_URL    Base URL of the service (required)
@@ -101,6 +102,13 @@ async fn main() {
             .mirror(limit)
             .await
             .map(|_| println!("mirror accepted")),
+        "run-pipeline" => {
+            let Some(pfx) = prefix else {
+                eprintln!("error: run-pipeline requires --prefix");
+                std::process::exit(1);
+            };
+            run_pipeline(&client, limit, pfx).await
+        }
         "cancel" => match client.cancel_all().await {
             Ok(r) => {
                 println!("{}", r.message);
@@ -142,6 +150,79 @@ async fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+/// Run the full pipeline: scan-hetzner → phash → mirror, polling between steps.
+async fn run_pipeline(
+    client: &MirrorClient,
+    limit: Option<u64>,
+    prefix: &str,
+) -> Result<(), MirrorError> {
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+    // Step 1: scan-hetzner
+    println!("[1/3] Starting scan-hetzner (prefix: {prefix})");
+    client.scan_hetzner(limit, Some(prefix)).await?;
+    println!("       scan-hetzner accepted, waiting for completion...");
+    loop {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        let s = client.job_status().await?;
+        if !s.scan_hetzner {
+            break;
+        }
+        print!(".");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+    }
+    println!("\n       scan-hetzner complete");
+
+    // Step 2: phash
+    println!("[2/3] Starting phash");
+    client.phash_backfill(limit).await?;
+    println!("       phash accepted, waiting for completion...");
+    loop {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        let s = client.job_status().await?;
+        if !s.phash {
+            break;
+        }
+        print!(".");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+    }
+    println!("\n       phash complete");
+
+    // Step 3: mirror
+    println!("[3/3] Starting mirror");
+    client.mirror(limit).await?;
+    println!("       mirror accepted, waiting for completion...");
+    loop {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        let s = client.job_status().await?;
+        if !s.mirror {
+            break;
+        }
+        print!(".");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+    }
+    println!("\n       mirror complete");
+
+    // Final audit
+    println!("\nPipeline finished. Running audit...");
+    match client.audit().await {
+        Ok(r) => {
+            println!("total:            {}", r.total);
+            println!("phash_computed:   {}", r.phash_computed);
+            println!("mirrored:         {}", r.mirrored);
+            println!("missing_storj:    {}", r.missing_storj);
+            println!("failed:           {}", r.failed);
+            println!("error_count:      {}", r.error_count);
+        }
+        Err(e) => eprintln!("audit failed: {e}"),
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
