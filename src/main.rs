@@ -37,7 +37,6 @@ pub(crate) struct AppState {
     pub s3_client: s3_client::S3Client,
     pub storj_client: storj_s3_client::StorjS3Client,
     pub db_url: String,
-    pub cancel: CancellationToken,
     /// Token for cancelling running background jobs without shutting down the server.
     /// Wrapped in Mutex so it can be swapped for a fresh token after cancel_all().
     pub job_cancel: Arc<Mutex<CancellationToken>>,
@@ -141,7 +140,6 @@ async fn run_server() -> anyhow::Result<()> {
         s3_client,
         storj_client,
         db_url: consts::DATABASE_URL.clone(),
-        cancel: cancel.clone(),
         job_cancel: Arc::new(Mutex::new(job_cancel)),
         job_scan_storj_running: Arc::new(AtomicBool::new(false)),
         job_scan_hetzner_running: Arc::new(AtomicBool::new(false)),
