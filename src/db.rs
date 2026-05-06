@@ -20,6 +20,8 @@ ALTER TABLE video_index DROP COLUMN IF EXISTS retry_count;
 ALTER TABLE video_index DROP COLUMN IF EXISTS status;
 ALTER TABLE video_index DROP COLUMN IF EXISTS error_message;
 ALTER TABLE video_index DROP COLUMN IF EXISTS updated_at;
+-- Drop stale trigger from old single-table schema.
+DROP TRIGGER IF EXISTS video_index_updated_at ON video_index;
 
 CREATE TABLE IF NOT EXISTS mirror_jobs (
     video_id      TEXT PRIMARY KEY REFERENCES video_index(video_id),
@@ -30,6 +32,12 @@ CREATE TABLE IF NOT EXISTS mirror_jobs (
     error_message TEXT,
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Migration: ensure columns exist if mirror_jobs was created by an older schema.
+ALTER TABLE mirror_jobs ADD COLUMN IF NOT EXISTS is_temp BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE mirror_jobs ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE mirror_jobs ADD COLUMN IF NOT EXISTS error_message TEXT;
+ALTER TABLE mirror_jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 CREATE INDEX IF NOT EXISTS idx_status ON mirror_jobs (status);
 
@@ -354,6 +362,99 @@ pub async fn get_audit_stats(client: &Client) -> Result<AuditStats, tokio_postgr
         cleanup_pending: row.get(5),
         failed: row.get(6),
         error_count: row.get(7),
+    })
+}
+
+pub struct DebugRow {
+    pub video_id: String,
+    pub storj_key: Option<String>,
+    pub hetzner_key: Option<String>,
+    pub phash: Option<String>,
+    pub status: Option<String>,
+    pub is_temp: Option<bool>,
+    pub retry_count: Option<i32>,
+    pub error_message: Option<String>,
+}
+
+pub struct DebugInfo {
+    pub status_counts: Vec<(String, i64)>,
+    pub sample_rows: Vec<DebugRow>,
+    pub video_index_count: i64,
+    pub mirror_jobs_count: i64,
+    pub pending_phash_query_count: i64,
+}
+
+pub async fn get_debug_info(client: &Client) -> Result<DebugInfo, tokio_postgres::Error> {
+    // Status breakdown
+    let status_rows = client
+        .query(
+            "SELECT COALESCE(mj.status, 'no_mirror_job'), COUNT(*)
+             FROM video_index vi
+             LEFT JOIN mirror_jobs mj ON vi.video_id = mj.video_id
+             GROUP BY mj.status
+             ORDER BY COUNT(*) DESC",
+            &[],
+        )
+        .await?;
+    let status_counts: Vec<(String, i64)> =
+        status_rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+
+    // Total counts
+    let vi_count: i64 = client
+        .query_one("SELECT COUNT(*) FROM video_index", &[])
+        .await?
+        .get(0);
+    let mj_count: i64 = client
+        .query_one("SELECT COUNT(*) FROM mirror_jobs", &[])
+        .await?
+        .get(0);
+
+    // Exact phash query count
+    let pending_phash: i64 = client
+        .query_one(
+            "SELECT COUNT(*)
+             FROM mirror_jobs mj
+             JOIN video_index vi ON vi.video_id = mj.video_id
+             WHERE mj.status = 'pending'
+               AND vi.hetzner_key IS NOT NULL
+               AND vi.phash IS NULL",
+            &[],
+        )
+        .await?
+        .get(0);
+
+    // Sample rows
+    let sample = client
+        .query(
+            "SELECT vi.video_id, vi.storj_key, vi.hetzner_key, vi.phash,
+                    mj.status, mj.is_temp, mj.retry_count, mj.error_message
+             FROM video_index vi
+             LEFT JOIN mirror_jobs mj ON vi.video_id = mj.video_id
+             ORDER BY vi.video_id
+             LIMIT 10",
+            &[],
+        )
+        .await?;
+    let sample_rows = sample
+        .iter()
+        .map(|r| DebugRow {
+            video_id: r.get(0),
+            storj_key: r.get(1),
+            hetzner_key: r.get(2),
+            phash: r.get(3),
+            status: r.get(4),
+            is_temp: r.get(5),
+            retry_count: r.get(6),
+            error_message: r.get(7),
+        })
+        .collect();
+
+    Ok(DebugInfo {
+        status_counts,
+        sample_rows,
+        video_index_count: vi_count,
+        mirror_jobs_count: mj_count,
+        pending_phash_query_count: pending_phash,
     })
 }
 
