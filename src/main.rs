@@ -234,7 +234,7 @@ async fn run_server() -> anyhow::Result<()> {
                 .layer(middleware::from_fn(authorize)),
         )
         .route(
-            "/mirror/duplicates/:video_id",
+            "/mirror/duplicates/{video_id}",
             get(routes::mirror::video_duplicates)
                 .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
