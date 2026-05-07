@@ -94,6 +94,23 @@ pub struct DuplicateGroup {
     pub videos: Vec<VideoEntry>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct FailedJob {
+    pub video_id: String,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct FailedJobsResponse {
+    pub count: usize,
+    pub jobs: Vec<FailedJob>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct RetryResponse {
+    pub reset_count: i64,
+}
+
 pub struct MirrorClient {
     base_url: String,
     secret: String,
@@ -232,6 +249,69 @@ impl MirrorClient {
 
         match resp.status().as_u16() {
             200 => Ok(resp.json::<DuplicatesResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    pub async fn failed_jobs(&self) -> Result<FailedJobsResponse, MirrorError> {
+        let path = "/mirror/jobs/failed";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<FailedJobsResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    pub async fn retry_failed(&self) -> Result<RetryResponse, MirrorError> {
+        let path = "/mirror/jobs/retry-failed";
+        let (ts, sig) = self.sign("POST", path);
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<RetryResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    pub async fn video_duplicates(
+        &self,
+        video_id: &str,
+    ) -> Result<Option<DuplicateGroup>, MirrorError> {
+        let path = format!("/mirror/duplicates/{video_id}");
+        let (ts, sig) = self.sign("GET", &path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<Option<DuplicateGroup>>().await?),
             401 | 403 => Err(MirrorError::Unauthorized),
             status => {
                 let body = resp.text().await.unwrap_or_default();

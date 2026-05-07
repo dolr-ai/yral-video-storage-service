@@ -338,6 +338,86 @@ pub async fn audit(State(state): State<AppState>) -> Result<Json<AuditResponse>,
     }))
 }
 
+#[derive(Serialize)]
+pub struct FailedJobEntry {
+    pub video_id: String,
+    pub error_message: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FailedJobsResponse {
+    pub count: usize,
+    pub jobs: Vec<FailedJobEntry>,
+}
+
+pub async fn failed_jobs(
+    State(state): State<AppState>,
+) -> Result<Json<FailedJobsResponse>, StatusCode> {
+    let client = db::connect(&state.db_url)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let jobs = db::get_failed_jobs(&client)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let count = jobs.len();
+    Ok(Json(FailedJobsResponse {
+        count,
+        jobs: jobs
+            .into_iter()
+            .map(|j| FailedJobEntry {
+                video_id: j.video_id,
+                error_message: j.error_message,
+            })
+            .collect(),
+    }))
+}
+
+#[derive(Serialize)]
+pub struct RetryResponse {
+    pub reset_count: i64,
+}
+
+pub async fn retry_failed(
+    State(state): State<AppState>,
+) -> Result<Json<RetryResponse>, StatusCode> {
+    let client = db::connect(&state.db_url)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let reset_count = db::reset_failed_to_retry(&client)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tracing::info!(reset_count, "retry-failed: reset jobs to phash_computed");
+    Ok(Json(RetryResponse { reset_count }))
+}
+
+pub async fn video_duplicates(
+    State(state): State<AppState>,
+    axum::extract::Path(video_id): axum::extract::Path<String>,
+) -> Result<Json<Option<DuplicateGroup>>, StatusCode> {
+    let client = db::connect(&state.db_url)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let result = db::get_duplicates_for_video(&client, &video_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(result.map(|d| {
+        let count = d.videos.len();
+        DuplicateGroup {
+            phash: d.phash,
+            count,
+            videos: d
+                .videos
+                .into_iter()
+                .map(|v| VideoEntry {
+                    video_id: v.video_id,
+                    storj_key: v.storj_key,
+                    hetzner_key: v.hetzner_key,
+                })
+                .collect(),
+        }
+    })))
+}
+
 pub async fn duplicates(
     State(state): State<AppState>,
 ) -> Result<Json<DuplicatesResponse>, StatusCode> {

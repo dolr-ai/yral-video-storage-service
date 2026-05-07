@@ -5,6 +5,9 @@ const USAGE: &str = "Usage: mirror-client <command> [--limit N]
 Commands:
   audit                Print index statistics
   duplicates           List videos with identical perceptual hashes
+  video-duplicates     Show duplicate group for a specific video (requires --video VIDEO_ID)
+  failed               List all permanently failed videos
+  retry-failed         Reset failed videos to retry on next mirror run
   scan-storj           Scan Storj bucket into index
   scan-hetzner         Scan Hetzner bucket into index
   phash                Compute missing perceptual hashes
@@ -17,8 +20,9 @@ Commands:
   config-set           Update configuration (use --phash, --mirror, --page)
 
 Options:
-  --limit N       Stop after processing N items (scan/phash/mirror/run-pipeline)
-  --prefix PREFIX Filter by object key prefix, e.g. publisher-id/  (scan/run-pipeline)
+  --limit N           Stop after processing N items (scan/phash/mirror/run-pipeline)
+  --prefix PREFIX     Filter by object key prefix, e.g. publisher-id/  (scan/run-pipeline)
+  --video VIDEO_ID    Video ID for video-duplicates command
 
 Environment:
   MIRROR_SERVICE_URL    Base URL of the service (required)
@@ -95,6 +99,52 @@ async fn main() {
             }
             Err(e) => Err(e),
         },
+        "failed" => match client.failed_jobs().await {
+            Ok(r) => {
+                println!("failed: {}", r.count);
+                for j in &r.jobs {
+                    println!(
+                        "  {} — {}",
+                        j.video_id,
+                        j.error_message.as_deref().unwrap_or("(no message)")
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "retry-failed" => match client.retry_failed().await {
+            Ok(r) => {
+                println!("reset {} failed jobs → phash_computed", r.reset_count);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "video-duplicates" => {
+            let video_id = args
+                .windows(2)
+                .find(|w| w[0] == "--video")
+                .map(|w| w[1].as_str());
+            let Some(vid) = video_id else {
+                eprintln!("error: video-duplicates requires --video VIDEO_ID");
+                std::process::exit(1);
+            };
+            match client.video_duplicates(vid).await {
+                Ok(Some(g)) => {
+                    println!("phash: {}", g.phash);
+                    println!("count: {}", g.count);
+                    for v in &g.videos {
+                        println!("  {}", v.video_id);
+                    }
+                    Ok(())
+                }
+                Ok(None) => {
+                    println!("no duplicates found for {vid}");
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
         "scan-storj" => client
             .scan_storj(limit, prefix)
             .await

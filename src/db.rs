@@ -96,6 +96,11 @@ pub struct DuplicatePhash {
     pub videos: Vec<DuplicateVideo>,
 }
 
+pub struct FailedJob {
+    pub video_id: String,
+    pub error_message: Option<String>,
+}
+
 pub async fn connect(url: &str) -> Result<Client, tokio_postgres::Error> {
     let (client, connection) = tokio_postgres::connect(url, NoTls).await?;
     tokio::spawn(async move {
@@ -380,6 +385,71 @@ pub async fn get_audit_stats(client: &Client) -> Result<AuditStats, tokio_postgr
         error_count: row.get(7),
         status_breakdown,
     })
+}
+
+pub async fn get_failed_jobs(client: &Client) -> Result<Vec<FailedJob>, tokio_postgres::Error> {
+    let rows = client
+        .query(
+            "SELECT video_id, error_message FROM mirror_jobs WHERE status = 'failed' ORDER BY video_id",
+            &[],
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| FailedJob {
+            video_id: r.get(0),
+            error_message: r.get(1),
+        })
+        .collect())
+}
+
+pub async fn reset_failed_to_retry(client: &Client) -> Result<i64, tokio_postgres::Error> {
+    let row = client
+        .query_one(
+            "WITH updated AS (
+                UPDATE mirror_jobs
+                SET status = 'phash_computed', retry_count = 0, error_message = NULL
+                WHERE status = 'failed'
+                RETURNING video_id
+             )
+             SELECT COUNT(*) FROM updated",
+            &[],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
+pub async fn get_duplicates_for_video(
+    client: &Client,
+    video_id: &str,
+) -> Result<Option<DuplicatePhash>, tokio_postgres::Error> {
+    let rows = client
+        .query(
+            "SELECT vi2.phash, vi2.video_id, vi2.storj_key, vi2.hetzner_key
+             FROM video_index vi1
+             JOIN video_index vi2 ON vi2.phash = vi1.phash
+             WHERE vi1.video_id = $1
+               AND vi1.phash IS NOT NULL
+             ORDER BY vi2.video_id",
+            &[&video_id],
+        )
+        .await?;
+
+    if rows.len() <= 1 {
+        return Ok(None);
+    }
+
+    let phash: String = rows[0].get(0);
+    let videos = rows
+        .into_iter()
+        .map(|r| DuplicateVideo {
+            video_id: r.get(1),
+            storj_key: r.get(2),
+            hetzner_key: r.get(3),
+        })
+        .collect();
+
+    Ok(Some(DuplicatePhash { phash, videos }))
 }
 
 pub async fn get_duplicate_phashes(
