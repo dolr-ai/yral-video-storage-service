@@ -30,7 +30,7 @@ set -a && source .env && set +a && cargo run -p mirror-client -- <command> [opti
 | `scan-hetzner` | Scan Hetzner S3 bucket and index all video keys into the DB | Yes | Yes |
 | `phash` | Compute perceptual hashes for videos missing them | Yes | Yes |
 | `mirror` | Copy pending videos from Hetzner → Storj | Yes | Yes |
-| `run-pipeline` | Run full pipeline: scan-hetzner → phash → mirror (requires `--prefix`) | Yes | Yes |
+| `run-pipeline` | Run full pipeline: scan-hetzner → phash → mirror | Yes | Yes |
 | `cancel` | Cancel all running background jobs | No | No |
 
 *Note: S3 scanning jobs (`scan-storj`, `scan-hetzner`, `run-pipeline`) automatically resume from the last successfully indexed key by default. Use `--full-scan` to disable this and perform a full scan from the beginning (which also resets failed jobs).*

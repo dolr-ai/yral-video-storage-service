@@ -355,6 +355,21 @@ impl S3Client {
                 match request.send().await {
                     Ok(_) => Ok(true),
                     Err(err) => {
+                        let is_not_found = match &err {
+                            aws_sdk_s3::error::SdkError::ServiceError(e) => {
+                                matches!(
+                                    e.err(),
+                                    aws_sdk_s3::operation::head_object::HeadObjectError::NotFound(
+                                        _
+                                    )
+                                )
+                            }
+                            _ => false,
+                        };
+                        if is_not_found {
+                            return Ok(false);
+                        }
+
                         let message = err.to_string();
                         if message.contains("NotFound") || message.contains("404") {
                             Ok(false)

@@ -12,7 +12,7 @@ Commands:
   scan-hetzner         Scan Hetzner bucket into index
   phash                Compute missing perceptual hashes
   mirror               Copy pending videos from Hetzner → Storj
-  run-pipeline         Run full pipeline locally: scan-hetzner → phash → mirror (requires --prefix)
+  run-pipeline         Run full pipeline locally: scan-hetzner → phash → mirror
   run-pipeline-async   Trigger full pipeline on server and return immediately; use status/audit to track
   cancel               Cancel all running background jobs
   status               Show which jobs are currently running
@@ -171,13 +171,7 @@ async fn main() {
             .mirror(limit)
             .await
             .map(|_| println!("mirror accepted")),
-        "run-pipeline" => {
-            let Some(pfx) = prefix else {
-                eprintln!("error: run-pipeline requires --prefix");
-                std::process::exit(1);
-            };
-            run_pipeline(&client, limit, pfx, full_scan).await
-        }
+        "run-pipeline" => run_pipeline(&client, limit, prefix, full_scan).await,
         "run-pipeline-async" => client
             .trigger_pipeline(limit, prefix, full_scan)
             .await
@@ -275,14 +269,14 @@ async fn main() {
 async fn run_pipeline(
     client: &MirrorClient,
     limit: Option<u64>,
-    prefix: &str,
+    prefix: Option<&str>,
     full_scan: Option<bool>,
 ) -> Result<(), MirrorError> {
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
     // Step 1: scan-hetzner
-    println!("[1/3] Starting scan-hetzner (prefix: {prefix})");
-    client.scan_hetzner(limit, Some(prefix), full_scan).await?;
+    println!("[1/3] Starting scan-hetzner (prefix: {:?})", prefix);
+    client.scan_hetzner(limit, prefix, full_scan).await?;
     println!("       scan-hetzner accepted, waiting for completion...");
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
