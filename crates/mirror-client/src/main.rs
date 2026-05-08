@@ -22,6 +22,7 @@ Commands:
 Options:
   --limit N           Stop after processing N items (scan/phash/mirror/run-pipeline)
   --prefix PREFIX     Filter by object key prefix, e.g. publisher-id/  (scan/run-pipeline)
+  --full-scan         Scan entire S3 bucket and reset failed jobs instead of resuming (scan/run-pipeline)
   --video VIDEO_ID    Video ID for video-duplicates command
 
 Environment:
@@ -40,12 +41,21 @@ fn parse_prefix(args: &[String]) -> Option<&str> {
         .map(|w| w[1].as_str())
 }
 
+fn parse_full_scan(args: &[String]) -> Option<bool> {
+    if args.iter().any(|arg| arg == "--full-scan") {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
     let limit = parse_limit(&args);
     let prefix = parse_prefix(&args);
+    let full_scan = parse_full_scan(&args);
 
     let url = std::env::var("MIRROR_SERVICE_URL").expect("MIRROR_SERVICE_URL must be set");
     let secret = std::env::var("SERVICE_SECRET_TOKEN").expect("SERVICE_SECRET_TOKEN must be set");
@@ -146,11 +156,11 @@ async fn main() {
             }
         }
         "scan-storj" => client
-            .scan_storj(limit, prefix)
+            .scan_storj(limit, prefix, full_scan)
             .await
             .map(|_| println!("scan-storj accepted")),
         "scan-hetzner" => client
-            .scan_hetzner(limit, prefix)
+            .scan_hetzner(limit, prefix, full_scan)
             .await
             .map(|_| println!("scan-hetzner accepted")),
         "phash" => client
@@ -166,11 +176,16 @@ async fn main() {
                 eprintln!("error: run-pipeline requires --prefix");
                 std::process::exit(1);
             };
-            run_pipeline(&client, limit, pfx).await
+            run_pipeline(&client, limit, pfx, full_scan).await
         }
-        "run-pipeline-async" => client.trigger_pipeline(limit, prefix).await.map(|_| {
-            println!("run-pipeline accepted by server. Use 'status' or 'audit' to check progress.")
-        }),
+        "run-pipeline-async" => client
+            .trigger_pipeline(limit, prefix, full_scan)
+            .await
+            .map(|_| {
+                println!(
+                    "run-pipeline accepted by server. Use 'status' or 'audit' to check progress."
+                )
+            }),
         "cancel" => match client.cancel_all().await {
             Ok(r) => {
                 println!("{}", r.message);
@@ -261,12 +276,13 @@ async fn run_pipeline(
     client: &MirrorClient,
     limit: Option<u64>,
     prefix: &str,
+    full_scan: Option<bool>,
 ) -> Result<(), MirrorError> {
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
     // Step 1: scan-hetzner
     println!("[1/3] Starting scan-hetzner (prefix: {prefix})");
-    client.scan_hetzner(limit, Some(prefix)).await?;
+    client.scan_hetzner(limit, Some(prefix), full_scan).await?;
     println!("       scan-hetzner accepted, waiting for completion...");
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -367,5 +383,21 @@ mod tests {
     #[test]
     fn parse_limit_requires_value_after_flag() {
         assert_eq!(parse_limit(&args(&["mirror-client", "--limit"])), None);
+    }
+
+    #[test]
+    fn parse_full_scan_returns_true_when_present() {
+        assert_eq!(
+            parse_full_scan(&args(&["mirror-client", "scan-hetzner", "--full-scan"])),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn parse_full_scan_returns_none_when_absent() {
+        assert_eq!(
+            parse_full_scan(&args(&["mirror-client", "scan-hetzner"])),
+            None
+        );
     }
 }

@@ -285,8 +285,10 @@ impl S3Client {
         &self,
         prefix: Option<&str>,
         continuation_token: Option<&str>,
+        start_after: Option<&str>,
     ) -> Result<(Vec<S3ObjectInfo>, Option<String>), String> {
         let token = continuation_token.map(ToOwned::to_owned);
+        let after = start_after.map(ToOwned::to_owned);
         let response = retry_s3_op_string("list_objects_page", "", || {
             let mut request = self.client.list_objects_v2().bucket(self.bucket.as_str());
             if let Some(p) = prefix {
@@ -294,6 +296,9 @@ impl S3Client {
             }
             if let Some(t) = token.as_deref() {
                 request = request.continuation_token(t);
+            }
+            if let Some(a) = after.as_deref() {
+                request = request.start_after(a);
             }
             async move { request.send().await.map_err(|e| e.to_string()) }
         })
@@ -318,13 +323,20 @@ impl S3Client {
     }
 
     #[allow(dead_code)]
-    pub async fn list_objects(&self, prefix: Option<&str>) -> Result<Vec<S3ObjectInfo>, String> {
+    pub async fn list_objects(
+        &self,
+        prefix: Option<&str>,
+        start_after: Option<&str>,
+    ) -> Result<Vec<S3ObjectInfo>, String> {
         let mut all_items = Vec::new();
         let mut continuation_token: Option<String> = None;
+        let mut is_first_page = true;
         loop {
+            let current_start_after = if is_first_page { start_after } else { None };
             let (items, next_token) = self
-                .list_objects_page(prefix, continuation_token.as_deref())
+                .list_objects_page(prefix, continuation_token.as_deref(), current_start_after)
                 .await?;
+            is_first_page = false;
             all_items.extend(items);
             continuation_token = next_token;
             if continuation_token.is_none() {
@@ -336,24 +348,24 @@ impl S3Client {
 
     #[allow(dead_code)]
     pub async fn object_exists(&self, key: &str) -> Result<bool, String> {
-        match self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(err) => {
-                let message = err.to_string();
-                if message.contains("NotFound") || message.contains("404") {
-                    Ok(false)
-                } else {
-                    Err(message)
+        retry_s3_op_string("object_exists", key, || {
+            let request = self.client.head_object().bucket(&self.bucket).key(key);
+
+            async move {
+                match request.send().await {
+                    Ok(_) => Ok(true),
+                    Err(err) => {
+                        let message = err.to_string();
+                        if message.contains("NotFound") || message.contains("404") {
+                            Ok(false)
+                        } else {
+                            Err(message)
+                        }
+                    }
                 }
             }
-        }
+        })
+        .await
     }
 
     #[allow(dead_code)]

@@ -12,6 +12,7 @@ use crate::AppState;
 pub struct JobParams {
     pub limit: Option<usize>,
     pub prefix: Option<String>,
+    pub full_scan: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -76,8 +77,15 @@ pub async fn scan_storj(
     let guard = JobGuard(state.job_scan_storj_running.clone());
     tokio::spawn(async move {
         let _guard = guard;
-        if let Err(e) =
-            jobs::scan_storj::run(storj, db_url, cancel, params.limit, params.prefix).await
+        if let Err(e) = jobs::scan_storj::run(
+            storj,
+            db_url,
+            cancel,
+            params.limit,
+            params.prefix,
+            params.full_scan.unwrap_or(false),
+        )
+        .await
         {
             tracing::error!(error = %e, "Job 0 (scan-storj) error");
             sentry::capture_message(&format!("scan-storj job failed: {e}"), sentry::Level::Error);
@@ -107,8 +115,15 @@ pub async fn scan_hetzner(
     let guard = JobGuard(state.job_scan_hetzner_running.clone());
     tokio::spawn(async move {
         let _guard = guard;
-        if let Err(e) =
-            jobs::scan_hetzner::run(s3, db_url, cancel, params.limit, params.prefix).await
+        if let Err(e) = jobs::scan_hetzner::run(
+            s3,
+            db_url,
+            cancel,
+            params.limit,
+            params.prefix,
+            params.full_scan.unwrap_or(false),
+        )
+        .await
         {
             tracing::error!(error = %e, "Job 1 (scan-hetzner) error");
             sentry::capture_message(
@@ -225,7 +240,11 @@ pub async fn run_pipeline(
 
             // Step 1: fetch one S3 page from Hetzner
             let (objects, next_token) = match s3
-                .list_objects_page(params.prefix.as_deref(), continuation_token.as_deref())
+                .list_objects_page(
+                    params.prefix.as_deref(),
+                    continuation_token.as_deref(),
+                    None,
+                )
                 .await
             {
                 Ok(result) => result,
@@ -566,5 +585,20 @@ mod tests {
         let result: Result<JobParams, _> =
             serde_json::from_value(serde_json::json!({"limit": "abc"}));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn job_params_full_scan_parses() {
+        let p: JobParams = serde_json::from_value(serde_json::json!({"full_scan": true})).unwrap();
+        assert_eq!(p.full_scan, Some(true));
+
+        let p: JobParams = serde_json::from_value(serde_json::json!({"full_scan": false})).unwrap();
+        assert_eq!(p.full_scan, Some(false));
+    }
+
+    #[test]
+    fn job_params_full_scan_defaults_none() {
+        let p: JobParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(p.full_scan, None);
     }
 }

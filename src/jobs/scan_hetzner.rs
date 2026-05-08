@@ -12,6 +12,7 @@ pub async fn run(
     cancel: CancellationToken,
     limit: Option<usize>,
     prefix: Option<String>,
+    full_scan: bool,
 ) -> Result<()> {
     tracing::info!("Job 1 (scan-hetzner): starting");
     let client = db::connect(&db_url).await?;
@@ -21,8 +22,20 @@ pub async fn run(
         return Ok(());
     }
 
+    let start_after = if !full_scan {
+        db::get_max_hetzner_key(&client, prefix.as_deref()).await?
+    } else {
+        None
+    };
+
+    if let Some(after) = &start_after {
+        tracing::info!("Job 1 (scan-hetzner): resuming from after key: {}", after);
+    } else {
+        tracing::info!("Job 1 (scan-hetzner): starting full scan from the beginning");
+    }
+
     let objects = s3
-        .list_objects(prefix.as_deref())
+        .list_objects(prefix.as_deref(), start_after.as_deref())
         .await
         .map_err(|e| anyhow::anyhow!("Hetzner list failed: {e}"))?;
 
@@ -37,9 +50,15 @@ pub async fn run(
 
         let is_temp = obj.key.contains(TEMP_KEY_PREFIX.as_str());
 
-        db::upsert_hetzner_key(&client, &video_id, &obj.key, is_temp)
-            .await
-            .map_err(|e| anyhow::anyhow!("DB upsert failed for {}: {e}", obj.key))?;
+        if full_scan {
+            db::upsert_hetzner_key_with_reset(&client, &video_id, &obj.key, is_temp)
+                .await
+                .map_err(|e| anyhow::anyhow!("DB upsert with reset failed for {}: {e}", obj.key))?;
+        } else {
+            db::upsert_hetzner_key(&client, &video_id, &obj.key, is_temp)
+                .await
+                .map_err(|e| anyhow::anyhow!("DB upsert failed for {}: {e}", obj.key))?;
+        }
 
         total += 1;
         crate::jobs::log_progress(total, "scan-hetzner");

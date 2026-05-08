@@ -11,6 +11,7 @@ pub async fn run(
     cancel: CancellationToken,
     limit: Option<usize>,
     prefix: Option<String>,
+    full_scan: bool,
 ) -> Result<()> {
     tracing::info!("Job 0 (scan-storj): starting");
     let client = db::connect(&db_url).await?;
@@ -21,9 +22,20 @@ pub async fn run(
         return Ok(());
     }
 
-    // S3Client::list_objects paginates internally — returns all keys in one Vec
+    let start_after = if !full_scan {
+        db::get_max_storj_key(&client, prefix.as_deref()).await?
+    } else {
+        None
+    };
+
+    if let Some(after) = &start_after {
+        tracing::info!("Job 0 (scan-storj): resuming from after key: {}", after);
+    } else {
+        tracing::info!("Job 0 (scan-storj): starting full scan from the beginning");
+    }
+
     let objects = storj
-        .list_objects(prefix.as_deref())
+        .list_objects(prefix.as_deref(), start_after.as_deref())
         .await
         .map_err(|e| anyhow::anyhow!("Storj list failed: {e}"))?;
 
@@ -32,9 +44,15 @@ pub async fn run(
             continue;
         };
 
-        db::upsert_storj_key(&client, &video_id, &obj.key)
-            .await
-            .map_err(|e| anyhow::anyhow!("DB upsert failed for {}: {e}", obj.key))?;
+        if full_scan {
+            db::upsert_storj_key_with_reset(&client, &video_id, &obj.key)
+                .await
+                .map_err(|e| anyhow::anyhow!("DB upsert with reset failed for {}: {e}", obj.key))?;
+        } else {
+            db::upsert_storj_key(&client, &video_id, &obj.key)
+                .await
+                .map_err(|e| anyhow::anyhow!("DB upsert failed for {}: {e}", obj.key))?;
+        }
 
         total += 1;
         crate::jobs::log_progress(total, "scan-storj");

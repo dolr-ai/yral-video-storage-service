@@ -33,6 +33,8 @@ set -a && source .env && set +a && cargo run -p mirror-client -- <command> [opti
 | `run-pipeline` | Run full pipeline: scan-hetzner → phash → mirror (requires `--prefix`) | Yes | Yes |
 | `cancel` | Cancel all running background jobs | No | No |
 
+*Note: S3 scanning jobs (`scan-storj`, `scan-hetzner`, `run-pipeline`) automatically resume from the last successfully indexed key by default. Use `--full-scan` to disable this and perform a full scan from the beginning (which also resets failed jobs).*
+
 ## Examples
 
 ```bash
@@ -47,6 +49,9 @@ set -a && source .env && set +a && cargo run -p mirror-client -- scan-storj --pr
 
 # Combine --prefix with --limit to scan a subset
 set -a && source .env && set +a && cargo run -p mirror-client -- scan-hetzner --prefix "prefix/" --limit 5
+
+# Run a full S3 scan from the very beginning (ignores last saved key) and reset all failed jobs
+set -a && source .env && set +a && cargo run -p mirror-client -- scan-hetzner --full-scan
 
 # Run the full pipeline for a publisher (scan → phash → mirror, waits between steps)
 set -a && source .env && set +a && cargo run -p mirror-client -- run-pipeline --prefix "prefix/"
@@ -73,8 +78,9 @@ set -a && source .env && set +a && cargo run -p mirror-client -- config-set --ph
 ## Notes
 
 - **Background jobs** return `202 Accepted` immediately. The job runs on the server — use `audit` or `status` to monitor progress.
+- **Resuming**: Scanning jobs remember the last key they successfully processed. Passing `--full-scan` bypasses this resume logic to rescan the entire bucket and resets jobs with a `failed` status to `pending`.
 - **`--limit N`** processes the first N items from the bucket listing. Scans are idempotent (upserts), so re-running is safe.
-- **`--prefix PREFIX`** filters bucket listing to keys starting with PREFIX (e.g. `publisher-id/`). Only applies to `scan-storj` and `scan-hetzner`.
+- **`--prefix PREFIX`** filters bucket listing to keys starting with PREFIX (e.g. `publisher-id/`). Only applies to `scan-storj`, `scan-hetzner`, and `run-pipeline`.
 - **Only one instance** of each job type can run at a time. Starting a duplicate returns `409 Conflict`.
 - **Ctrl+C** on the client only kills the client — the server-side job continues. Use `cancel` to stop server-side jobs.
 - **Auth** uses HMAC-SHA256 signatures with the shared `SERVICE_SECRET_TOKEN`.

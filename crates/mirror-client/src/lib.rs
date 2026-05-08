@@ -145,6 +145,7 @@ impl MirrorClient {
         path: &str,
         limit: Option<u64>,
         prefix: Option<&str>,
+        full_scan: Option<bool>,
     ) -> Result<(), MirrorError> {
         let mut url = self.http.post(format!("{}{}", self.base_url, path));
         if let Some(n) = limit {
@@ -152,6 +153,9 @@ impl MirrorClient {
         }
         if let Some(p) = prefix {
             url = url.query(&[("prefix", p)]);
+        }
+        if let Some(f) = full_scan {
+            url = url.query(&[("full_scan", f.to_string())]);
         }
         let (ts, sig) = self.sign("POST", path);
         let resp = url
@@ -182,8 +186,9 @@ impl MirrorClient {
         &self,
         limit: Option<u64>,
         prefix: Option<&str>,
+        full_scan: Option<bool>,
     ) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/scan-storj", limit, prefix)
+        self.post_job("/mirror/jobs/scan-storj", limit, prefix, full_scan)
             .await
     }
 
@@ -191,17 +196,19 @@ impl MirrorClient {
         &self,
         limit: Option<u64>,
         prefix: Option<&str>,
+        full_scan: Option<bool>,
     ) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/scan-hetzner", limit, prefix)
+        self.post_job("/mirror/jobs/scan-hetzner", limit, prefix, full_scan)
             .await
     }
 
     pub async fn phash_backfill(&self, limit: Option<u64>) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/phash", limit, None).await
+        self.post_job("/mirror/jobs/phash", limit, None, None).await
     }
 
     pub async fn mirror(&self, limit: Option<u64>) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/mirror", limit, None).await
+        self.post_job("/mirror/jobs/mirror", limit, None, None)
+            .await
     }
 
     /// Trigger full pipeline on the server and return immediately (fire-and-forget).
@@ -210,8 +217,9 @@ impl MirrorClient {
         &self,
         limit: Option<u64>,
         prefix: Option<&str>,
+        full_scan: Option<bool>,
     ) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/run-pipeline", limit, prefix)
+        self.post_job("/mirror/jobs/run-pipeline", limit, prefix, full_scan)
             .await
     }
 

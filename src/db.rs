@@ -134,6 +134,49 @@ pub async fn upsert_storj_key(
     Ok(())
 }
 
+pub async fn upsert_storj_key_with_reset(
+    client: &Client,
+    video_id: &str,
+    storj_key: &str,
+) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute(
+            "WITH vi AS (
+                INSERT INTO video_index (video_id, storj_key)
+                VALUES ($1, $2)
+                ON CONFLICT (video_id) DO UPDATE
+                SET storj_key = EXCLUDED.storj_key
+             )
+             UPDATE mirror_jobs
+             SET status = CASE WHEN status = 'failed' THEN 'pending' ELSE status END,
+                 retry_count = CASE WHEN status = 'failed' THEN 0 ELSE retry_count END,
+                 error_message = CASE WHEN status = 'failed' THEN NULL ELSE error_message END
+             WHERE video_id = $1",
+            &[&video_id, &storj_key],
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn get_max_storj_key(
+    client: &Client,
+    prefix: Option<&str>,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    let row = if let Some(p) = prefix {
+        client
+            .query_one(
+                "SELECT MAX(storj_key) FROM video_index WHERE storj_key LIKE $1",
+                &[&format!("{}%", p)],
+            )
+            .await?
+    } else {
+        client
+            .query_one("SELECT MAX(storj_key) FROM video_index", &[])
+            .await?
+    };
+    Ok(row.get(0))
+}
+
 // --- Job 1: Scan Hetzner ---
 
 pub async fn upsert_hetzner_key(
@@ -160,6 +203,52 @@ pub async fn upsert_hetzner_key(
         )
         .await?;
     Ok(())
+}
+
+pub async fn upsert_hetzner_key_with_reset(
+    client: &Client,
+    video_id: &str,
+    hetzner_key: &str,
+    is_temp: bool,
+) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute(
+            "WITH vi AS (
+                INSERT INTO video_index (video_id, hetzner_key)
+                VALUES ($1, $2)
+                ON CONFLICT (video_id) DO UPDATE
+                SET hetzner_key = EXCLUDED.hetzner_key
+             )
+             INSERT INTO mirror_jobs (video_id, is_temp)
+             VALUES ($1, $3)
+             ON CONFLICT (video_id) DO UPDATE
+             SET is_temp = EXCLUDED.is_temp,
+                 status = CASE WHEN mirror_jobs.status = 'failed' THEN 'pending' ELSE mirror_jobs.status END,
+                 retry_count = CASE WHEN mirror_jobs.status = 'failed' THEN 0 ELSE mirror_jobs.retry_count END,
+                 error_message = CASE WHEN mirror_jobs.status = 'failed' THEN NULL ELSE mirror_jobs.error_message END",
+            &[&video_id, &hetzner_key, &is_temp],
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn get_max_hetzner_key(
+    client: &Client,
+    prefix: Option<&str>,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    let row = if let Some(p) = prefix {
+        client
+            .query_one(
+                "SELECT MAX(hetzner_key) FROM video_index WHERE hetzner_key LIKE $1",
+                &[&format!("{}%", p)],
+            )
+            .await?
+    } else {
+        client
+            .query_one("SELECT MAX(hetzner_key) FROM video_index", &[])
+            .await?
+    };
+    Ok(row.get(0))
 }
 
 // --- Job 2: Phash Backfill ---
