@@ -232,6 +232,18 @@ pub async fn run_pipeline(
 
         let mut continuation_token: Option<String> = None;
         let mut grand_total = 0usize;
+        let full_scan = params.full_scan.unwrap_or(false);
+        let mut current_start_after = if !full_scan {
+            match db::get_max_hetzner_key(&db_client, params.prefix.as_deref()).await {
+                Ok(k) => k,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to get max hetzner key");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         loop {
             if cancel.is_cancelled() {
@@ -243,7 +255,7 @@ pub async fn run_pipeline(
                 .list_objects_page(
                     params.prefix.as_deref(),
                     continuation_token.as_deref(),
-                    None,
+                    current_start_after.as_deref(),
                 )
                 .await
             {
@@ -258,6 +270,8 @@ pub async fn run_pipeline(
                 }
             };
 
+            current_start_after = None; // Only use start_after for the first page
+
             // Step 2: upsert this page to DB
             for obj in &objects {
                 if obj.key.ends_with("_thumbnail.png") || obj.key.ends_with("-thumbnail.png") {
@@ -267,9 +281,15 @@ pub async fn run_pipeline(
                     continue;
                 };
                 let is_temp = obj.key.contains(crate::consts::TEMP_KEY_PREFIX.as_str());
-                if let Err(e) =
+
+                let upsert_result = if full_scan {
+                    db::upsert_hetzner_key_with_reset(&db_client, &video_id, &obj.key, is_temp)
+                        .await
+                } else {
                     db::upsert_hetzner_key(&db_client, &video_id, &obj.key, is_temp).await
-                {
+                };
+
+                if let Err(e) = upsert_result {
                     tracing::error!(error = %e, key = %obj.key, "Pipeline upsert error");
                 }
                 grand_total += 1;
