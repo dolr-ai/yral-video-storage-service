@@ -120,6 +120,16 @@ jobs:
           echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY_PRAKASH }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
+      - name: Clean up old preview containers on server_1
+        run: |
+          ssh-keyscan -H "${SERVER_1_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh "deploy@${SERVER_1_IP}" "
+            docker ps -q --filter name=storj-interface-preview | xargs -r docker stop || true
+            docker ps -aq --filter name=storj-interface-preview | xargs -r docker rm || true
+            docker ps -q --filter name=yral-video-storage-service-storj-interface | xargs -r docker stop || true
+            docker ps -aq --filter name=yral-video-storage-service-storj-interface | xargs -r docker rm || true
+          "
+
       - name: Deploy HA to all nodes
         run: |
           declare -A SERVERS
@@ -178,7 +188,7 @@ jobs:
             "curl --fail --retry 30 --retry-delay 5 --retry-connrefused \
               http://localhost:${HOST_PORT}/health" || \
           (ssh "deploy@${SERVER_1_IP}" \
-            "cd ${APP_DIR}/deploy && docker compose -f docker-compose.ha.yml logs --tail=50 storj-interface 2>/dev/null" && exit 1)
+            "cd ${APP_DIR}/deploy && COMPOSE_PROJECT_NAME=yral-video-storage-service docker compose -f docker-compose.ha.yml logs --tail=50 storj-interface 2>/dev/null" && exit 1)
 
   e2e-tests:
     if: github.event.pull_request.state == 'open'
