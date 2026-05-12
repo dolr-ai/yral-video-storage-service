@@ -64,7 +64,7 @@ services:
     restart: always
 
   pgbouncer:
-    image: edoburu/pgbouncer:1.23.1
+    image: edoburu/pgbouncer:latest
     depends_on:
       - postgres-router
     environment:
