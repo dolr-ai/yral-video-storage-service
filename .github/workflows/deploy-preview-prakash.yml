@@ -163,6 +163,7 @@ jobs:
                export APP_DB_PASSWORD='${APP_DB_PASSWORD}'; \
                export PATRONI_API_PASSWORD='${PATRONI_API_PASSWORD}'; \
                export IMAGE_TAG='pr-${{ github.event.number }}'; \
+               export APP_IMAGE='ghcr.io/${{ env.IMAGE_NAME }}'; \
                export RUN_APP='${RUN_APP}'; \
                export HOST_PORT='${HOST_PORT}'; \
                ${APP_VARS} \
