@@ -47,7 +47,7 @@ services:
       dockerfile: Dockerfile.patroni
     depends_on:
       etcd:
-        condition: service_healthy
+        condition: service_started
     environment:
       NODE_NAME: "${NODE_NAME}"
       ETCD_HOSTS: "${SERVER_1_IP}:12379,${SERVER_2_IP}:12379,${SERVER_3_IP}:12379"
