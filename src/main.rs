@@ -7,13 +7,12 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 use consts::{
     ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, HETZNER_S3_ACCESS_KEY, HETZNER_S3_BUCKET,
     HETZNER_S3_ENDPOINT, HETZNER_S3_REGION, HETZNER_S3_SECRET_KEY, SERVICE_SECRET_TOKEN,
     YRAL_VIDEOS,
 };
+use ic_agent::Agent;
 use once_cell::sync::Lazy;
 use reqwest::{header::AUTHORIZATION, StatusCode};
 use sentry_tower::{NewSentryLayer, SentryHttpLayer};
@@ -24,6 +23,8 @@ use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 pub(crate) mod consts;
 mod db;
@@ -47,6 +48,7 @@ pub(crate) struct AppState {
     pub job_phash_running: Arc<AtomicBool>,
     pub job_mirror_running: Arc<AtomicBool>,
     pub job_pipeline_running: Arc<AtomicBool>,
+    pub ic_agent: Agent,
 }
 
 #[derive(OpenApi)]
@@ -73,6 +75,9 @@ pub(crate) struct AppState {
         routes::mirror::status,
         routes::mirror::get_config,
         routes::mirror::update_config,
+        routes::videogen::get_in_progress_drafts,
+        routes::videogen::get_in_progress_by_principal,
+        routes::videogen::get_all_status_by_principal,
     ),
     components(schemas(
         storj_interface::duplicate::Args,
@@ -90,10 +95,16 @@ pub(crate) struct AppState {
         routes::mirror::JobStatus,
         routes::mirror::ConfigResponse,
         routes::mirror::ConfigUpdate,
+        routes::videogen::InProgressDraftsRequest,
+        routes::videogen::InProgressDraftItem,
+        routes::videogen::InProgressDraftsResponse,
+        routes::videogen::AllStatusItem,
+        routes::videogen::AllStatusResponse,
     )),
     tags(
         (name = "videos", description = "Video management endpoints"),
         (name = "mirror", description = "Mirror job management"),
+        (name = "videogen", description = "Video generation status"),
     )
 )]
 struct ApiDoc;
@@ -182,6 +193,10 @@ async fn run_server() -> anyhow::Result<()> {
     drop(db_client); // jobs create their own connections
 
     let storj_client = storj_s3_client::StorjS3Client::new().await;
+    let ic_agent = Agent::builder()
+        .with_url(consts::IC_URL.as_str())
+        .build()
+        .context("Failed to build IC agent")?;
     let cancel = CancellationToken::new();
     let job_cancel = CancellationToken::new();
 
@@ -198,6 +213,7 @@ async fn run_server() -> anyhow::Result<()> {
         job_phash_running: Arc::new(AtomicBool::new(false)),
         job_mirror_running: Arc::new(AtomicBool::new(false)),
         job_pipeline_running: Arc::new(AtomicBool::new(false)),
+        ic_agent,
     };
 
     // Configure CORS to allow cross-origin requests
@@ -319,6 +335,18 @@ async fn run_server() -> anyhow::Result<()> {
             get(routes::mirror::get_config)
                 .post(routes::mirror::update_config)
                 .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/api/v2/videogen/drafts/in-progress",
+            post(routes::videogen::get_in_progress_drafts).with_state(app_state.clone()),
+        )
+        .route(
+            "/api/v2/videogen/in-progress/{principal}",
+            get(routes::videogen::get_in_progress_by_principal).with_state(app_state.clone()),
+        )
+        .route(
+            "/api/v2/videogen/status/{principal}/all",
+            get(routes::videogen::get_all_status_by_principal).with_state(app_state.clone()),
         )
         .route("/health", get(health))
         .layer(middleware::from_fn(sentry_utils::sentry_request_logger))
