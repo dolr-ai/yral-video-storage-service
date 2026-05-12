@@ -33,7 +33,7 @@ export REPLICATOR_PASSWORD="${REPLICATOR_PASSWORD:?REPLICATOR_PASSWORD required}
 export APP_DB_PASSWORD="${APP_DB_PASSWORD:?APP_DB_PASSWORD required}"
 export PATRONI_API_PASSWORD="${PATRONI_API_PASSWORD:?PATRONI_API_PASSWORD required}"
 
-export ETCD_INITIAL_CLUSTER="server_1=http://${SERVER_1_IP}:2380,server_2=http://${SERVER_2_IP}:2380,server_3=http://${SERVER_3_IP}:2380"
+export ETCD_INITIAL_CLUSTER="server_1=http://${SERVER_1_IP}:12380,server_2=http://${SERVER_2_IP}:12380,server_3=http://${SERVER_3_IP}:12380"
 
 bash "${APP_DIR}/scripts/deploy/render-ha-runtime.sh"
 

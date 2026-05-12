@@ -11,7 +11,7 @@ set -e
 
 EXT_IF=$(ip -4 route show default | awk '{print $5; exit}')
 
-for PORT in 5432 8008 2379 2380; do
+for PORT in 15432 18008 12379 12380; do
   # Remove stale rules to avoid duplicates on restart
   iptables -D DOCKER-USER -p tcp --dport "$PORT" -j DROP 2>/dev/null || true
   iptables -D DOCKER-USER -p tcp --dport "$PORT" -s "$SERVER_1_IP" -j ACCEPT 2>/dev/null || true
@@ -29,5 +29,5 @@ for PORT in 5432 8008 2379 2380; do
   iptables -A DOCKER-USER -p tcp -i "$EXT_IF" --dport "$PORT" -j DROP
 done
 
-echo "Firewall rules applied for ports 5432 8008 2379 2380 on interface ${EXT_IF}"
+echo "Firewall rules applied for ports 15432 18008 12379 12380 on interface ${EXT_IF}"
 exec sleep infinity

@@ -20,16 +20,16 @@ services:
     environment:
       ETCD_NAME: "${NODE_NAME}"
       ETCD_DATA_DIR: "/etcd-data"
-      ETCD_INITIAL_ADVERTISE_PEER_URLS: "http://${NODE_IP}:2380"
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: "http://${NODE_IP}:12380"
       ETCD_LISTEN_PEER_URLS: "http://0.0.0.0:2380"
       ETCD_LISTEN_CLIENT_URLS: "http://0.0.0.0:2379"
-      ETCD_ADVERTISE_CLIENT_URLS: "http://${NODE_IP}:2379"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://${NODE_IP}:12379"
       ETCD_INITIAL_CLUSTER: "${ETCD_INITIAL_CLUSTER}"
       ETCD_INITIAL_CLUSTER_TOKEN: "storj-cluster"
       ETCD_INITIAL_CLUSTER_STATE: "${ETCD_INITIAL_CLUSTER_STATE:-new}"
     ports:
-      - "2379:2379"
-      - "2380:2380"
+      - "12379:2379"
+      - "12380:2380"
     volumes:
       - etcd_data:/etcd-data
     restart: always
@@ -50,7 +50,7 @@ services:
         condition: service_healthy
     environment:
       NODE_NAME: "${NODE_NAME}"
-      ETCD_HOSTS: "${SERVER_1_IP}:2379,${SERVER_2_IP}:2379,${SERVER_3_IP}:2379"
+      ETCD_HOSTS: "${SERVER_1_IP}:12379,${SERVER_2_IP}:12379,${SERVER_3_IP}:12379"
       POSTGRES_SUPERUSER_PASSWORD: "${POSTGRES_SUPERUSER_PASSWORD}"
       REPLICATOR_PASSWORD: "${REPLICATOR_PASSWORD}"
       APP_DB_PASSWORD: "${APP_DB_PASSWORD}"
@@ -59,8 +59,8 @@ services:
     volumes:
       - patroni_data:/var/lib/postgresql/data
     ports:
-      - "8008:8008"
-      - "5432:5432"
+      - "18008:8008"
+      - "15432:5432"
     restart: always
 
   pgbouncer:

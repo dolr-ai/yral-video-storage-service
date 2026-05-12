@@ -4,7 +4,7 @@ name: "${NODE_NAME}"
 
 restapi:
   listen: "0.0.0.0:8008"
-  connect_address: "${APP_HOST}:8008"
+  connect_address: "${APP_HOST}:18008"
   authentication:
     username: "patroni"
     password: "${PATRONI_API_PASSWORD}"
@@ -44,7 +44,7 @@ bootstrap:
 
 postgresql:
   listen: "0.0.0.0:5432"
-  connect_address: "${APP_HOST}:5432"
+  connect_address: "${APP_HOST}:15432"
   data_dir: "/var/lib/postgresql/data"
   bin_dir: "/usr/local/bin"
   pgpass: "/var/lib/postgresql/.pgpass"

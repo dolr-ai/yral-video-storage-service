@@ -19,6 +19,6 @@ backend patroni_primary
   option httpchk GET /primary
   http-check expect status 200
   default-server inter 2s fall 3 rise 2
-  server server_1 __SERVER_1_IP__:5432 check port 8008
-  server server_2 __SERVER_2_IP__:5432 check port 8008
-  server server_3 __SERVER_3_IP__:5432 check port 8008
+  server server_1 __SERVER_1_IP__:15432 check port 18008
+  server server_2 __SERVER_2_IP__:15432 check port 18008
+  server server_3 __SERVER_3_IP__:15432 check port 18008
