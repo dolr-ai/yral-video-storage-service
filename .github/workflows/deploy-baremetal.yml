@@ -1,4 +1,4 @@
-name: Deploy to Bare Metal Servers
+name: Deploy HA to Bare Metal
 
 on:
   workflow_dispatch:
@@ -6,15 +6,18 @@ on:
     branches:
       - main
 
+# Never cancel an in-progress deploy — a partial deploy leaves the cluster inconsistent
 concurrency:
-  group: deploy-baremetal-${{ github.ref }}
+  group: deploy-baremetal
   cancel-in-progress: false
 
 env:
   DOCKER_REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  SERVER_1_IP: 94.130.13.115
   APP_DIR: /home/deploy/storj-interface
+  SERVER_1_IP: 94.130.13.115
+  SERVER_2_IP: 88.99.151.102
+  SERVER_3_IP: 138.201.129.173
   HOST_PORT: 3004
 
 jobs:
@@ -63,7 +66,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    name: Deploy to Server
+    name: Deploy HA Cluster
     needs: [build-and-push]
     runs-on: ubuntu-latest
     environment: Deployment
@@ -72,6 +75,11 @@ jobs:
       packages: read
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      POSTGRES_SUPERUSER_PASSWORD: ${{ secrets.POSTGRES_SUPERUSER_PASSWORD }}
+      REPLICATOR_PASSWORD: ${{ secrets.REPLICATOR_PASSWORD }}
+      APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
+      PATRONI_API_PASSWORD: ${{ secrets.PATRONI_API_PASSWORD }}
+      # App-specific secrets (only consumed by storj-interface on server_1)
       STORJ_ACCESS_GRANT: ${{ secrets.STORJ_ACCESS_GRANT }}
       HETZNER_S3_ENDPOINT: ${{ secrets.HETZNER_S3_ENDPOINT }}
       HETZNER_S3_BUCKET: ${{ secrets.HETZNER_S3_BUCKET }}
@@ -79,7 +87,6 @@ jobs:
       HETZNER_S3_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
       HETZNER_S3_REGION: ${{ secrets.HETZNER_S3_REGION }}
       SERVICE_SECRET_TOKEN: ${{ secrets.SERVICE_SECRET_TOKEN }}
-      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
       STORJ_EU1_GATEWAY_ACCESS_KEY: ${{ secrets.STORJ_EU1_GATEWAY_ACCESS_KEY }}
       STORJ_EU1_GATEWAY_SECRET_KEY: ${{ secrets.STORJ_EU1_GATEWAY_SECRET_KEY }}
       STORJ_MIRROR_ACCESS_GRANT: ${{ secrets.STORJ_MIRROR_ACCESS_GRANT }}
@@ -93,52 +100,60 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY_PRAKASH }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.SERVER_1_IP }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Sync deployment files to server
+      - name: Deploy to all nodes
         run: |
-          ssh "deploy@${{ env.SERVER_1_IP }}" "mkdir -p ${{ env.APP_DIR }}"
-          scp deploy/docker-compose.yml "deploy@${{ env.SERVER_1_IP }}:${{ env.APP_DIR }}/"
+          declare -A SERVERS
+          SERVERS=(["server_1"]="${SERVER_1_IP}" ["server_2"]="${SERVER_2_IP}" ["server_3"]="${SERVER_3_IP}")
 
-      - name: Deploy with Docker Compose
-        run: |
-          ssh "deploy@${{ env.SERVER_1_IP }}" \
-            "export APP_IMAGE='ghcr.io/${{ github.repository }}'; \
-             export IMAGE_TAG='${{ github.sha }}'; \
-             export HOST_PORT='${{ env.HOST_PORT }}'; \
-             export STORJ_ACCESS_GRANT_SFW='${STORJ_ACCESS_GRANT}'; \
-             export STORJ_ACCESS_GRANT_NSFW='${STORJ_ACCESS_GRANT}'; \
-             export SFW_BUCKET='yral-videos'; \
-             export NSFW_BUCKET='yral-nsfw-videos'; \
-             export HETZNER_S3_ENDPOINT='${HETZNER_S3_ENDPOINT}'; \
-             export HETZNER_S3_BUCKET='${HETZNER_S3_BUCKET}'; \
-             export HETZNER_S3_ACCESS_KEY='${HETZNER_S3_ACCESS_KEY}'; \
-             export HETZNER_S3_SECRET_KEY='${HETZNER_S3_SECRET_KEY}'; \
-             export HETZNER_S3_REGION='${HETZNER_S3_REGION}'; \
-             export SERVICE_SECRET_TOKEN='${SERVICE_SECRET_TOKEN}'; \
-             export POSTGRES_PASSWORD='${POSTGRES_PASSWORD}'; \
-             export STORJ_EU1_GATEWAY_ACCESS_KEY='${STORJ_EU1_GATEWAY_ACCESS_KEY}'; \
-             export STORJ_EU1_GATEWAY_SECRET_KEY='${STORJ_EU1_GATEWAY_SECRET_KEY}'; \
-             export STORJ_MIRROR_ACCESS_GRANT='${STORJ_MIRROR_ACCESS_GRANT}'; \
-             export ENVIRONMENT='production'; \
-             cd ${{ env.APP_DIR }} && \
-             echo '${GITHUB_TOKEN}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin && \
-             docker compose pull && \
-             docker compose up -d --remove-orphans"
+          for NODE_NAME in server_1 server_2 server_3; do
+            NODE_IP="${SERVERS[$NODE_NAME]}"
+            echo "--> ${NODE_NAME} (${NODE_IP})"
+            ssh-keyscan -H "${NODE_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Verify deployment
-        run: |
-          ssh "deploy@${{ env.SERVER_1_IP }}" "
-            cd ${{ env.APP_DIR }}
-            echo '=== Container Status ==='
-            docker compose ps
-            echo '=== Logs (last 20 lines) ==='
-            docker compose logs --tail=20 storj-interface 2>/dev/null || true
-          "
+            ssh "deploy@${NODE_IP}" "mkdir -p ${APP_DIR}/deploy"
+            scp -r deploy "deploy@${NODE_IP}:${APP_DIR}/"
 
-      - name: Run health check
+            RUN_APP=false
+            [[ "${NODE_NAME}" == "server_1" ]] && RUN_APP=true
+
+            APP_VARS=""
+            if [[ "${RUN_APP}" == "true" ]]; then
+              APP_VARS="\
+                export STORJ_ACCESS_GRANT_SFW='${STORJ_ACCESS_GRANT}'; \
+                export STORJ_ACCESS_GRANT_NSFW='${STORJ_ACCESS_GRANT}'; \
+                export HETZNER_S3_ENDPOINT='${HETZNER_S3_ENDPOINT}'; \
+                export HETZNER_S3_BUCKET='${HETZNER_S3_BUCKET}'; \
+                export HETZNER_S3_ACCESS_KEY='${HETZNER_S3_ACCESS_KEY}'; \
+                export HETZNER_S3_SECRET_KEY='${HETZNER_S3_SECRET_KEY}'; \
+                export HETZNER_S3_REGION='${HETZNER_S3_REGION}'; \
+                export SERVICE_SECRET_TOKEN='${SERVICE_SECRET_TOKEN}'; \
+                export STORJ_EU1_GATEWAY_ACCESS_KEY='${STORJ_EU1_GATEWAY_ACCESS_KEY}'; \
+                export STORJ_EU1_GATEWAY_SECRET_KEY='${STORJ_EU1_GATEWAY_SECRET_KEY}'; \
+                export STORJ_MIRROR_ACCESS_GRANT='${STORJ_MIRROR_ACCESS_GRANT}';"
+            fi
+
+            ssh "deploy@${NODE_IP}" \
+              "export SERVER_1_IP='${SERVER_1_IP}'; \
+               export SERVER_2_IP='${SERVER_2_IP}'; \
+               export SERVER_3_IP='${SERVER_3_IP}'; \
+               export NODE_NAME='${NODE_NAME}'; \
+               export NODE_IP='${NODE_IP}'; \
+               export POSTGRES_SUPERUSER_PASSWORD='${POSTGRES_SUPERUSER_PASSWORD}'; \
+               export REPLICATOR_PASSWORD='${REPLICATOR_PASSWORD}'; \
+               export APP_DB_PASSWORD='${APP_DB_PASSWORD}'; \
+               export PATRONI_API_PASSWORD='${PATRONI_API_PASSWORD}'; \
+               export IMAGE_TAG='${{ github.sha }}'; \
+               export RUN_APP='${RUN_APP}'; \
+               export HOST_PORT='${HOST_PORT}'; \
+               ${APP_VARS} \
+               echo '${GITHUB_TOKEN}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin && \
+               bash '${APP_DIR}/deploy/scripts/deploy/deploy-ha.sh'"
+          done
+
+      - name: Health check
         run: |
-          sleep 10
+          sleep 15
           curl --fail --retry 5 --retry-delay 5 https://storj-interface.yral.com/health
 
   deployment-summary:
@@ -149,15 +164,10 @@ jobs:
     if: always()
 
     steps:
-      - name: Deployment summary
+      - name: Summary
         run: |
-          echo "## Bare Metal Deployment Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Deployment Status: ${{ needs.deploy.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Image" >> $GITHUB_STEP_SUMMARY
-          echo "- ghcr.io/${{ github.repository }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Services" >> $GITHUB_STEP_SUMMARY
-          echo "- storj-interface (HTTP on host port ${{ env.HOST_PORT }}, proxied by infra Caddy)" >> $GITHUB_STEP_SUMMARY
-          echo "- postgres (video_fingerprint_index DB, internal only)" >> $GITHUB_STEP_SUMMARY
+          echo "## HA Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ needs.deploy.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ghcr.io/${{ github.repository }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Nodes:** server_1 (${SERVER_1_IP}), server_2 (${SERVER_2_IP}), server_3 (${SERVER_3_IP})" >> $GITHUB_STEP_SUMMARY
+          echo "**App:** server_1 only (port ${HOST_PORT})" >> $GITHUB_STEP_SUMMARY

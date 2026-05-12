@@ -1,0 +1,130 @@
+services:
+  firewall:
+    image: alpine:3
+    privileged: true
+    network_mode: host
+    restart: always
+    environment:
+      SERVER_1_IP: "${SERVER_1_IP}"
+      SERVER_2_IP: "${SERVER_2_IP}"
+      SERVER_3_IP: "${SERVER_3_IP}"
+    volumes:
+      - ./scripts/server/apply-firewall.sh:/apply-firewall.sh:ro
+    command: sh -c "apk add --no-cache iptables ip6tables && sh /apply-firewall.sh"
+
+  etcd:
+    image: gcr.io/etcd-development/etcd:v3.5.17
+    depends_on:
+      firewall:
+        condition: service_started
+    environment:
+      ETCD_NAME: "${NODE_NAME}"
+      ETCD_DATA_DIR: "/etcd-data"
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: "http://${NODE_IP}:2380"
+      ETCD_LISTEN_PEER_URLS: "http://0.0.0.0:2380"
+      ETCD_LISTEN_CLIENT_URLS: "http://0.0.0.0:2379"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://${NODE_IP}:2379"
+      ETCD_INITIAL_CLUSTER: "${ETCD_INITIAL_CLUSTER}"
+      ETCD_INITIAL_CLUSTER_TOKEN: "storj-cluster"
+      ETCD_INITIAL_CLUSTER_STATE: "${ETCD_INITIAL_CLUSTER_STATE:-new}"
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    volumes:
+      - etcd_data:/etcd-data
+    restart: always
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/etcdctl", "endpoint", "health",
+             "--endpoints=http://localhost:2379"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  patroni:
+    build:
+      context: ./postgres
+      dockerfile: Dockerfile.patroni
+    depends_on:
+      etcd:
+        condition: service_healthy
+    environment:
+      NODE_NAME: "${NODE_NAME}"
+      ETCD_HOSTS: "${SERVER_1_IP}:2379,${SERVER_2_IP}:2379,${SERVER_3_IP}:2379"
+      POSTGRES_SUPERUSER_PASSWORD: "${POSTGRES_SUPERUSER_PASSWORD}"
+      REPLICATOR_PASSWORD: "${REPLICATOR_PASSWORD}"
+      APP_DB_PASSWORD: "${APP_DB_PASSWORD}"
+      PATRONI_API_PASSWORD: "${PATRONI_API_PASSWORD}"
+      APP_HOST: "${NODE_IP}"
+    volumes:
+      - patroni_data:/var/lib/postgresql/data
+    ports:
+      - "8008:8008"
+      - "5432:5432"
+    restart: always
+
+  pgbouncer:
+    image: edoburu/pgbouncer:1.23.1
+    depends_on:
+      - postgres-router
+    environment:
+      DB_HOST: postgres-router
+      DB_PORT: 5432
+      DB_USER: storj
+      DB_PASSWORD: "${APP_DB_PASSWORD}"
+      DB_NAME: video_fingerprint_index
+      POOL_MODE: transaction
+      AUTH_TYPE: scram-sha-256
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits
+      SERVER_RESET_QUERY: DISCARD ALL
+      LISTEN_PORT: 6432
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "6432", "-U", "storj"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    restart: always
+
+  postgres-router:
+    image: haproxy:3.1-alpine
+    volumes:
+      - ./runtime/haproxy-ha.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    expose:
+      - "5432"
+    restart: always
+
+  storj-interface:
+    image: ${APP_IMAGE:-ghcr.io/dolr-ai/storj-interface}:${IMAGE_TAG:-latest}
+    profiles:
+      - app
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+    ports:
+      - "${HOST_PORT:-3004}:3000"
+    environment:
+      STORJ_ACCESS_GRANT_SFW: ${STORJ_ACCESS_GRANT_SFW}
+      SFW_BUCKET: ${SFW_BUCKET:-yral-videos}
+      STORJ_ACCESS_GRANT_NSFW: ${STORJ_ACCESS_GRANT_NSFW}
+      NSFW_BUCKET: ${NSFW_BUCKET:-yral-nsfw-videos}
+      HETZNER_S3_ENDPOINT: ${HETZNER_S3_ENDPOINT}
+      HETZNER_S3_BUCKET: ${HETZNER_S3_BUCKET}
+      HETZNER_S3_ACCESS_KEY: ${HETZNER_S3_ACCESS_KEY}
+      HETZNER_S3_SECRET_KEY: ${HETZNER_S3_SECRET_KEY}
+      HETZNER_S3_REGION: ${HETZNER_S3_REGION:-eu-central}
+      SERVICE_SECRET_TOKEN: ${SERVICE_SECRET_TOKEN}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DATABASE_URL: postgres://storj:${APP_DB_PASSWORD}@pgbouncer:6432/video_fingerprint_index
+      STORJ_EU1_GATEWAY_ACCESS_KEY: ${STORJ_EU1_GATEWAY_ACCESS_KEY}
+      STORJ_EU1_GATEWAY_SECRET_KEY: ${STORJ_EU1_GATEWAY_SECRET_KEY}
+      STORJ_MIRROR_ACCESS_GRANT: ${STORJ_MIRROR_ACCESS_GRANT}
+      STORJ_SFW_BUCKET: ${STORJ_SFW_BUCKET:-yral-sfw}
+      PHASH_CONCURRENCY: ${PHASH_CONCURRENCY:-6}
+      MIRROR_CONCURRENCY: ${MIRROR_CONCURRENCY:-30}
+      SCAN_PAGE_SIZE: ${SCAN_PAGE_SIZE:-1000}
+    restart: always
+
+volumes:
+  etcd_data:
+  patroni_data:

@@ -12,34 +12,20 @@ env:
   DOCKER_REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   SERVER_1_IP: 94.130.13.115
-  APP_DIR: /home/deploy/storj-interface-preview
+  SERVER_2_IP: 88.99.151.102
+  SERVER_3_IP: 138.201.129.173
+  APP_DIR: /home/deploy/storj-interface
   HOST_PORT: 3005
-  PREVIEW_URL: https://storj-interface-preview.prakash.yral.com
+  PREVIEW_URL: https://storage-interface.prakash.yral.com
 
 jobs:
-  deploy-preview:
+  build-and-push:
     if: github.event.pull_request.state == 'open'
-    name: Deploy Preview
+    name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    environment: Deployment
     permissions:
       contents: read
       packages: write
-      pull-requests: write
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      STORJ_ACCESS_GRANT: ${{ secrets.STORJ_ACCESS_GRANT }}
-      STORJ_ACCESS_GRANT_NSFW: ${{ secrets.STORJ_ACCESS_GRANT_NSFW }}
-      HETZNER_S3_ENDPOINT: ${{ secrets.HETZNER_S3_ENDPOINT }}
-      HETZNER_S3_BUCKET: ${{ secrets.HETZNER_S3_BUCKET }}
-      HETZNER_S3_ACCESS_KEY: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
-      HETZNER_S3_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
-      HETZNER_S3_REGION: ${{ secrets.HETZNER_S3_REGION }}
-      SERVICE_SECRET_TOKEN: ${{ secrets.SERVICE_SECRET_TOKEN }}
-      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-      STORJ_EU1_GATEWAY_ACCESS_KEY: ${{ secrets.STORJ_EU1_GATEWAY_ACCESS_KEY }}
-      STORJ_EU1_GATEWAY_SECRET_KEY: ${{ secrets.STORJ_EU1_GATEWAY_SECRET_KEY }}
-      STORJ_MIRROR_ACCESS_GRANT: ${{ secrets.STORJ_MIRROR_ACCESS_GRANT }}
 
     steps:
       - name: Checkout repository
@@ -97,60 +83,109 @@ jobs:
           cache-from: type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.number }}-cache
           cache-to: type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.number }}-cache,mode=max
 
+  deploy:
+    if: github.event.pull_request.state == 'open'
+    name: Deploy HA Preview
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    environment: Deployment
+    permissions:
+      contents: read
+      packages: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      POSTGRES_SUPERUSER_PASSWORD: ${{ secrets.POSTGRES_SUPERUSER_PASSWORD }}
+      REPLICATOR_PASSWORD: ${{ secrets.REPLICATOR_PASSWORD }}
+      APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
+      PATRONI_API_PASSWORD: ${{ secrets.PATRONI_API_PASSWORD }}
+      STORJ_ACCESS_GRANT: ${{ secrets.STORJ_ACCESS_GRANT }}
+      STORJ_ACCESS_GRANT_NSFW: ${{ secrets.STORJ_ACCESS_GRANT_NSFW }}
+      HETZNER_S3_ENDPOINT: ${{ secrets.HETZNER_S3_ENDPOINT }}
+      HETZNER_S3_BUCKET: ${{ secrets.HETZNER_S3_BUCKET }}
+      HETZNER_S3_ACCESS_KEY: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
+      HETZNER_S3_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
+      HETZNER_S3_REGION: ${{ secrets.HETZNER_S3_REGION }}
+      SERVICE_SECRET_TOKEN: ${{ secrets.SERVICE_SECRET_TOKEN }}
+      STORJ_EU1_GATEWAY_ACCESS_KEY: ${{ secrets.STORJ_EU1_GATEWAY_ACCESS_KEY }}
+      STORJ_EU1_GATEWAY_SECRET_KEY: ${{ secrets.STORJ_EU1_GATEWAY_SECRET_KEY }}
+      STORJ_MIRROR_ACCESS_GRANT: ${{ secrets.STORJ_MIRROR_ACCESS_GRANT }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY_PRAKASH }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.SERVER_1_IP }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Sync deployment files to server
+      - name: Deploy HA to all nodes
         run: |
-          ssh "deploy@${{ env.SERVER_1_IP }}" "mkdir -p ${{ env.APP_DIR }}"
-          scp deploy/docker-compose.yml "deploy@${{ env.SERVER_1_IP }}:${{ env.APP_DIR }}/"
+          declare -A SERVERS
+          SERVERS=(["server_1"]="${SERVER_1_IP}" ["server_2"]="${SERVER_2_IP}" ["server_3"]="${SERVER_3_IP}")
 
-      - name: Deploy preview
-        run: |
-          ssh "deploy@${{ env.SERVER_1_IP }}" \
-            "export APP_IMAGE='ghcr.io/${{ github.repository }}'; \
-             export IMAGE_TAG='pr-${{ github.event.number }}'; \
-             export HOST_PORT='${{ env.HOST_PORT }}'; \
-             export STORJ_ACCESS_GRANT_SFW='${STORJ_ACCESS_GRANT}'; \
-             export STORJ_ACCESS_GRANT_NSFW='${STORJ_ACCESS_GRANT_NSFW}'; \
-             export SFW_BUCKET='yral-videos'; \
-             export NSFW_BUCKET='yral-nsfw-videos'; \
-             export HETZNER_S3_ENDPOINT='${HETZNER_S3_ENDPOINT}'; \
-             export HETZNER_S3_BUCKET='${HETZNER_S3_BUCKET}'; \
-             export HETZNER_S3_ACCESS_KEY='${HETZNER_S3_ACCESS_KEY}'; \
-             export HETZNER_S3_SECRET_KEY='${HETZNER_S3_SECRET_KEY}'; \
-             export HETZNER_S3_REGION='${HETZNER_S3_REGION}'; \
-             export SERVICE_SECRET_TOKEN='${SERVICE_SECRET_TOKEN}'; \
-             export POSTGRES_PASSWORD='${POSTGRES_PASSWORD}'; \
-             export STORJ_EU1_GATEWAY_ACCESS_KEY='${STORJ_EU1_GATEWAY_ACCESS_KEY}'; \
-             export STORJ_EU1_GATEWAY_SECRET_KEY='${STORJ_EU1_GATEWAY_SECRET_KEY}'; \
-             export STORJ_MIRROR_ACCESS_GRANT='${STORJ_MIRROR_ACCESS_GRANT}'; \
-             export ENVIRONMENT='staging'; \
-             cd ${{ env.APP_DIR }} && \
-             echo '${GITHUB_TOKEN}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin && \
-             docker compose down --remove-orphans || true; \
-             docker compose pull && \
-             docker compose up -d --remove-orphans"
+          for NODE_NAME in server_1 server_2 server_3; do
+            NODE_IP="${SERVERS[$NODE_NAME]}"
+            echo "--> ${NODE_NAME} (${NODE_IP})"
+            ssh-keyscan -H "${NODE_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+            ssh "deploy@${NODE_IP}" "mkdir -p ${APP_DIR}"
+            scp -r deploy "deploy@${NODE_IP}:${APP_DIR}/"
+
+            RUN_APP=false
+            [[ "${NODE_NAME}" == "server_1" ]] && RUN_APP=true
+
+            APP_VARS=""
+            if [[ "${RUN_APP}" == "true" ]]; then
+              APP_VARS="\
+                export STORJ_ACCESS_GRANT_SFW='${STORJ_ACCESS_GRANT}'; \
+                export STORJ_ACCESS_GRANT_NSFW='${STORJ_ACCESS_GRANT_NSFW}'; \
+                export HETZNER_S3_ENDPOINT='${HETZNER_S3_ENDPOINT}'; \
+                export HETZNER_S3_BUCKET='${HETZNER_S3_BUCKET}'; \
+                export HETZNER_S3_ACCESS_KEY='${HETZNER_S3_ACCESS_KEY}'; \
+                export HETZNER_S3_SECRET_KEY='${HETZNER_S3_SECRET_KEY}'; \
+                export HETZNER_S3_REGION='${HETZNER_S3_REGION}'; \
+                export SERVICE_SECRET_TOKEN='${SERVICE_SECRET_TOKEN}'; \
+                export STORJ_EU1_GATEWAY_ACCESS_KEY='${STORJ_EU1_GATEWAY_ACCESS_KEY}'; \
+                export STORJ_EU1_GATEWAY_SECRET_KEY='${STORJ_EU1_GATEWAY_SECRET_KEY}'; \
+                export STORJ_MIRROR_ACCESS_GRANT='${STORJ_MIRROR_ACCESS_GRANT}';"
+            fi
+
+            ssh "deploy@${NODE_IP}" \
+              "export SERVER_1_IP='${SERVER_1_IP}'; \
+               export SERVER_2_IP='${SERVER_2_IP}'; \
+               export SERVER_3_IP='${SERVER_3_IP}'; \
+               export NODE_NAME='${NODE_NAME}'; \
+               export NODE_IP='${NODE_IP}'; \
+               export POSTGRES_SUPERUSER_PASSWORD='${POSTGRES_SUPERUSER_PASSWORD}'; \
+               export REPLICATOR_PASSWORD='${REPLICATOR_PASSWORD}'; \
+               export APP_DB_PASSWORD='${APP_DB_PASSWORD}'; \
+               export PATRONI_API_PASSWORD='${PATRONI_API_PASSWORD}'; \
+               export IMAGE_TAG='pr-${{ github.event.number }}'; \
+               export RUN_APP='${RUN_APP}'; \
+               export HOST_PORT='${HOST_PORT}'; \
+               ${APP_VARS} \
+               echo '${GITHUB_TOKEN}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin && \
+               bash '${APP_DIR}/deploy/scripts/deploy/deploy-ha.sh'"
+          done
 
       - name: Health check
         run: |
-          ssh "deploy@${{ env.SERVER_1_IP }}" \
+          ssh-keyscan -H "${SERVER_1_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh "deploy@${SERVER_1_IP}" \
             "curl --fail --retry 30 --retry-delay 5 --retry-connrefused \
-              http://localhost:${{ env.HOST_PORT }}/health" || \
-          (ssh "deploy@${{ env.SERVER_1_IP }}" \
-            "cd ${{ env.APP_DIR }} && docker compose logs --tail=50" && exit 1)
+              http://localhost:${HOST_PORT}/health" || \
+          (ssh "deploy@${SERVER_1_IP}" \
+            "cd ${APP_DIR}/deploy && docker compose -f docker-compose.ha.yml logs --tail=50 storj-interface 2>/dev/null" && exit 1)
 
   e2e-tests:
     if: github.event.pull_request.state == 'open'
-    needs: deploy-preview
+    needs: deploy
     uses: ./.github/workflows/e2e-tests.yml
     secrets: inherit
     with:
-      preview_url: https://storj-interface-preview.prakash.yral.com
+      preview_url: https://storage-interface.prakash.yral.com
       publisher: testuser-${{ github.sha }}
 
   destroy-preview:
@@ -159,7 +194,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
 
     steps:
       - name: Setup SSH
@@ -167,14 +201,14 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY_PRAKASH }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.SERVER_1_IP }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Tear down preview
+      - name: Stop storj-interface on server_1
         run: |
+          ssh-keyscan -H ${{ env.SERVER_1_IP }} >> ~/.ssh/known_hosts 2>/dev/null || true
           ssh "deploy@${{ env.SERVER_1_IP }}" "
-            cd ${{ env.APP_DIR }} 2>/dev/null || exit 0
-            docker compose down -v --remove-orphans || true
-            cd / && rm -rf ${{ env.APP_DIR }}
+            cd ${{ env.APP_DIR }}/deploy 2>/dev/null || exit 0
+            docker compose -f docker-compose.ha.yml --profile app stop storj-interface || true
+            docker compose -f docker-compose.ha.yml --profile app rm -f storj-interface || true
           "
 
       - name: Delete preview image from GHCR
