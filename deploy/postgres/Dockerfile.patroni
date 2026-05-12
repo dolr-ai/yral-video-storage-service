@@ -20,6 +20,9 @@ COPY patroni.yml.template /etc/patroni.yml.template
 COPY patroni-entrypoint.sh /usr/local/bin/patroni-entrypoint.sh
 RUN chmod +x /usr/local/bin/patroni-entrypoint.sh
 
+COPY post_init.sh /scripts/post_init.sh
+RUN chmod +x /scripts/post_init.sh
+
 RUN mkdir -p /var/lib/postgresql/data && chown -R postgres:postgres /var/lib/postgresql/data
 
 ENTRYPOINT ["/usr/local/bin/patroni-entrypoint.sh"]

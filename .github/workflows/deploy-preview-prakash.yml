@@ -185,7 +185,7 @@ jobs:
         run: |
           ssh-keyscan -H "${SERVER_1_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
           ssh "deploy@${SERVER_1_IP}" \
-            "curl --fail --retry 30 --retry-delay 5 --retry-connrefused \
+            "curl --fail --retry 30 --retry-delay 5 --retry-all-errors \
               http://localhost:${HOST_PORT}/health" || \
           (ssh "deploy@${SERVER_1_IP}" \
             "cd ${APP_DIR}/deploy && COMPOSE_PROJECT_NAME=yral-video-storage-service docker compose -f docker-compose.ha.yml logs --tail=50 storj-interface 2>/dev/null" && exit 1)
