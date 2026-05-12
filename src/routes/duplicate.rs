@@ -367,6 +367,17 @@ async fn upload_to_s3(
     Ok(())
 }
 
+#[utoipa::path(
+    post,
+    path = "/duplicate",
+    tag = "videos",
+    request_body = storj_interface::duplicate::Args,
+    responses(
+        (status = 200, description = "Video duplicated to Storj"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 #[tracing::instrument(skip_all)]
 pub async fn handler(
     State(state): State<AppState>,
@@ -467,26 +478,37 @@ pub async fn handler(
     Ok(())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct RawUploadInitialParams {
     publisher_user_id: String,
     video_id: String,
     is_nsfw: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct RawFinalizeParams {
     publisher_user_id: String,
     video_id: String,
     is_nsfw: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct RawFinalizeBody {
     #[serde(default)]
     metadata: BTreeMap<String, String>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/duplicate_raw/upload",
+    tag = "videos",
+    params(RawUploadInitialParams),
+    request_body(content = Vec<u8>, content_type = "multipart/form-data", description = "Video file in 'file' field (max 500MB)"),
+    responses(
+        (status = 200, description = "Video uploaded to staging area"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 #[tracing::instrument(skip_all)]
 pub async fn handler_raw_upload_initial(
     State(state): State<AppState>,
@@ -586,6 +608,17 @@ pub async fn handler_raw_upload_initial(
     })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/duplicate_raw/finalize",
+    tag = "videos",
+    params(RawFinalizeParams),
+    request_body = RawFinalizeBody,
+    responses(
+        (status = 200, description = "Video finalized and pushed to Storj"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 #[tracing::instrument(skip_all)]
 pub async fn handler_raw_finalize(
     State(state): State<AppState>,

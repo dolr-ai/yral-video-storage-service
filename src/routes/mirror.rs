@@ -2,27 +2,31 @@ use axum::{extract::State, http::StatusCode, Json};
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::db;
 use crate::jobs;
 use crate::jobs::JobGuard;
 use crate::AppState;
 
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, Default, IntoParams)]
 pub struct JobParams {
+    /// Max number of items to process
     pub limit: Option<usize>,
+    /// Key prefix filter
     pub prefix: Option<String>,
+    /// If true, re-scans all items instead of incremental
     pub full_scan: Option<bool>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct VideoEntry {
     pub video_id: String,
     pub storj_key: Option<String>,
     pub hetzner_key: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct AuditResponse {
     pub total: i64,
     pub phash_computed: i64,
@@ -36,26 +40,37 @@ pub struct AuditResponse {
     pub duplicate_phashes: Vec<DuplicateEntry>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DuplicateEntry {
     pub phash: String,
     pub videos: Vec<VideoEntry>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DuplicatesResponse {
     pub total_groups: usize,
     pub total_duplicate_videos: usize,
     pub groups: Vec<DuplicateGroup>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DuplicateGroup {
     pub phash: String,
     pub count: usize,
     pub videos: Vec<VideoEntry>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/mirror/jobs/scan-storj",
+    tag = "mirror",
+    params(JobParams),
+    responses(
+        (status = 202, description = "Job started"),
+        (status = 409, description = "Job already running"),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
 pub async fn scan_storj(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<JobParams>,
@@ -94,6 +109,17 @@ pub async fn scan_storj(
     StatusCode::ACCEPTED
 }
 
+#[utoipa::path(
+    post,
+    path = "/mirror/jobs/scan-hetzner",
+    tag = "mirror",
+    params(JobParams),
+    responses(
+        (status = 202, description = "Job started"),
+        (status = 409, description = "Job already running"),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
 pub async fn scan_hetzner(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<JobParams>,
@@ -135,6 +161,17 @@ pub async fn scan_hetzner(
     StatusCode::ACCEPTED
 }
 
+#[utoipa::path(
+    post,
+    path = "/mirror/jobs/phash",
+    tag = "mirror",
+    params(JobParams),
+    responses(
+        (status = 202, description = "Job started"),
+        (status = 409, description = "Job already running"),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
 pub async fn phash_backfill(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<JobParams>,
@@ -164,6 +201,17 @@ pub async fn phash_backfill(
     StatusCode::ACCEPTED
 }
 
+#[utoipa::path(
+    post,
+    path = "/mirror/jobs/mirror",
+    tag = "mirror",
+    params(JobParams),
+    responses(
+        (status = 202, description = "Job started"),
+        (status = 409, description = "Job already running"),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
 pub async fn mirror(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<JobParams>,
@@ -193,6 +241,17 @@ pub async fn mirror(
     StatusCode::ACCEPTED
 }
 
+#[utoipa::path(
+    post,
+    path = "/mirror/jobs/run-pipeline",
+    tag = "mirror",
+    params(JobParams),
+    responses(
+        (status = 202, description = "Pipeline started"),
+        (status = 409, description = "Pipeline already running"),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
 pub async fn run_pipeline(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<JobParams>,
@@ -336,6 +395,16 @@ pub async fn run_pipeline(
     StatusCode::ACCEPTED
 }
 
+#[utoipa::path(
+    get,
+    path = "/mirror/audit",
+    tag = "mirror",
+    responses(
+        (status = 200, description = "Audit stats", body = AuditResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 pub async fn audit(State(state): State<AppState>) -> Result<Json<AuditResponse>, StatusCode> {
     let client = db::connect(&state.db_url)
         .await
@@ -377,18 +446,28 @@ pub async fn audit(State(state): State<AppState>) -> Result<Json<AuditResponse>,
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct FailedJobEntry {
     pub video_id: String,
     pub error_message: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct FailedJobsResponse {
     pub count: usize,
     pub jobs: Vec<FailedJobEntry>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/mirror/jobs/failed",
+    tag = "mirror",
+    responses(
+        (status = 200, description = "Failed jobs list", body = FailedJobsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 pub async fn failed_jobs(
     State(state): State<AppState>,
 ) -> Result<Json<FailedJobsResponse>, StatusCode> {
@@ -411,11 +490,21 @@ pub async fn failed_jobs(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RetryResponse {
     pub reset_count: i64,
 }
 
+#[utoipa::path(
+    post,
+    path = "/mirror/jobs/retry-failed",
+    tag = "mirror",
+    responses(
+        (status = 200, description = "Failed jobs reset for retry", body = RetryResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 pub async fn retry_failed(
     State(state): State<AppState>,
 ) -> Result<Json<RetryResponse>, StatusCode> {
@@ -429,6 +518,19 @@ pub async fn retry_failed(
     Ok(Json(RetryResponse { reset_count }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/mirror/duplicates/{video_id}",
+    tag = "mirror",
+    params(
+        ("video_id" = String, Path, description = "Video ID to look up duplicates for")
+    ),
+    responses(
+        (status = 200, description = "Duplicate group for video, or null", body = Option<DuplicateGroup>),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 pub async fn video_duplicates(
     State(state): State<AppState>,
     axum::extract::Path(video_id): axum::extract::Path<String>,
@@ -457,6 +559,16 @@ pub async fn video_duplicates(
     })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/mirror/duplicates",
+    tag = "mirror",
+    responses(
+        (status = 200, description = "All duplicate phash groups", body = DuplicatesResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 pub async fn duplicates(
     State(state): State<AppState>,
 ) -> Result<Json<DuplicatesResponse>, StatusCode> {
@@ -499,6 +611,15 @@ pub async fn duplicates(
 
 /// Cancel all running background jobs.
 /// The token is replaced so subsequently started jobs get a fresh token.
+#[utoipa::path(
+    post,
+    path = "/mirror/jobs/cancel",
+    tag = "mirror",
+    responses(
+        (status = 200, description = "Cancellation signal sent"),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
 pub async fn cancel_all(State(state): State<AppState>) -> Json<serde_json::Value> {
     // Cancel the current token and replace with a fresh one
     let old_token = {
@@ -528,7 +649,7 @@ pub async fn cancel_all(State(state): State<AppState>) -> Json<serde_json::Value
 }
 
 /// Report the current status of all background jobs.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct JobStatus {
     pub scan_storj: bool,
     pub scan_hetzner: bool,
@@ -537,6 +658,15 @@ pub struct JobStatus {
     pub pipeline: bool,
 }
 
+#[utoipa::path(
+    get,
+    path = "/mirror/jobs/status",
+    tag = "mirror",
+    responses(
+        (status = 200, description = "Current job running status", body = JobStatus),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
 pub async fn status(State(state): State<AppState>) -> Json<JobStatus> {
     Json(JobStatus {
         scan_storj: state.job_scan_storj_running.load(Ordering::Acquire),
@@ -547,20 +677,29 @@ pub async fn status(State(state): State<AppState>) -> Json<JobStatus> {
     })
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct ConfigResponse {
     pub phash_concurrency: usize,
     pub mirror_concurrency: usize,
     pub scan_page_size: i64,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, ToSchema)]
 pub struct ConfigUpdate {
     pub phash_concurrency: Option<usize>,
     pub mirror_concurrency: Option<usize>,
     pub scan_page_size: Option<i64>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/mirror/config",
+    tag = "mirror",
+    responses(
+        (status = 200, description = "Current job concurrency config", body = ConfigResponse),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
 pub async fn get_config() -> Json<ConfigResponse> {
     Json(ConfigResponse {
         phash_concurrency: crate::consts::PHASH_CONCURRENCY
@@ -571,6 +710,16 @@ pub async fn get_config() -> Json<ConfigResponse> {
     })
 }
 
+#[utoipa::path(
+    post,
+    path = "/mirror/config",
+    tag = "mirror",
+    request_body = ConfigUpdate,
+    responses(
+        (status = 200, description = "Updated config", body = ConfigResponse),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
 pub async fn update_config(Json(payload): Json<ConfigUpdate>) -> Json<ConfigResponse> {
     if let Some(v) = payload.phash_concurrency {
         crate::consts::PHASH_CONCURRENCY.store(v, std::sync::atomic::Ordering::Relaxed);

@@ -7,6 +7,8 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 use consts::{
     ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, HETZNER_S3_ACCESS_KEY, HETZNER_S3_BUCKET,
     HETZNER_S3_ENDPOINT, HETZNER_S3_REGION, HETZNER_S3_SECRET_KEY, SERVICE_SECRET_TOKEN,
@@ -46,6 +48,55 @@ pub(crate) struct AppState {
     pub job_mirror_running: Arc<AtomicBool>,
     pub job_pipeline_running: Arc<AtomicBool>,
 }
+
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "Storj Interface API", version = "0.1.0"),
+    paths(
+        health,
+        routes::duplicate::handler,
+        routes::duplicate::handler_raw_upload_initial,
+        routes::duplicate::handler_raw_finalize,
+        routes::move2nsfw::handler,
+        routes::duplicate_hls::handler,
+        routes::mirror::scan_storj,
+        routes::mirror::scan_hetzner,
+        routes::mirror::phash_backfill,
+        routes::mirror::mirror,
+        routes::mirror::run_pipeline,
+        routes::mirror::audit,
+        routes::mirror::duplicates,
+        routes::mirror::video_duplicates,
+        routes::mirror::failed_jobs,
+        routes::mirror::retry_failed,
+        routes::mirror::cancel_all,
+        routes::mirror::status,
+        routes::mirror::get_config,
+        routes::mirror::update_config,
+    ),
+    components(schemas(
+        storj_interface::duplicate::Args,
+        storj_interface::move2nsfw::Args,
+        routes::duplicate::RawFinalizeBody,
+        routes::mirror::JobParams,
+        routes::mirror::VideoEntry,
+        routes::mirror::AuditResponse,
+        routes::mirror::DuplicateEntry,
+        routes::mirror::DuplicatesResponse,
+        routes::mirror::DuplicateGroup,
+        routes::mirror::FailedJobEntry,
+        routes::mirror::FailedJobsResponse,
+        routes::mirror::RetryResponse,
+        routes::mirror::JobStatus,
+        routes::mirror::ConfigResponse,
+        routes::mirror::ConfigUpdate,
+    )),
+    tags(
+        (name = "videos", description = "Video management endpoints"),
+        (name = "mirror", description = "Mirror job management"),
+    )
+)]
+struct ApiDoc;
 
 fn main() {
     // Initialize Sentry
@@ -272,7 +323,8 @@ async fn run_server() -> anyhow::Result<()> {
         .route("/health", get(health))
         .layer(middleware::from_fn(sentry_utils::sentry_request_logger))
         .layer(cors)
-        .layer(sentry_layer);
+        .layer(sentry_layer)
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()));
 
     let addr = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
 
@@ -302,6 +354,12 @@ async fn run_server() -> anyhow::Result<()> {
 }
 
 /// Simple path to check that the server is running
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "misc",
+    responses((status = 200, description = "Server is alive"))
+)]
 async fn health() -> &'static str {
     "alive"
 }

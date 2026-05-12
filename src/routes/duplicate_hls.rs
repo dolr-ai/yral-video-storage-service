@@ -59,7 +59,7 @@ impl IntoResponse for Error {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct HlsUploadParams {
     video_id: String,
     is_nsfw: bool,
@@ -158,6 +158,18 @@ async fn upload_hls_to_s3(
     Ok(())
 }
 
+#[utoipa::path(
+    post,
+    path = "/hls/duplicate",
+    tag = "videos",
+    params(HlsUploadParams),
+    request_body(content = Vec<u8>, content_type = "application/octet-stream", description = "HLS file bytes"),
+    responses(
+        (status = 200, description = "HLS file duplicated"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 #[tracing::instrument(skip_all)]
 pub async fn handler(
     State(state): State<AppState>,

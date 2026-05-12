@@ -43,6 +43,17 @@ impl IntoResponse for Error {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/move-to-nsfw",
+    tag = "videos",
+    request_body = storj_interface::move2nsfw::Args,
+    responses(
+        (status = 200, description = "Video moved to NSFW bucket"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 #[tracing::instrument(skip_all)]
 pub async fn handler(
     State(state): State<AppState>,
