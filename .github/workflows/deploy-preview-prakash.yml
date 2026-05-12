@@ -120,16 +120,6 @@ jobs:
           echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY_PRAKASH }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
-      - name: Clean up old preview containers on server_1
-        run: |
-          ssh-keyscan -H "${SERVER_1_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
-          ssh "deploy@${SERVER_1_IP}" "
-            docker ps -q --filter name=storj-interface-preview | xargs -r docker stop || true
-            docker ps -aq --filter name=storj-interface-preview | xargs -r docker rm || true
-            docker ps -q --filter name=yral-video-storage-service-storj-interface | xargs -r docker stop || true
-            docker ps -aq --filter name=yral-video-storage-service-storj-interface | xargs -r docker rm || true
-          "
-
       - name: Deploy HA to all nodes
         run: |
           declare -A SERVERS
@@ -196,7 +186,7 @@ jobs:
     uses: ./.github/workflows/e2e-tests.yml
     secrets: inherit
     with:
-      preview_url: https://storage-interface.prakash.yral.com
+      preview_url: ${{ env.PREVIEW_URL }}
       publisher: testuser-${{ github.sha }}
 
   destroy-preview:
@@ -218,8 +208,8 @@ jobs:
           ssh-keyscan -H ${{ env.SERVER_1_IP }} >> ~/.ssh/known_hosts 2>/dev/null || true
           ssh "deploy@${{ env.SERVER_1_IP }}" "
             cd ${{ env.APP_DIR }}/deploy 2>/dev/null || exit 0
-            docker compose -f docker-compose.ha.yml --profile app stop storj-interface || true
-            docker compose -f docker-compose.ha.yml --profile app rm -f storj-interface || true
+            COMPOSE_PROJECT_NAME=yral-video-storage-service docker compose -f docker-compose.ha.yml --profile app stop storj-interface || true
+            COMPOSE_PROJECT_NAME=yral-video-storage-service docker compose -f docker-compose.ha.yml --profile app rm -f storj-interface || true
           "
 
       - name: Delete preview image from GHCR

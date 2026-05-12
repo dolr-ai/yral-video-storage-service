@@ -47,10 +47,14 @@ docker exec -e PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD}" "${PATRONI_CONTAINER_
 docker exec -e PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD}" "${PATRONI_CONTAINER_ID}" \
   psql -U postgres -h 127.0.0.1 -c "GRANT ALL PRIVILEGES ON DATABASE video_fingerprint_index TO storj;" 2>/dev/null || true
 
-# Restore as superuser — required for SET commands, ownership, extensions in pg_dump output
+# Restore as superuser — required for SET commands, ownership, extensions in pg_dump output.
+# session_replication_role=replica disables FK triggers so tables load regardless of
+# dump order. The SET and -f run in the same psql session, so the setting persists.
 echo "Restoring ${BACKUP_FILE} ..."
 docker exec -i -e PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD}" "${PATRONI_CONTAINER_ID}" \
-  psql -U postgres -h 127.0.0.1 -d video_fingerprint_index < "${BACKUP_FILE}"
+  psql -U postgres -h 127.0.0.1 -d video_fingerprint_index \
+  -c "SET session_replication_role = replica;" \
+  -f - < "${BACKUP_FILE}"
 
 # Transfer ownership of all objects to storj
 docker exec -e PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD}" "${PATRONI_CONTAINER_ID}" \
