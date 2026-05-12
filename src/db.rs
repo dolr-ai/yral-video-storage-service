@@ -186,7 +186,9 @@ pub async fn upsert_hetzner_key(
     is_temp: bool,
 ) -> Result<(), tokio_postgres::Error> {
     // Atomic: upsert video_index, then upsert mirror_jobs.
-    // CTE ensures both run in one statement.
+    // RETURNING phash lets us set the correct initial status — if the video
+    // already has a phash we can skip straight to 'phash_computed' and avoid
+    // redundant re-download work in the phash job.
     client
         .execute(
             "WITH vi AS (
@@ -194,11 +196,19 @@ pub async fn upsert_hetzner_key(
                 VALUES ($1, $2)
                 ON CONFLICT (video_id) DO UPDATE
                 SET hetzner_key = EXCLUDED.hetzner_key
+                RETURNING phash
              )
-             INSERT INTO mirror_jobs (video_id, is_temp)
-             VALUES ($1, $3)
+             INSERT INTO mirror_jobs (video_id, is_temp, status)
+             SELECT $1, $3,
+                 CASE WHEN vi.phash IS NOT NULL THEN 'phash_computed' ELSE 'pending' END
+             FROM vi
              ON CONFLICT (video_id) DO UPDATE
-             SET is_temp = EXCLUDED.is_temp",
+             SET is_temp = EXCLUDED.is_temp,
+                 status = CASE
+                     WHEN mirror_jobs.status = 'pending'
+                     THEN EXCLUDED.status
+                     ELSE mirror_jobs.status
+                 END",
             &[&video_id, &hetzner_key, &is_temp],
         )
         .await?;
@@ -218,12 +228,19 @@ pub async fn upsert_hetzner_key_with_reset(
                 VALUES ($1, $2)
                 ON CONFLICT (video_id) DO UPDATE
                 SET hetzner_key = EXCLUDED.hetzner_key
+                RETURNING phash
              )
-             INSERT INTO mirror_jobs (video_id, is_temp)
-             VALUES ($1, $3)
+             INSERT INTO mirror_jobs (video_id, is_temp, status)
+             SELECT $1, $3,
+                 CASE WHEN vi.phash IS NOT NULL THEN 'phash_computed' ELSE 'pending' END
+             FROM vi
              ON CONFLICT (video_id) DO UPDATE
              SET is_temp = EXCLUDED.is_temp,
-                 status = CASE WHEN mirror_jobs.status = 'failed' THEN 'pending' ELSE mirror_jobs.status END,
+                 status = CASE
+                     WHEN mirror_jobs.status IN ('failed', 'pending')
+                     THEN EXCLUDED.status
+                     ELSE mirror_jobs.status
+                 END,
                  retry_count = CASE WHEN mirror_jobs.status = 'failed' THEN 0 ELSE mirror_jobs.retry_count END,
                  error_message = CASE WHEN mirror_jobs.status = 'failed' THEN NULL ELSE mirror_jobs.error_message END",
             &[&video_id, &hetzner_key, &is_temp],
