@@ -55,10 +55,13 @@ fi
 
 cd "${APP_DIR}"
 
-if [[ -n "${IMAGE_REF:-}" ]]; then
+if [[ "${RUN_APP:-false}" == "true" ]]; then
   docker compose -f docker-compose.ha.yml pull storj-interface || {
     echo "warning: pull failed, continuing with cached image" >&2
   }
+fi
+
+if [[ -n "${IMAGE_REF:-}" ]]; then
   docker compose -f docker-compose.ha.yml build patroni
   docker compose -f docker-compose.ha.yml up -d --no-build --remove-orphans
 else
