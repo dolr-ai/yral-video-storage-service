@@ -348,10 +348,10 @@ async fn run_server() -> anyhow::Result<()> {
             get(routes::videogen::get_all_status_by_principal).with_state(app_state.clone()),
         )
         .route("/health", get(health))
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(middleware::from_fn(sentry_utils::sentry_request_logger))
         .layer(cors)
-        .layer(sentry_layer)
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()));
+        .layer(sentry_layer);
 
     let addr = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
 
