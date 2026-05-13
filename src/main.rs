@@ -83,7 +83,6 @@ pub(crate) struct AppState {
         storj_interface::duplicate::Args,
         storj_interface::move2nsfw::Args,
         routes::duplicate::RawFinalizeBody,
-        routes::mirror::JobParams,
         routes::mirror::VideoEntry,
         routes::mirror::AuditResponse,
         routes::mirror::DuplicateEntry,
