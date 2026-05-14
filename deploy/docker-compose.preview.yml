@@ -1,0 +1,47 @@
+services:
+  storj-interface:
+    image: ${APP_IMAGE}:${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/video_fingerprint_index
+      STORJ_ACCESS_GRANT_SFW: ${STORJ_ACCESS_GRANT_SFW}
+      SFW_BUCKET: ${SFW_BUCKET:-yral-videos}
+      STORJ_ACCESS_GRANT_NSFW: ${STORJ_ACCESS_GRANT_NSFW}
+      NSFW_BUCKET: ${NSFW_BUCKET:-yral-nsfw-videos}
+      HETZNER_S3_ENDPOINT: ${HETZNER_S3_ENDPOINT}
+      HETZNER_S3_BUCKET: ${HETZNER_S3_BUCKET}
+      HETZNER_S3_ACCESS_KEY: ${HETZNER_S3_ACCESS_KEY}
+      HETZNER_S3_SECRET_KEY: ${HETZNER_S3_SECRET_KEY}
+      HETZNER_S3_REGION: ${HETZNER_S3_REGION:-eu-central}
+      SERVICE_SECRET_TOKEN: ${SERVICE_SECRET_TOKEN}
+      ENVIRONMENT: ${ENVIRONMENT:-staging}
+      STORJ_EU1_GATEWAY_ACCESS_KEY: ${STORJ_EU1_GATEWAY_ACCESS_KEY}
+      STORJ_EU1_GATEWAY_SECRET_KEY: ${STORJ_EU1_GATEWAY_SECRET_KEY}
+      STORJ_MIRROR_ACCESS_GRANT: ${STORJ_MIRROR_ACCESS_GRANT}
+    networks:
+      - storj-net
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: video_fingerprint_index
+      POSTGRES_USER: storj
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    networks:
+      - storj-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U storj -d video_fingerprint_index"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+networks:
+  storj-net:
+    driver: bridge

@@ -1,24 +1,23 @@
-name: Deploy HA to Bare Metal
+name: Deploy (Prakash)
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
 
-# Never cancel an in-progress deploy — a partial deploy leaves the cluster inconsistent
 concurrency:
-  group: deploy-baremetal
+  group: deploy-prakash-main
   cancel-in-progress: false
 
 env:
   DOCKER_REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  APP_DIR: /home/deploy/storj-interface
   SERVER_1_IP: 94.130.13.115
   SERVER_2_IP: 88.99.151.102
   SERVER_3_IP: 138.201.129.173
-  HOST_PORT: 3004
+  APP_DIR: /home/deploy/storj-interface
+  HOST_PORT: 3005
+  PREVIEW_URL: https://storage-interface.prakash.yral.com
 
 jobs:
   build-and-push:
@@ -28,12 +27,41 @@ jobs:
       contents: read
       packages: write
 
-    outputs:
-      image_tag: ${{ github.sha }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install ffmpeg dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
+            libavfilter-dev libavdevice-dev libswresample-dev \
+            clang pkg-config
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy -- -D warnings
+
+      - name: Test
+        run: cargo test
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -45,28 +73,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,format=long,prefix=
-            type=raw,value=latest
-
       - name: Build and push image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./deploy/Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:cache-main
+          cache-to: type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:cache-main,mode=max
 
   deploy:
-    name: Deploy HA Cluster
+    name: Deploy HA to All Nodes
     needs: [build-and-push]
     runs-on: ubuntu-latest
     environment: Deployment
@@ -79,8 +99,8 @@ jobs:
       REPLICATOR_PASSWORD: ${{ secrets.REPLICATOR_PASSWORD }}
       APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
       PATRONI_API_PASSWORD: ${{ secrets.PATRONI_API_PASSWORD }}
-      # App-specific secrets (only consumed by storj-interface on server_1)
       STORJ_ACCESS_GRANT: ${{ secrets.STORJ_ACCESS_GRANT }}
+      STORJ_ACCESS_GRANT_NSFW: ${{ secrets.STORJ_ACCESS_GRANT_NSFW }}
       HETZNER_S3_ENDPOINT: ${{ secrets.HETZNER_S3_ENDPOINT }}
       HETZNER_S3_BUCKET: ${{ secrets.HETZNER_S3_BUCKET }}
       HETZNER_S3_ACCESS_KEY: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
@@ -101,7 +121,7 @@ jobs:
           echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY_PRAKASH }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
-      - name: Deploy to all nodes
+      - name: Deploy HA to all nodes
         run: |
           declare -A SERVERS
           SERVERS=(["server_1"]="${SERVER_1_IP}" ["server_2"]="${SERVER_2_IP}" ["server_3"]="${SERVER_3_IP}")
@@ -111,7 +131,7 @@ jobs:
             echo "--> ${NODE_NAME} (${NODE_IP})"
             ssh-keyscan -H "${NODE_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-            ssh "deploy@${NODE_IP}" "mkdir -p ${APP_DIR}/deploy"
+            ssh "deploy@${NODE_IP}" "mkdir -p ${APP_DIR}"
             scp -r deploy "deploy@${NODE_IP}:${APP_DIR}/"
 
             RUN_APP=false
@@ -121,7 +141,7 @@ jobs:
             if [[ "${RUN_APP}" == "true" ]]; then
               APP_VARS="\
                 export STORJ_ACCESS_GRANT_SFW='${STORJ_ACCESS_GRANT}'; \
-                export STORJ_ACCESS_GRANT_NSFW='${STORJ_ACCESS_GRANT}'; \
+                export STORJ_ACCESS_GRANT_NSFW='${STORJ_ACCESS_GRANT_NSFW}'; \
                 export HETZNER_S3_ENDPOINT='${HETZNER_S3_ENDPOINT}'; \
                 export HETZNER_S3_BUCKET='${HETZNER_S3_BUCKET}'; \
                 export HETZNER_S3_ACCESS_KEY='${HETZNER_S3_ACCESS_KEY}'; \
@@ -154,8 +174,37 @@ jobs:
 
       - name: Health check
         run: |
-          sleep 15
-          curl --fail --retry 5 --retry-delay 5 https://storj-interface.yral.com/health
+          ssh-keyscan -H "${SERVER_1_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh "deploy@${SERVER_1_IP}" \
+            "curl --fail --retry 30 --retry-delay 5 --retry-all-errors \
+              http://localhost:${HOST_PORT}/health" || \
+          (ssh "deploy@${SERVER_1_IP}" \
+            "cd ${APP_DIR}/deploy && COMPOSE_PROJECT_NAME=yral-video-storage-service docker compose -f docker-compose.ha.yml logs --tail=50 storj-interface 2>/dev/null" && exit 1)
+
+      - name: Route smoke check
+        run: |
+          curl --fail --retry 30 --retry-delay 5 --retry-all-errors \
+            "${PREVIEW_URL}/api-docs/openapi.json" >/tmp/openapi.json
+
+          STATUS_CODE="$(curl --silent --show-error \
+            --output /tmp/videogen-status-response.txt \
+            --write-out "%{http_code}" \
+            "${PREVIEW_URL}/api/v2/videogen/status/not-a-principal/all")"
+
+          if [[ "${STATUS_CODE}" != "400" ]]; then
+            echo "expected videogen invalid principal route to return 400, got ${STATUS_CODE}"
+            cat /tmp/videogen-status-response.txt
+            exit 1
+          fi
+
+  e2e-tests:
+    name: E2E Tests
+    needs: deploy
+    uses: ./.github/workflows/e2e-tests.yml
+    secrets: inherit
+    with:
+      preview_url: https://storage-interface.prakash.yral.com
+      publisher: testuser-${{ github.sha }}
 
   deployment-summary:
     name: Deployment Summary
@@ -167,8 +216,9 @@ jobs:
     steps:
       - name: Summary
         run: |
-          echo "## HA Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## Production Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "**Status:** ${{ needs.deploy.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Image:** ghcr.io/${{ github.repository }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Nodes:** server_1 (${SERVER_1_IP}), server_2 (${SERVER_2_IP}), server_3 (${SERVER_3_IP})" >> $GITHUB_STEP_SUMMARY
-          echo "**App:** server_1 only (port ${HOST_PORT})" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** ${{ env.PREVIEW_URL }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Nodes:** server_1 (${{ env.SERVER_1_IP }}), server_2 (${{ env.SERVER_2_IP }}), server_3 (${{ env.SERVER_3_IP }})" >> $GITHUB_STEP_SUMMARY
+          echo "**App:** server_1 only (port ${{ env.HOST_PORT }})" >> $GITHUB_STEP_SUMMARY

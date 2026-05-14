@@ -12,15 +12,69 @@ permissions:
   deployments: write
 
 jobs:
-  build_binary:
+  build-and-push:
     if: ${{ github.event.pull_request.state == 'open' }}
-    uses: ./.github/workflows/build-binary.yml
-    with:
-      publish-artifact: true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install ffmpeg dev libraries
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
+            libavfilter-dev libavdevice-dev libswresample-dev \
+            clang pkg-config
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./deploy/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:pr-${{ github.event.number }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:cache-pr-${{ github.event.number }}
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:cache-pr-${{ github.event.number }},mode=max
 
   preview:
     if: ${{ github.event.pull_request.state == 'open' }}
-    needs: build_binary
+    needs: build-and-push
     runs-on: ubuntu-latest
 
     outputs:
@@ -47,7 +101,7 @@ jobs:
           IMAGE_TAG="pr-${PR_NUMBER}"
           PREVIEW_DOMAIN="pr-${PR_NUMBER}-${REPO_NAME}.preview.yral.com"
           PREVIEW_URL="https://${PREVIEW_DOMAIN}"
-          APP_NAME="pr-${PR_NUMBER}-${REPO_NAME}"
+          SERVICE_NAME="pr-${PR_NUMBER}-${REPO_NAME}"
 
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "repo_name=${REPO_NAME}" >> "$GITHUB_OUTPUT"
@@ -55,38 +109,7 @@ jobs:
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "preview_domain=${PREVIEW_DOMAIN}" >> "$GITHUB_OUTPUT"
           echo "preview_url=${PREVIEW_URL}" >> "$GITHUB_OUTPUT"
-          echo "app_name=${APP_NAME}" >> "$GITHUB_OUTPUT"
-
-      - name: Download build
-        uses: actions/download-artifact@v4
-        with:
-          name: built-binary
-
-      - name: Place binary in expected path
-        run: |
-          mkdir -p target/x86_64-unknown-linux-musl/release
-          mv storj-interface target/x86_64-unknown-linux-musl/release/storj-interface
-          chmod +x target/x86_64-unknown-linux-musl/release/storj-interface
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./deploy/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.image_tag }}
-          cache-from: type=registry,ref=${{ steps.meta.outputs.image }}:cache-${{ steps.meta.outputs.image_tag }}
-          cache-to: type=registry,ref=${{ steps.meta.outputs.image }}:cache-${{ steps.meta.outputs.image_tag }},mode=max
+          echo "service_name=${SERVICE_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Import Coolify Secrets from Vault
         uses: hashicorp/vault-action@v3
@@ -101,55 +124,60 @@ jobs:
             secret/data/COOLIFY_SERVER_UUID value | COOLIFY_SERVER_UUID ;
             secret/data/COOLIFY_ENV_UUID value | COOLIFY_ENV_UUID ;
 
-      - name: Create or Get Coolify Application
-        id: coolify_app
+      - name: Create or Get Coolify Service
+        id: coolify_service
         run: |
-          APP_NAME="${{ steps.meta.outputs.app_name }}"
+          SERVICE_NAME="${{ steps.meta.outputs.service_name }}"
           IMAGE="${{ steps.meta.outputs.image }}"
           IMAGE_TAG="${{ steps.meta.outputs.image_tag }}"
           PREVIEW_DOMAIN="${{ steps.meta.outputs.preview_domain }}"
+          COMPOSE_CONTENT=$(cat deploy/docker-compose.preview.yml)
 
           EXISTING=$(curl -s \
-            "https://coolify.yral.com/api/v1/applications" \
+            "https://coolify.yral.com/api/v1/services" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-            | jq -r --arg name "$APP_NAME" '.[] | select(.name == $name) | .uuid // empty')
+            | jq -r --arg name "$SERVICE_NAME" '.[] | select(.name == $name) | .uuid // empty')
 
           if [ -n "$EXISTING" ]; then
-            echo "Reusing existing Coolify app: $EXISTING"
-            echo "app_uuid=${EXISTING}" >> "$GITHUB_OUTPUT"
+            echo "Reusing existing Coolify service: $EXISTING"
+            echo "service_uuid=${EXISTING}" >> "$GITHUB_OUTPUT"
           else
             RESPONSE=$(curl -s -X POST \
-              "https://coolify.yral.com/api/v1/applications/dockerimage" \
+              "https://coolify.yral.com/api/v1/services" \
               -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
               -H "Content-Type: application/json" \
-              -d "{
-                \"name\": \"${APP_NAME}\",
-                \"project_uuid\": \"${COOLIFY_PROJECT_UUID}\",
-                \"server_uuid\": \"${COOLIFY_SERVER_UUID}\",
-                \"environment_name\": \"preview\",
-                \"environment_uuid\": \"${COOLIFY_ENV_UUID}\",
-                \"docker_registry_image_name\": \"${IMAGE}\",
-                \"docker_registry_image_tag\": \"${IMAGE_TAG}\",
-                \"domains\": \"https://${PREVIEW_DOMAIN}\",
-                \"ports_exposes\": \"3000\",
-                \"is_static\": false
-              }")
+              -d "$(jq -n \
+                --arg name "$SERVICE_NAME" \
+                --arg project_uuid "$COOLIFY_PROJECT_UUID" \
+                --arg server_uuid "$COOLIFY_SERVER_UUID" \
+                --arg fqdns "https://${PREVIEW_DOMAIN}" \
+                --arg compose "$COMPOSE_CONTENT" \
+                '{
+                  "type": "dockercompose",
+                  "name": $name,
+                  "project_uuid": $project_uuid,
+                  "server_uuid": $server_uuid,
+                  "environment_name": "preview",
+                  "instant_deploy": false,
+                  "fqdns": $fqdns,
+                  "docker_compose_raw": $compose
+                }')")
 
-            APP_UUID=$(echo "$RESPONSE" | jq -r '.uuid // empty')
+            SERVICE_UUID=$(echo "$RESPONSE" | jq -r '.uuid // empty')
 
-            if [ -z "$APP_UUID" ]; then
-              echo "Failed to create Coolify application"
+            if [ -z "$SERVICE_UUID" ]; then
+              echo "Failed to create Coolify service"
               echo "$RESPONSE"
               exit 1
             fi
 
-            echo "app_uuid=${APP_UUID}" >> "$GITHUB_OUTPUT"
+            echo "service_uuid=${SERVICE_UUID}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Push Environment Variables
         env:
           STORJ_ACCESS_GRANT_SFW: ${{ secrets.STORJ_ACCESS_GRANT }}
-          STORJ_ACCESS_GRANT_NSFW: ${{ secrets.STORJ_ACCESS_GRANT }}
+          STORJ_ACCESS_GRANT_NSFW: ${{ secrets.STORJ_ACCESS_GRANT_NSFW }}
           SFW_BUCKET: yral-videos
           NSFW_BUCKET: yral-nsfw-videos
           SERVICE_SECRET_TOKEN: ${{ secrets.SERVICE_SECRET_TOKEN }}
@@ -158,11 +186,19 @@ jobs:
           HETZNER_S3_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
           HETZNER_S3_BUCKET: ${{ secrets.HETZNER_S3_BUCKET }}
           HETZNER_S3_REGION: ${{ secrets.HETZNER_S3_REGION }}
+          STORJ_EU1_GATEWAY_ACCESS_KEY: ${{ secrets.STORJ_EU1_GATEWAY_ACCESS_KEY }}
+          STORJ_EU1_GATEWAY_SECRET_KEY: ${{ secrets.STORJ_EU1_GATEWAY_SECRET_KEY }}
+          STORJ_MIRROR_ACCESS_GRANT: ${{ secrets.STORJ_MIRROR_ACCESS_GRANT }}
           ENVIRONMENT: staging
         run: |
-          APP_UUID="${{ steps.coolify_app.outputs.app_uuid }}"
+          SERVICE_UUID="${{ steps.coolify_service.outputs.service_uuid }}"
+          IMAGE="${{ steps.meta.outputs.image }}"
+          IMAGE_TAG="${{ steps.meta.outputs.image_tag }}"
 
           ENV_JSON=$(jq -n \
+            --arg app_image "$IMAGE" \
+            --arg image_tag "$IMAGE_TAG" \
+            --arg postgres_password "preview_$(echo "$SERVICE_UUID" | cut -c1-8)" \
             --arg storj_access_grant_sfw "$STORJ_ACCESS_GRANT_SFW" \
             --arg storj_access_grant_nsfw "$STORJ_ACCESS_GRANT_NSFW" \
             --arg sfw_bucket "$SFW_BUCKET" \
@@ -173,9 +209,15 @@ jobs:
             --arg hetzner_s3_secret_key "$HETZNER_S3_SECRET_KEY" \
             --arg hetzner_s3_bucket "$HETZNER_S3_BUCKET" \
             --arg hetzner_s3_region "$HETZNER_S3_REGION" \
+            --arg storj_eu1_gateway_access_key "$STORJ_EU1_GATEWAY_ACCESS_KEY" \
+            --arg storj_eu1_gateway_secret_key "$STORJ_EU1_GATEWAY_SECRET_KEY" \
+            --arg storj_mirror_access_grant "$STORJ_MIRROR_ACCESS_GRANT" \
             --arg environment "$ENVIRONMENT" \
             '{
               "data": [
+                {"key": "APP_IMAGE", "value": $app_image, "is_literal": true},
+                {"key": "IMAGE_TAG", "value": $image_tag, "is_literal": true},
+                {"key": "POSTGRES_PASSWORD", "value": $postgres_password, "is_literal": true},
                 {"key": "STORJ_ACCESS_GRANT_SFW", "value": $storj_access_grant_sfw, "is_literal": true},
                 {"key": "STORJ_ACCESS_GRANT_NSFW", "value": $storj_access_grant_nsfw, "is_literal": true},
                 {"key": "SFW_BUCKET", "value": $sfw_bucket, "is_literal": true},
@@ -186,12 +228,15 @@ jobs:
                 {"key": "HETZNER_S3_SECRET_KEY", "value": $hetzner_s3_secret_key, "is_literal": true},
                 {"key": "HETZNER_S3_BUCKET", "value": $hetzner_s3_bucket, "is_literal": true},
                 {"key": "HETZNER_S3_REGION", "value": $hetzner_s3_region, "is_literal": true},
+                {"key": "STORJ_EU1_GATEWAY_ACCESS_KEY", "value": $storj_eu1_gateway_access_key, "is_literal": true},
+                {"key": "STORJ_EU1_GATEWAY_SECRET_KEY", "value": $storj_eu1_gateway_secret_key, "is_literal": true},
+                {"key": "STORJ_MIRROR_ACCESS_GRANT", "value": $storj_mirror_access_grant, "is_literal": true},
                 {"key": "ENVIRONMENT", "value": $environment, "is_literal": true}
               ]
             }')
 
           RESPONSE=$(curl -s -o /tmp/coolify-env-response.txt -w "%{http_code}" -X PATCH \
-            "https://coolify.yral.com/api/v1/applications/${APP_UUID}/envs/bulk" \
+            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}/envs/bulk" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "${ENV_JSON}")
@@ -202,70 +247,36 @@ jobs:
             exit 1
           fi
 
-      - name: Update Image Tag and Deploy
-        id: deploy
+      - name: Deploy
         run: |
-          APP_UUID="${{ steps.coolify_app.outputs.app_uuid }}"
-          IMAGE_TAG="${{ steps.meta.outputs.image_tag }}"
+          SERVICE_UUID="${{ steps.coolify_service.outputs.service_uuid }}"
 
-          UPDATE_RESPONSE=$(curl -s -o /tmp/coolify-app-response.txt -w "%{http_code}" -X PATCH \
-            "https://coolify.yral.com/api/v1/applications/${APP_UUID}" \
+          RESPONSE=$(curl -s -o /tmp/coolify-deploy-response.txt -w "%{http_code}" -X POST \
+            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}/start" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"docker_registry_image_tag\": \"${IMAGE_TAG}\"}")
+            -H "Content-Type: application/json")
 
-          if [ "$UPDATE_RESPONSE" -lt 200 ] || [ "$UPDATE_RESPONSE" -ge 300 ]; then
-            echo "Failed to update Coolify image tag (HTTP $UPDATE_RESPONSE)"
-            cat /tmp/coolify-app-response.txt
+          if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
+            echo "Failed to start Coolify service (HTTP $RESPONSE)"
+            cat /tmp/coolify-deploy-response.txt
             exit 1
           fi
 
-          RESPONSE=$(curl -s -X POST \
-            "https://coolify.yral.com/api/v1/applications/${APP_UUID}/start" \
-            -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"uuid\": \"${APP_UUID}\",
-              \"force\": true
-            }")
+      - name: Route smoke check
+        run: |
+          curl --fail --retry 30 --retry-delay 10 --retry-all-errors \
+            "${{ steps.meta.outputs.preview_url }}/api-docs/openapi.json" >/dev/null
 
-          DEPLOY_UUID=$(echo "$RESPONSE" | jq -r '.deployment_uuid // empty')
-          if [ -z "$DEPLOY_UUID" ]; then
-            echo "Failed to trigger deployment"
-            echo "$RESPONSE"
+          STATUS_CODE="$(curl --silent \
+            --output /tmp/videogen-status-response.txt \
+            --write-out "%{http_code}" \
+            "${{ steps.meta.outputs.preview_url }}/api/v2/videogen/status/not-a-principal/all")"
+
+          if [[ "${STATUS_CODE}" != "400" ]]; then
+            echo "expected videogen invalid principal route to return 400, got ${STATUS_CODE}"
+            cat /tmp/videogen-status-response.txt
             exit 1
           fi
-
-          echo "deploy_uuid=${DEPLOY_UUID}" >> "$GITHUB_OUTPUT"
-
-      - name: Wait for Deployment
-        run: |
-          DEPLOY_UUID="${{ steps.deploy.outputs.deploy_uuid }}"
-          MAX_WAIT=180
-          WAITED=0
-
-          while [ "$WAITED" -lt "$MAX_WAIT" ]; do
-            STATUS=$(curl -s \
-              "https://coolify.yral.com/api/v1/deployments/${DEPLOY_UUID}" \
-              -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-              | jq -r '.status // empty')
-
-            echo "Status: ${STATUS} (${WAITED}s elapsed)"
-
-            if [ "$STATUS" = "finished" ]; then
-              exit 0
-            fi
-
-            if [ "$STATUS" = "failed" ] || [ "$STATUS" = "error" ]; then
-              exit 1
-            fi
-
-            sleep 10
-            WAITED=$((WAITED + 10))
-          done
-
-          echo "Timed out waiting for Coolify deployment"
-          exit 1
 
   destroy_preview:
     if: ${{ github.event.pull_request.state == 'closed' }}
@@ -277,9 +288,9 @@ jobs:
         run: |
           PR_NUMBER=${{ github.event.number }}
           REPO_NAME=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
-          APP_NAME="pr-${PR_NUMBER}-${REPO_NAME}"
+          SERVICE_NAME="pr-${PR_NUMBER}-${REPO_NAME}"
 
-          echo "app_name=${APP_NAME}" >> "$GITHUB_OUTPUT"
+          echo "service_name=${SERVICE_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Import Coolify Secrets from Vault
         uses: hashicorp/vault-action@v3
@@ -290,30 +301,29 @@ jobs:
           jwtGithubAudience: "https://github.com/dolr-ai"
           secrets: |
             secret/data/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
-            secret/data/COOLIFY_PROJECT_UUID value | COOLIFY_PROJECT_UUID ;
-            secret/data/COOLIFY_SERVER_UUID value | COOLIFY_SERVER_UUID ;
-            secret/data/COOLIFY_ENV_UUID value | COOLIFY_ENV_UUID ;
 
-      - name: Find and Delete Coolify Application
+      - name: Find and Delete Coolify Service
         run: |
-          APP_NAME="${{ steps.meta.outputs.app_name }}"
+          SERVICE_NAME="${{ steps.meta.outputs.service_name }}"
 
-          APP_UUID=$(curl -s \
-            "https://coolify.yral.com/api/v1/applications" \
+          SERVICE_UUID=$(curl -s \
+            "https://coolify.yral.com/api/v1/services" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-            | jq -r --arg name "$APP_NAME" '.[] | select(.name == $name) | .uuid // empty')
+            | jq -r --arg name "$SERVICE_NAME" '.[] | select(.name == $name) | .uuid // empty')
 
-          if [ -z "$APP_UUID" ]; then
-            echo "No Coolify app found for ${APP_NAME}; skipping"
+          if [ -z "$SERVICE_UUID" ]; then
+            echo "No Coolify service found for ${SERVICE_NAME}; skipping"
             exit 0
           fi
 
           RESPONSE=$(curl -s -o /tmp/coolify-delete-response.txt -w "%{http_code}" -X DELETE \
-            "https://coolify.yral.com/api/v1/applications/${APP_UUID}" \
-            -H "Authorization: Bearer ${COOLIFY_TOKEN}")
+            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}" \
+            -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"delete_configurations": true, "delete_volumes": true}')
 
           if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
-            echo "Failed to delete Coolify application ${APP_NAME} (HTTP $RESPONSE)"
+            echo "Failed to delete Coolify service ${SERVICE_NAME} (HTTP $RESPONSE)"
             cat /tmp/coolify-delete-response.txt
             exit 1
           fi
