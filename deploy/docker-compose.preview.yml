@@ -14,7 +14,7 @@ services:
       - "traefik.http.routers.${SERVICE_NAME}.tls.certresolver=letsencrypt"
       - "traefik.http.services.${SERVICE_NAME}.loadbalancer.server.port=3000"
     environment:
-      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL: postgres://storj:storjpreview@postgres:5432/video_fingerprint_index
       STORJ_ACCESS_GRANT_SFW: ${STORJ_ACCESS_GRANT_SFW}
       SFW_BUCKET: ${SFW_BUCKET}
       STORJ_ACCESS_GRANT_NSFW: ${STORJ_ACCESS_GRANT_NSFW}
@@ -38,7 +38,7 @@ services:
     environment:
       POSTGRES_DB: video_fingerprint_index
       POSTGRES_USER: storj
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: storjpreview
     networks:
       - storj-net
     restart: unless-stopped

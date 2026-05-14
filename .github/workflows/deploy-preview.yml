@@ -122,15 +122,11 @@ jobs:
             secret/data/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
             secret/data/COOLIFY_PROJECT_UUID value | COOLIFY_PROJECT_UUID ;
             secret/data/COOLIFY_SERVER_UUID value | COOLIFY_SERVER_UUID ;
-            secret/data/COOLIFY_ENV_UUID value | COOLIFY_ENV_UUID ;
 
       - name: Create or Get Coolify Service
         id: coolify_service
         run: |
           SERVICE_NAME="${{ steps.meta.outputs.service_name }}"
-          IMAGE="${{ steps.meta.outputs.image }}"
-          IMAGE_TAG="${{ steps.meta.outputs.image_tag }}"
-          PREVIEW_DOMAIN="${{ steps.meta.outputs.preview_domain }}"
           COMPOSE_CONTENT=$(base64 -w 0 deploy/docker-compose.preview.yml)
 
           EXISTING=$(curl -s \
@@ -192,13 +188,12 @@ jobs:
           IMAGE="${{ steps.meta.outputs.image }}"
           IMAGE_TAG="${{ steps.meta.outputs.image_tag }}"
 
-          export POSTGRES_PASSWORD="preview_$(echo "$SERVICE_UUID" | cut -c1-8)"
-          export DATABASE_URL="postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/video_fingerprint_index"
           export APP_IMAGE="$IMAGE"
           export IMAGE_TAG="$IMAGE_TAG"
           export PREVIEW_DOMAIN="${{ steps.meta.outputs.preview_domain }}"
           export SERVICE_NAME="${{ steps.meta.outputs.service_name }}"
           # SFW_BUCKET, NSFW_BUCKET, HETZNER_* and other secrets are already in env via step env: block
+          # DATABASE_URL and POSTGRES_PASSWORD are hardcoded in docker-compose.preview.yml
 
           # Substitute all ${VAR} in compose with actual values and PATCH Coolify.
           # Coolify stores docker_compose_raw verbatim — it does NOT interpolate ${VAR} itself,
@@ -218,8 +213,6 @@ jobs:
           ENV_JSON=$(jq -n \
             --arg app_image "$IMAGE" \
             --arg image_tag "$IMAGE_TAG" \
-            --arg postgres_password "$POSTGRES_PASSWORD" \
-            --arg database_url "$DATABASE_URL" \
             --arg preview_domain "${{ steps.meta.outputs.preview_domain }}" \
             --arg service_name "${{ steps.meta.outputs.service_name }}" \
             --arg storj_access_grant_sfw "$STORJ_ACCESS_GRANT_SFW" \
@@ -240,8 +233,6 @@ jobs:
               "data": [
                 {"key": "APP_IMAGE", "value": $app_image, "is_literal": true},
                 {"key": "IMAGE_TAG", "value": $image_tag, "is_literal": true},
-                {"key": "POSTGRES_PASSWORD", "value": $postgres_password, "is_literal": true},
-                {"key": "DATABASE_URL", "value": $database_url, "is_literal": true},
                 {"key": "PREVIEW_DOMAIN", "value": $preview_domain, "is_literal": true},
                 {"key": "SERVICE_NAME", "value": $service_name, "is_literal": true},
                 {"key": "STORJ_ACCESS_GRANT_SFW", "value": $storj_access_grant_sfw, "is_literal": true},
@@ -297,21 +288,6 @@ jobs:
             cat /tmp/coolify-deploy-response.txt
             exit 1
           fi
-
-      - name: Debug - service state after restart
-        run: |
-          SERVICE_UUID="${{ steps.coolify_service.outputs.service_uuid }}"
-          sleep 20
-
-          echo "=== Coolify service status ==="
-          curl -s \
-            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}" \
-            -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-            | jq '{status, name, docker_compose_raw}'
-
-          echo "=== Verbose HTTP probe (shows TLS/TCP/HTTP layer) ==="
-          curl -v --insecure --max-time 15 \
-            "${{ steps.meta.outputs.preview_url }}/health" 2>&1 || true
 
       - name: Route smoke check
         run: |
