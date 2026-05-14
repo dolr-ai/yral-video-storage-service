@@ -5,8 +5,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    ports:
-      - "3000:3000"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.${SERVICE_NAME}.rule=Host(`${PREVIEW_DOMAIN}`)"
+      - "traefik.http.routers.${SERVICE_NAME}.entrypoints=https"
+      - "traefik.http.routers.${SERVICE_NAME}.tls=true"
+      - "traefik.http.routers.${SERVICE_NAME}.tls.certresolver=letsencrypt"
+      - "traefik.http.services.${SERVICE_NAME}.loadbalancer.server.port=3000"
     environment:
       DATABASE_URL: postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/video_fingerprint_index
       STORJ_ACCESS_GRANT_SFW: ${STORJ_ACCESS_GRANT_SFW}
@@ -25,6 +30,7 @@ services:
       STORJ_MIRROR_ACCESS_GRANT: ${STORJ_MIRROR_ACCESS_GRANT}
     networks:
       - storj-net
+      - coolify
 
   postgres:
     image: postgres:16-alpine
@@ -45,3 +51,5 @@ services:
 networks:
   storj-net:
     driver: bridge
+  coolify:
+    external: true

@@ -150,7 +150,6 @@ jobs:
                 --arg name "$SERVICE_NAME" \
                 --arg project_uuid "$COOLIFY_PROJECT_UUID" \
                 --arg server_uuid "$COOLIFY_SERVER_UUID" \
-                --arg fqdns "https://${PREVIEW_DOMAIN}" \
                 --arg compose "$COMPOSE_CONTENT" \
                 '{
                   "type": "dockercompose",
@@ -159,7 +158,6 @@ jobs:
                   "server_uuid": $server_uuid,
                   "environment_name": "preview",
                   "instant_deploy": false,
-                  "fqdns": $fqdns,
                   "docker_compose_raw": $compose
                 }')")
 
@@ -199,6 +197,8 @@ jobs:
             --arg app_image "$IMAGE" \
             --arg image_tag "$IMAGE_TAG" \
             --arg postgres_password "preview_$(echo "$SERVICE_UUID" | cut -c1-8)" \
+            --arg preview_domain "${{ steps.meta.outputs.preview_domain }}" \
+            --arg service_name "${{ steps.meta.outputs.service_name }}" \
             --arg storj_access_grant_sfw "$STORJ_ACCESS_GRANT_SFW" \
             --arg storj_access_grant_nsfw "$STORJ_ACCESS_GRANT_NSFW" \
             --arg sfw_bucket "$SFW_BUCKET" \
@@ -218,6 +218,8 @@ jobs:
                 {"key": "APP_IMAGE", "value": $app_image, "is_literal": true},
                 {"key": "IMAGE_TAG", "value": $image_tag, "is_literal": true},
                 {"key": "POSTGRES_PASSWORD", "value": $postgres_password, "is_literal": true},
+                {"key": "PREVIEW_DOMAIN", "value": $preview_domain, "is_literal": true},
+                {"key": "SERVICE_NAME", "value": $service_name, "is_literal": true},
                 {"key": "STORJ_ACCESS_GRANT_SFW", "value": $storj_access_grant_sfw, "is_literal": true},
                 {"key": "STORJ_ACCESS_GRANT_NSFW", "value": $storj_access_grant_nsfw, "is_literal": true},
                 {"key": "SFW_BUCKET", "value": $sfw_bucket, "is_literal": true},
