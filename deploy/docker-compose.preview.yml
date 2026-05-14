@@ -41,6 +41,7 @@ services:
       POSTGRES_DB: video_fingerprint_index
       POSTGRES_USER: storj
       POSTGRES_PASSWORD: storjpreview
+      POSTGRES_HOST_AUTH_METHOD: trust
     networks:
       - storj-net
     restart: unless-stopped
