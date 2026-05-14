@@ -277,15 +277,23 @@ jobs:
         run: |
           SERVICE_UUID="${{ steps.coolify_service.outputs.service_uuid }}"
 
-          # Use restart so existing containers get stopped and restarted with updated env vars.
-          # /start on an already-running service may be a no-op.
+          # Stop first so /start does `docker compose up --detach` (recreates containers
+          # from the patched compose). /restart calls `docker compose restart` which reuses
+          # cached container config and ignores compose changes.
+          curl -s -X POST \
+            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}/stop" \
+            -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+            -H "Content-Type: application/json" >/dev/null || true
+
+          sleep 10
+
           RESPONSE=$(curl -s -o /tmp/coolify-deploy-response.txt -w "%{http_code}" -X POST \
-            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}/restart" \
+            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}/start" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
             -H "Content-Type: application/json")
 
           if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
-            echo "Failed to restart Coolify service (HTTP $RESPONSE)"
+            echo "Failed to start Coolify service (HTTP $RESPONSE)"
             cat /tmp/coolify-deploy-response.txt
             exit 1
           fi
