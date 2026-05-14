@@ -129,16 +129,26 @@ jobs:
           SERVICE_NAME="${{ steps.meta.outputs.service_name }}"
           COMPOSE_CONTENT=$(base64 -w 0 deploy/docker-compose.preview.yml)
 
+          # Always delete and recreate so postgres gets a fresh volume and
+          # the new compose (tmpfs, updated image) is fully applied. Coolify's
+          # stop/start reuses existing containers and does not pick up compose
+          # changes, so reuse causes stale password/config issues.
           EXISTING=$(curl -s \
             "https://coolify.yral.com/api/v1/services" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
             | jq -r --arg name "$SERVICE_NAME" '.[] | select(.name == $name) | .uuid // empty')
 
           if [ -n "$EXISTING" ]; then
-            echo "Reusing existing Coolify service: $EXISTING"
-            echo "service_uuid=${EXISTING}" >> "$GITHUB_OUTPUT"
-          else
-            RESPONSE=$(curl -s -X POST \
+            echo "Deleting existing service ${EXISTING} for clean recreation..."
+            curl -s -X DELETE \
+              "https://coolify.yral.com/api/v1/services/${EXISTING}" \
+              -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d '{"delete_configurations": true, "delete_volumes": true}' > /dev/null
+            sleep 5
+          fi
+
+          RESPONSE=$(curl -s -X POST \
               "https://coolify.yral.com/api/v1/services" \
               -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
               -H "Content-Type: application/json" \
@@ -165,7 +175,6 @@ jobs:
             fi
 
             echo "service_uuid=${SERVICE_UUID}" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Push Environment Variables
         env:
