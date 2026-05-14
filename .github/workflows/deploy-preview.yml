@@ -243,7 +243,6 @@ jobs:
                 {"key": "APP_IMAGE", "value": $app_image, "is_literal": true},
                 {"key": "IMAGE_TAG", "value": $image_tag, "is_literal": true},
                 {"key": "POSTGRES_HOST_AUTH_METHOD", "value": "trust", "is_literal": true},
-                {"key": "POSTGRES_INITDB_ARGS", "value": "--auth-host=trust --auth-local=trust", "is_literal": true},
                 {"key": "DATABASE_URL", "value": "postgres://storj@postgres:5432/video_fingerprint_index", "is_literal": true},
                 {"key": "PREVIEW_DOMAIN", "value": $preview_domain, "is_literal": true},
                 {"key": "SERVICE_NAME", "value": $service_name, "is_literal": true},

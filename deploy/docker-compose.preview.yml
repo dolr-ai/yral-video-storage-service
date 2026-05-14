@@ -37,11 +37,16 @@ services:
     image: postgres:16-alpine
     tmpfs:
       - /var/lib/postgresql/data
+    entrypoint:
+      - sh
+      - -c
+      - |
+        printf 'local all all trust\nhost  all all all trust\n' > /tmp/pg_hba.conf
+        exec /usr/local/bin/docker-entrypoint.sh postgres -c hba_file=/tmp/pg_hba.conf
     environment:
       POSTGRES_DB: video_fingerprint_index
       POSTGRES_USER: storj
       POSTGRES_HOST_AUTH_METHOD: trust
-      POSTGRES_INITDB_ARGS: "--auth-host=trust --auth-local=trust"
     networks:
       - storj-net
     restart: unless-stopped
