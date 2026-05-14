@@ -265,10 +265,10 @@ jobs:
 
       - name: Route smoke check
         run: |
-          curl --fail --retry 30 --retry-delay 10 --retry-all-errors \
+          curl --fail --retry 30 --retry-delay 10 --retry-all-errors --insecure \
             "${{ steps.meta.outputs.preview_url }}/api-docs/openapi.json" >/dev/null
 
-          STATUS_CODE="$(curl --silent \
+          STATUS_CODE="$(curl --silent --insecure \
             --output /tmp/videogen-status-response.txt \
             --write-out "%{http_code}" \
             "${{ steps.meta.outputs.preview_url }}/api/v2/videogen/status/not-a-principal/all")"
