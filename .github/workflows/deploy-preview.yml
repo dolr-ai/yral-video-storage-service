@@ -140,16 +140,6 @@ jobs:
 
           if [ -n "$EXISTING" ]; then
             echo "Reusing existing Coolify service: $EXISTING"
-            # Update compose in case docker-compose.preview.yml changed since service was created.
-            PATCH_RESP=$(curl -s -o /tmp/coolify-patch-response.txt -w "%{http_code}" -X PATCH \
-              "https://coolify.yral.com/api/v1/services/${EXISTING}" \
-              -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "$(jq -n --arg compose "$COMPOSE_CONTENT" '{"docker_compose_raw": $compose}')")
-            if [ "$PATCH_RESP" -lt 200 ] || [ "$PATCH_RESP" -ge 300 ]; then
-              echo "Warning: failed to update compose for existing service (HTTP $PATCH_RESP)"
-              cat /tmp/coolify-patch-response.txt
-            fi
             echo "service_uuid=${EXISTING}" >> "$GITHUB_OUTPUT"
           else
             RESPONSE=$(curl -s -X POST \
@@ -202,8 +192,28 @@ jobs:
           IMAGE="${{ steps.meta.outputs.image }}"
           IMAGE_TAG="${{ steps.meta.outputs.image_tag }}"
 
-          POSTGRES_PASSWORD="preview_$(echo "$SERVICE_UUID" | cut -c1-8)"
-          DATABASE_URL="postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/video_fingerprint_index"
+          export POSTGRES_PASSWORD="preview_$(echo "$SERVICE_UUID" | cut -c1-8)"
+          export DATABASE_URL="postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/video_fingerprint_index"
+          export APP_IMAGE="$IMAGE"
+          export IMAGE_TAG="$IMAGE_TAG"
+          export PREVIEW_DOMAIN="${{ steps.meta.outputs.preview_domain }}"
+          export SERVICE_NAME="${{ steps.meta.outputs.service_name }}"
+          # SFW_BUCKET, NSFW_BUCKET, HETZNER_* and other secrets are already in env via step env: block
+
+          # Substitute all ${VAR} in compose with actual values and PATCH Coolify.
+          # Coolify stores docker_compose_raw verbatim — it does NOT interpolate ${VAR} itself,
+          # so the image name and Traefik labels would otherwise be literal "${APP_IMAGE}" etc.
+          RESOLVED_COMPOSE=$(envsubst < deploy/docker-compose.preview.yml | base64 -w 0)
+          COMPOSE_PATCH_RESP=$(curl -s -o /tmp/coolify-compose-response.txt -w "%{http_code}" -X PATCH \
+            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}" \
+            -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg compose "$RESOLVED_COMPOSE" '{"docker_compose_raw": $compose}')")
+          if [ "$COMPOSE_PATCH_RESP" -lt 200 ] || [ "$COMPOSE_PATCH_RESP" -ge 300 ]; then
+            echo "Failed to patch compose (HTTP $COMPOSE_PATCH_RESP)"
+            cat /tmp/coolify-compose-response.txt
+            exit 1
+          fi
 
           ENV_JSON=$(jq -n \
             --arg app_image "$IMAGE" \
