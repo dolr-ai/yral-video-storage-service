@@ -35,6 +35,8 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    tmpfs:
+      - /var/lib/postgresql/data
     environment:
       POSTGRES_DB: video_fingerprint_index
       POSTGRES_USER: storj
