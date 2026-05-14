@@ -209,9 +209,9 @@ jobs:
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg compose "$RESOLVED_COMPOSE" '{"docker_compose_raw": $compose}')")
+          echo "Compose PATCH HTTP $COMPOSE_PATCH_RESP:"
+          cat /tmp/coolify-compose-response.txt
           if [ "$COMPOSE_PATCH_RESP" -lt 200 ] || [ "$COMPOSE_PATCH_RESP" -ge 300 ]; then
-            echo "Failed to patch compose (HTTP $COMPOSE_PATCH_RESP)"
-            cat /tmp/coolify-compose-response.txt
             exit 1
           fi
 
@@ -289,6 +289,21 @@ jobs:
             cat /tmp/coolify-deploy-response.txt
             exit 1
           fi
+
+      - name: Debug - service state after restart
+        run: |
+          SERVICE_UUID="${{ steps.coolify_service.outputs.service_uuid }}"
+          sleep 20
+
+          echo "=== Coolify service status ==="
+          curl -s \
+            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}" \
+            -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+            | jq '{status, name, docker_compose_raw}'
+
+          echo "=== Verbose HTTP probe (shows TLS/TCP/HTTP layer) ==="
+          curl -v --insecure --max-time 15 \
+            "${{ steps.meta.outputs.preview_url }}/health" 2>&1 || true
 
       - name: Route smoke check
         run: |
