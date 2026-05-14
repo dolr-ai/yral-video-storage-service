@@ -152,7 +152,6 @@ jobs:
                 --arg server_uuid "$COOLIFY_SERVER_UUID" \
                 --arg compose "$COMPOSE_CONTENT" \
                 '{
-                  "type": "dockercompose",
                   "name": $name,
                   "project_uuid": $project_uuid,
                   "server_uuid": $server_uuid,
