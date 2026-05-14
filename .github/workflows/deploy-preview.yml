@@ -131,7 +131,7 @@ jobs:
           IMAGE="${{ steps.meta.outputs.image }}"
           IMAGE_TAG="${{ steps.meta.outputs.image_tag }}"
           PREVIEW_DOMAIN="${{ steps.meta.outputs.preview_domain }}"
-          COMPOSE_CONTENT=$(cat deploy/docker-compose.preview.yml)
+          COMPOSE_CONTENT=$(base64 -w 0 deploy/docker-compose.preview.yml)
 
           EXISTING=$(curl -s \
             "https://coolify.yral.com/api/v1/services" \
