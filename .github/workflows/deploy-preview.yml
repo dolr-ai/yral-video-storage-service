@@ -140,6 +140,16 @@ jobs:
 
           if [ -n "$EXISTING" ]; then
             echo "Reusing existing Coolify service: $EXISTING"
+            # Update compose in case docker-compose.preview.yml changed since service was created.
+            PATCH_RESP=$(curl -s -o /tmp/coolify-patch-response.txt -w "%{http_code}" -X PATCH \
+              "https://coolify.yral.com/api/v1/services/${EXISTING}" \
+              -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg compose "$COMPOSE_CONTENT" '{"docker_compose_raw": $compose}')")
+            if [ "$PATCH_RESP" -lt 200 ] || [ "$PATCH_RESP" -ge 300 ]; then
+              echo "Warning: failed to update compose for existing service (HTTP $PATCH_RESP)"
+              cat /tmp/coolify-patch-response.txt
+            fi
             echo "service_uuid=${EXISTING}" >> "$GITHUB_OUTPUT"
           else
             RESPONSE=$(curl -s -X POST \
@@ -192,10 +202,14 @@ jobs:
           IMAGE="${{ steps.meta.outputs.image }}"
           IMAGE_TAG="${{ steps.meta.outputs.image_tag }}"
 
+          POSTGRES_PASSWORD="preview_$(echo "$SERVICE_UUID" | cut -c1-8)"
+          DATABASE_URL="postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/video_fingerprint_index"
+
           ENV_JSON=$(jq -n \
             --arg app_image "$IMAGE" \
             --arg image_tag "$IMAGE_TAG" \
-            --arg postgres_password "preview_$(echo "$SERVICE_UUID" | cut -c1-8)" \
+            --arg postgres_password "$POSTGRES_PASSWORD" \
+            --arg database_url "$DATABASE_URL" \
             --arg preview_domain "${{ steps.meta.outputs.preview_domain }}" \
             --arg service_name "${{ steps.meta.outputs.service_name }}" \
             --arg storj_access_grant_sfw "$STORJ_ACCESS_GRANT_SFW" \
@@ -217,6 +231,7 @@ jobs:
                 {"key": "APP_IMAGE", "value": $app_image, "is_literal": true},
                 {"key": "IMAGE_TAG", "value": $image_tag, "is_literal": true},
                 {"key": "POSTGRES_PASSWORD", "value": $postgres_password, "is_literal": true},
+                {"key": "DATABASE_URL", "value": $database_url, "is_literal": true},
                 {"key": "PREVIEW_DOMAIN", "value": $preview_domain, "is_literal": true},
                 {"key": "SERVICE_NAME", "value": $service_name, "is_literal": true},
                 {"key": "STORJ_ACCESS_GRANT_SFW", "value": $storj_access_grant_sfw, "is_literal": true},
@@ -252,13 +267,15 @@ jobs:
         run: |
           SERVICE_UUID="${{ steps.coolify_service.outputs.service_uuid }}"
 
+          # Use restart so existing containers get stopped and restarted with updated env vars.
+          # /start on an already-running service may be a no-op.
           RESPONSE=$(curl -s -o /tmp/coolify-deploy-response.txt -w "%{http_code}" -X POST \
-            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}/start" \
+            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}/restart" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
             -H "Content-Type: application/json")
 
           if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
-            echo "Failed to start Coolify service (HTTP $RESPONSE)"
+            echo "Failed to restart Coolify service (HTTP $RESPONSE)"
             cat /tmp/coolify-deploy-response.txt
             exit 1
           fi

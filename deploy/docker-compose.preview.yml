@@ -8,12 +8,12 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.${SERVICE_NAME}.rule=Host(`${PREVIEW_DOMAIN}`)"
-      - "traefik.http.routers.${SERVICE_NAME}.entrypoints=https"
+      - "traefik.http.routers.${SERVICE_NAME}.entrypoints=websecure"
       - "traefik.http.routers.${SERVICE_NAME}.tls=true"
       - "traefik.http.routers.${SERVICE_NAME}.tls.certresolver=letsencrypt"
       - "traefik.http.services.${SERVICE_NAME}.loadbalancer.server.port=3000"
     environment:
-      DATABASE_URL: postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/video_fingerprint_index
+      DATABASE_URL: ${DATABASE_URL}
       STORJ_ACCESS_GRANT_SFW: ${STORJ_ACCESS_GRANT_SFW}
       SFW_BUCKET: ${SFW_BUCKET:-yral-videos}
       STORJ_ACCESS_GRANT_NSFW: ${STORJ_ACCESS_GRANT_NSFW}
