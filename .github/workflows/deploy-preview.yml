@@ -174,7 +174,22 @@ jobs:
               exit 1
             fi
 
+            # Fetch full service details to understand structure and find app UUIDs
+            SERVICE_DETAILS=$(curl -s \
+              "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}" \
+              -H "Authorization: Bearer ${COOLIFY_TOKEN}")
+            echo "=== Service details (first 3000 chars) ==="
+            echo "${SERVICE_DETAILS:0:3000}"
+            echo "=========================================="
+
+            # Coolify creates per-container application records within the service.
+            # Extract the UUID for the storj-interface application so we can set fqdn on it.
+            APP_UUID=$(echo "$SERVICE_DETAILS" | \
+              jq -r '([.applications, .service_applications] | flatten | map(select(. != null))) | .[] | select(.name == "storj-interface") | .uuid // empty' 2>/dev/null || echo "")
+            echo "storj-interface app UUID: ${APP_UUID:-not found in response}"
+
             echo "service_uuid=${SERVICE_UUID}" >> "$GITHUB_OUTPUT"
+            echo "app_uuid=${APP_UUID}" >> "$GITHUB_OUTPUT"
 
       - name: Push Environment Variables
         env:
@@ -275,6 +290,34 @@ jobs:
             exit 1
           fi
 
+      - name: Configure routing
+        run: |
+          PREVIEW_DOMAIN="${{ steps.meta.outputs.preview_domain }}"
+          SERVICE_UUID="${{ steps.coolify_service.outputs.service_uuid }}"
+          APP_UUID="${{ steps.coolify_service.outputs.app_uuid }}"
+
+          if [ -n "$APP_UUID" ]; then
+            # Set fqdn on the storj-interface application so Coolify wires up Traefik routing.
+            echo "Setting fqdn on storj-interface application ${APP_UUID}..."
+            PATCH_RESP=$(curl -s -o /tmp/app-fqdn-patch.txt -w "%{http_code}" -X PATCH \
+              "https://coolify.yral.com/api/v1/applications/${APP_UUID}" \
+              -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg fqdn "https://${PREVIEW_DOMAIN}" '{"fqdn": $fqdn}')")
+            echo "Application fqdn PATCH HTTP ${PATCH_RESP}:"
+            cat /tmp/app-fqdn-patch.txt
+          else
+            # Fallback: try setting fqdn at the service level (may not apply for compose services)
+            echo "No storj-interface app UUID found; trying service-level fqdn..."
+            PATCH_RESP=$(curl -s -o /tmp/service-fqdn-patch.txt -w "%{http_code}" -X PATCH \
+              "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}" \
+              -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg fqdn "https://${PREVIEW_DOMAIN}" '{"fqdn": $fqdn}')")
+            echo "Service fqdn PATCH HTTP ${PATCH_RESP}:"
+            cat /tmp/service-fqdn-patch.txt
+          fi
+
       - name: Deploy
         run: |
           SERVICE_UUID="${{ steps.coolify_service.outputs.service_uuid }}"
@@ -302,13 +345,29 @@ jobs:
 
       - name: Route smoke check
         run: |
-          curl --fail --retry 30 --retry-delay 10 --retry-all-errors --insecure \
-            "${{ steps.meta.outputs.preview_url }}/api-docs/openapi.json" >/dev/null
+          PREVIEW_URL="${{ steps.meta.outputs.preview_url }}"
+          MAX=30
+          for i in $(seq 1 $MAX); do
+            CODE=$(curl -s -o /tmp/smoke-body.txt -w "%{http_code}" --insecure \
+              "${PREVIEW_URL}/api-docs/openapi.json")
+            echo "Attempt ${i}/${MAX}: HTTP ${CODE}"
+            if [[ "$CODE" == "200" ]]; then
+              break
+            fi
+            if [[ "$i" == "$MAX" ]]; then
+              echo "=== Smoke check failed — response headers ==="
+              curl -sI --insecure "${PREVIEW_URL}/api-docs/openapi.json" || true
+              echo "=== Response body ==="
+              cat /tmp/smoke-body.txt
+              exit 1
+            fi
+            sleep 10
+          done
 
           STATUS_CODE="$(curl --silent --insecure \
             --output /tmp/videogen-status-response.txt \
             --write-out "%{http_code}" \
-            "${{ steps.meta.outputs.preview_url }}/api/v2/videogen/status/not-a-principal/all")"
+            "${PREVIEW_URL}/api/v2/videogen/status/not-a-principal/all")"
 
           if [[ "${STATUS_CODE}" != "400" ]]; then
             echo "expected videogen invalid principal route to return 400, got ${STATUS_CODE}"
