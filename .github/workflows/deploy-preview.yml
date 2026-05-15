@@ -135,16 +135,31 @@ jobs:
         env:
           PREVIEW_DB_PASSWORD: ${{ secrets.PREVIEW_DB_PASSWORD }}
         run: |
-          COOLIFY_IP=$(curl -s "https://coolify.yral.com/api/v1/servers" \
-            -H "Authorization: Bearer ${COOLIFY_TOKEN}" | jq -r '.[0].ip // empty')
+          COOLIFY_SERVER_RESPONSE=$(curl -s "https://coolify.yral.com/api/v1/servers/${COOLIFY_SERVER_UUID}" \
+            -H "Authorization: Bearer ${COOLIFY_TOKEN}")
+          echo "Coolify server response: ${COOLIFY_SERVER_RESPONSE:0:300}"
+          COOLIFY_IP=$(echo "$COOLIFY_SERVER_RESPONSE" | jq -r '.ip // empty')
+          if [ -z "$COOLIFY_IP" ]; then
+            echo "ERROR: could not determine Coolify server IP — iptables rule will not be added"
+            exit 1
+          fi
+          echo "Coolify server IP: ${COOLIFY_IP}"
 
           REMOTE_SCRIPT="
+            if docker ps -a -q -f name=yral-video-preview-db | grep -q .; then
+              NETMODE=\$(docker inspect --format '{{.HostConfig.NetworkMode}}' yral-video-preview-db 2>/dev/null)
+              if [ \"\$NETMODE\" != 'host' ]; then
+                echo 'Recreating Postgres with host network mode'
+                docker rm -f yral-video-preview-db
+              fi
+            fi
             if ! docker ps -q -f name=yral-video-preview-db | grep -q .; then
               docker run -d --name yral-video-preview-db --restart unless-stopped \
+                --network host \
                 -e POSTGRES_USER=storj \
                 -e POSTGRES_PASSWORD='${PREVIEW_DB_PASSWORD}' \
                 -e POSTGRES_DB=video_fingerprint_index \
-                -p 138.201.129.173:5433:5432 \
+                -e PGPORT=5433 \
                 postgres:16-alpine
             fi
             if [ -n '${COOLIFY_IP}' ]; then
