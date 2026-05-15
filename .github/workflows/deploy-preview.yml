@@ -138,7 +138,7 @@ jobs:
           COOLIFY_IP=$(curl -s "https://coolify.yral.com/api/v1/servers" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" | jq -r '.[0].ip // empty')
 
-          ssh deploy@138.201.129.173 "
+          ssh deploy@138.201.129.173 bash << EOF
             if ! docker ps -q -f name=yral-video-preview-db | grep -q .; then
               docker run -d \
                 --name yral-video-preview-db \
@@ -151,9 +151,9 @@ jobs:
             fi
             if [ -n '${COOLIFY_IP}' ]; then
               docker run --rm --privileged --network=host alpine sh -c \
-                "apk add --no-cache iptables -q && iptables -C INPUT -p tcp -s '${COOLIFY_IP}' --dport 5433 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp -s '${COOLIFY_IP}' --dport 5433 -j ACCEPT"
+                'apk add --no-cache iptables -q && iptables -C INPUT -p tcp -s ${COOLIFY_IP} --dport 5433 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp -s ${COOLIFY_IP} --dport 5433 -j ACCEPT'
             fi
-          "
+EOF
 
       - name: Create Coolify Application
         id: coolify_app
