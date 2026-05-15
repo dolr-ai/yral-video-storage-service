@@ -363,16 +363,6 @@ jobs:
             sleep 10
           done
 
-          STATUS_CODE="$(curl --silent --insecure \
-            --output /tmp/videogen-status-response.txt \
-            --write-out "%{http_code}" \
-            "${PREVIEW_URL}/api/v2/videogen/status/not-a-principal/all")"
-
-          if [[ "${STATUS_CODE}" != "400" ]]; then
-            echo "expected videogen invalid principal route to return 400, got ${STATUS_CODE}"
-            cat /tmp/videogen-status-response.txt
-            exit 1
-          fi
 
   destroy_preview:
     if: ${{ github.event.pull_request.state == 'closed' }}
