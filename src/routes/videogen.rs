@@ -1,4 +1,3 @@
-use axum::extract::Path;
 use axum::{extract::State, http::StatusCode, Json};
 use chrono::{DateTime, Utc};
 use ic_agent::identity::{DelegatedIdentity, Identity};
@@ -123,24 +122,24 @@ pub async fn get_in_progress_drafts(
     Ok(Json(InProgressDraftsResponse { items }))
 }
 
-#[derive(Debug, Serialize, ToSchema)]
-pub struct AllStatusItem {
-    pub operation_id: String,
-    /// "in_progress" | "complete: <url>" | "failed: <reason>"
-    pub status: String,
-    pub created_at: String,
-    pub provider: Option<String>,
-    pub model_id: String,
-    pub prompt: String,
-    pub thumbnail_url: Option<String>,
-}
+// #[derive(Debug, Serialize, ToSchema)]
+// pub struct AllStatusItem {
+//     pub operation_id: String,
+//     /// "in_progress" | "complete: <url>" | "failed: <reason>"
+//     pub status: String,
+//     pub created_at: String,
+//     pub provider: Option<String>,
+//     pub model_id: String,
+//     pub prompt: String,
+//     pub thumbnail_url: Option<String>,
+// }
 
-#[derive(Debug, Serialize, ToSchema)]
-pub struct AllStatusResponse {
-    pub items: Vec<AllStatusItem>,
-}
+// #[derive(Debug, Serialize, ToSchema)]
+// pub struct AllStatusResponse {
+//     pub items: Vec<AllStatusItem>,
+// }
 
-/// Returns in-progress video generations for a principal (no auth required).
+// Returns in-progress video generations for a principal (no auth required).
 // #[utoipa::path(
 //     get,
 //     path = "/api/v2/videogen/in-progress/{principal}",
@@ -194,7 +193,7 @@ pub struct AllStatusResponse {
 //     Ok(Json(InProgressDraftsResponse { items }))
 // }
 
-/// Returns all video generation statuses for a principal (no auth required).
+// Returns all video generation statuses for a principal (no auth required).
 // #[utoipa::path(
 //     get,
 //     path = "/api/v2/videogen/status/{principal}/all",
