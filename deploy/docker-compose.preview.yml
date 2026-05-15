@@ -3,7 +3,7 @@ services:
     image: ${APP_IMAGE}:${IMAGE_TAG}
     restart: unless-stopped
     depends_on:
-      postgres:
+      storj-db:
         condition: service_healthy
     labels:
       - "traefik.enable=true"
@@ -14,7 +14,7 @@ services:
       - "traefik.http.routers.${SERVICE_NAME}.tls.certresolver=letsencrypt"
       - "traefik.http.services.${SERVICE_NAME}.loadbalancer.server.port=3000"
     environment:
-      DATABASE_URL: postgres://storj:storjpreview@postgres:5432/video_fingerprint_index
+      DATABASE_URL: postgres://storj@storj-db:5432/video_fingerprint_index
       STORJ_ACCESS_GRANT_SFW: ${STORJ_ACCESS_GRANT_SFW}
       SFW_BUCKET: ${SFW_BUCKET}
       STORJ_ACCESS_GRANT_NSFW: ${STORJ_ACCESS_GRANT_NSFW}
@@ -33,7 +33,7 @@ services:
       - storj-net
       - coolify
 
-  postgres:
+  storj-db:
     image: postgres:16-alpine
     tmpfs:
       - /var/lib/postgresql/data
