@@ -141,114 +141,114 @@ pub struct AllStatusResponse {
 }
 
 /// Returns in-progress video generations for a principal (no auth required).
-#[utoipa::path(
-    get,
-    path = "/api/v2/videogen/in-progress/{principal}",
-    tag = "videogen",
-    params(("principal" = String, Path, description = "User principal ID")),
-    responses(
-        (status = 200, description = "In-progress items", body = InProgressDraftsResponse),
-        (status = 400, description = "Invalid principal"),
-        (status = 502, description = "Canister query failed"),
-    )
-)]
-pub async fn get_in_progress_by_principal(
-    State(state): State<AppState>,
-    Path(principal): Path<String>,
-) -> Result<Json<InProgressDraftsResponse>, (StatusCode, String)> {
-    let user_principal = candid::Principal::from_str(&principal)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid principal: {e}")))?;
+// #[utoipa::path(
+//     get,
+//     path = "/api/v2/videogen/in-progress/{principal}",
+//     tag = "videogen",
+//     params(("principal" = String, Path, description = "User principal ID")),
+//     responses(
+//         (status = 200, description = "In-progress items", body = InProgressDraftsResponse),
+//         (status = 400, description = "Invalid principal"),
+//         (status = 502, description = "Canister query failed"),
+//     )
+// )]
+// pub async fn get_in_progress_by_principal(
+//     State(state): State<AppState>,
+//     Path(principal): Path<String>,
+// ) -> Result<Json<InProgressDraftsResponse>, (StatusCode, String)> {
+//     let user_principal = candid::Principal::from_str(&principal)
+//         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid principal: {e}")))?;
 
-    let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &state.ic_agent);
+//     let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &state.ic_agent);
 
-    let requests = rate_limits
-        .get_user_video_generation_requests(user_principal, None, None)
-        .await
-        .map_err(|e| {
-            tracing::error!("Canister query failed: {e}");
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to fetch generation requests: {e}"),
-            )
-        })?;
+//     let requests = rate_limits
+//         .get_user_video_generation_requests(user_principal, None, None)
+//         .await
+//         .map_err(|e| {
+//             tracing::error!("Canister query failed: {e}");
+//             (
+//                 StatusCode::BAD_GATEWAY,
+//                 format!("Failed to fetch generation requests: {e}"),
+//             )
+//         })?;
 
-    let items = requests
-        .into_iter()
-        .filter(|(_, req)| {
-            matches!(
-                req.status,
-                VideoGenRequestStatus::Pending | VideoGenRequestStatus::Processing
-            )
-        })
-        .map(|(key, req)| InProgressDraftItem {
-            operation_id: format!("{}_{}", key.principal, key.counter),
-            status: "in_progress".to_string(),
-            created_at: ns_to_iso(req.created_at),
-            provider: provider_from_model_id(&req.model_name),
-            model_id: req.model_name,
-            prompt: req.prompt,
-            thumbnail_url: None,
-        })
-        .collect();
+//     let items = requests
+//         .into_iter()
+//         .filter(|(_, req)| {
+//             matches!(
+//                 req.status,
+//                 VideoGenRequestStatus::Pending | VideoGenRequestStatus::Processing
+//             )
+//         })
+//         .map(|(key, req)| InProgressDraftItem {
+//             operation_id: format!("{}_{}", key.principal, key.counter),
+//             status: "in_progress".to_string(),
+//             created_at: ns_to_iso(req.created_at),
+//             provider: provider_from_model_id(&req.model_name),
+//             model_id: req.model_name,
+//             prompt: req.prompt,
+//             thumbnail_url: None,
+//         })
+//         .collect();
 
-    Ok(Json(InProgressDraftsResponse { items }))
-}
+//     Ok(Json(InProgressDraftsResponse { items }))
+// }
 
 /// Returns all video generation statuses for a principal (no auth required).
-#[utoipa::path(
-    get,
-    path = "/api/v2/videogen/status/{principal}/all",
-    tag = "videogen",
-    params(("principal" = String, Path, description = "User principal ID")),
-    responses(
-        (status = 200, description = "All statuses", body = AllStatusResponse),
-        (status = 400, description = "Invalid principal"),
-        (status = 502, description = "Canister query failed"),
-    )
-)]
-pub async fn get_all_status_by_principal(
-    State(state): State<AppState>,
-    Path(principal): Path<String>,
-) -> Result<Json<AllStatusResponse>, (StatusCode, String)> {
-    let user_principal = candid::Principal::from_str(&principal)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid principal: {e}")))?;
+// #[utoipa::path(
+//     get,
+//     path = "/api/v2/videogen/status/{principal}/all",
+//     tag = "videogen",
+//     params(("principal" = String, Path, description = "User principal ID")),
+//     responses(
+//         (status = 200, description = "All statuses", body = AllStatusResponse),
+//         (status = 400, description = "Invalid principal"),
+//         (status = 502, description = "Canister query failed"),
+//     )
+// )]
+// pub async fn get_all_status_by_principal(
+//     State(state): State<AppState>,
+//     Path(principal): Path<String>,
+// ) -> Result<Json<AllStatusResponse>, (StatusCode, String)> {
+//     let user_principal = candid::Principal::from_str(&principal)
+//         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid principal: {e}")))?;
 
-    let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &state.ic_agent);
+//     let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &state.ic_agent);
 
-    let requests = rate_limits
-        .get_user_video_generation_requests(user_principal, None, None)
-        .await
-        .map_err(|e| {
-            tracing::error!("Canister query failed: {e}");
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to fetch generation requests: {e}"),
-            )
-        })?;
+//     let requests = rate_limits
+//         .get_user_video_generation_requests(user_principal, None, None)
+//         .await
+//         .map_err(|e| {
+//             tracing::error!("Canister query failed: {e}");
+//             (
+//                 StatusCode::BAD_GATEWAY,
+//                 format!("Failed to fetch generation requests: {e}"),
+//             )
+//         })?;
 
-    let items = requests
-        .into_iter()
-        .map(|(key, req)| {
-            let status = match req.status {
-                VideoGenRequestStatus::Pending => "in_progress".to_string(),
-                VideoGenRequestStatus::Processing => "in_progress".to_string(),
-                VideoGenRequestStatus::Complete(url) => format!("complete: {url}"),
-                VideoGenRequestStatus::Failed(reason) => format!("failed: {reason}"),
-            };
-            AllStatusItem {
-                operation_id: format!("{}_{}", key.principal, key.counter),
-                status,
-                created_at: ns_to_iso(req.created_at),
-                provider: provider_from_model_id(&req.model_name),
-                model_id: req.model_name,
-                prompt: req.prompt,
-                thumbnail_url: None,
-            }
-        })
-        .collect();
+//     let items = requests
+//         .into_iter()
+//         .map(|(key, req)| {
+//             let status = match req.status {
+//                 VideoGenRequestStatus::Pending => "in_progress".to_string(),
+//                 VideoGenRequestStatus::Processing => "in_progress".to_string(),
+//                 VideoGenRequestStatus::Complete(url) => format!("complete: {url}"),
+//                 VideoGenRequestStatus::Failed(reason) => format!("failed: {reason}"),
+//             };
+//             AllStatusItem {
+//                 operation_id: format!("{}_{}", key.principal, key.counter),
+//                 status,
+//                 created_at: ns_to_iso(req.created_at),
+//                 provider: provider_from_model_id(&req.model_name),
+//                 model_id: req.model_name,
+//                 prompt: req.prompt,
+//                 thumbnail_url: None,
+//             }
+//         })
+//         .collect();
 
-    Ok(Json(AllStatusResponse { items }))
-}
+//     Ok(Json(AllStatusResponse { items }))
+// }
 
 /// Maps the model_id stored in the canister to its compute provider string.
 fn provider_from_model_id(model_id: &str) -> Option<String> {
