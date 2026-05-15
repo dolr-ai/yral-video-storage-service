@@ -76,8 +76,8 @@ pub(crate) struct AppState {
         routes::mirror::get_config,
         routes::mirror::update_config,
         routes::videogen::get_in_progress_drafts,
-        routes::videogen::get_in_progress_by_principal,
-        routes::videogen::get_all_status_by_principal,
+        // routes::videogen::get_in_progress_by_principal,
+        // routes::videogen::get_all_status_by_principal,
     ),
     components(schemas(
         storj_interface::duplicate::Args,
@@ -97,8 +97,8 @@ pub(crate) struct AppState {
         routes::videogen::InProgressDraftsRequest,
         routes::videogen::InProgressDraftItem,
         routes::videogen::InProgressDraftsResponse,
-        routes::videogen::AllStatusItem,
-        routes::videogen::AllStatusResponse,
+        // routes::videogen::AllStatusItem,
+        // routes::videogen::AllStatusResponse,
     )),
     tags(
         (name = "videos", description = "Video management endpoints"),
@@ -339,14 +339,14 @@ async fn run_server() -> anyhow::Result<()> {
             "/api/v2/videogen/drafts/in-progress",
             post(routes::videogen::get_in_progress_drafts).with_state(app_state.clone()),
         )
-        .route(
-            "/api/v2/videogen/in-progress/{principal}",
-            get(routes::videogen::get_in_progress_by_principal).with_state(app_state.clone()),
-        )
-        .route(
-            "/api/v2/videogen/status/{principal}/all",
-            get(routes::videogen::get_all_status_by_principal).with_state(app_state.clone()),
-        )
+        // .route(
+        //     "/api/v2/videogen/in-progress/{principal}",
+        //     get(routes::videogen::get_in_progress_by_principal).with_state(app_state.clone()),
+        // )
+        // .route(
+        //     "/api/v2/videogen/status/{principal}/all",
+        //     get(routes::videogen::get_all_status_by_principal).with_state(app_state.clone()),
+        // )
         .route("/health", get(health))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(middleware::from_fn(sentry_utils::sentry_request_logger))
