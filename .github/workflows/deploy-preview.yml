@@ -122,6 +122,7 @@ jobs:
             secret/data/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
             secret/data/COOLIFY_PROJECT_UUID value | COOLIFY_PROJECT_UUID ;
             secret/data/COOLIFY_SERVER_UUID value | COOLIFY_SERVER_UUID ;
+            secret/data/DATABASE_URL_STAGING value | DATABASE_URL_STAGING ;
 
       - name: Create or Get Coolify Service
         id: coolify_service
@@ -216,8 +217,8 @@ jobs:
           export IMAGE_TAG="$IMAGE_TAG"
           export PREVIEW_DOMAIN="${{ steps.meta.outputs.preview_domain }}"
           export SERVICE_NAME="${{ steps.meta.outputs.service_name }}"
+          export DATABASE_URL="${{ env.DATABASE_URL_STAGING }}"
           # SFW_BUCKET, NSFW_BUCKET, HETZNER_* and other secrets are already in env via step env: block
-          # DATABASE_URL and POSTGRES_PASSWORD are hardcoded in docker-compose.preview.yml
 
           # Substitute all ${VAR} in compose with actual values and PATCH Coolify.
           # Coolify stores docker_compose_raw verbatim — it does NOT interpolate ${VAR} itself,
@@ -239,6 +240,7 @@ jobs:
             --arg image_tag "$IMAGE_TAG" \
             --arg preview_domain "${{ steps.meta.outputs.preview_domain }}" \
             --arg service_name "${{ steps.meta.outputs.service_name }}" \
+            --arg database_url "${{ env.DATABASE_URL_STAGING }}" \
             --arg storj_access_grant_sfw "$STORJ_ACCESS_GRANT_SFW" \
             --arg storj_access_grant_nsfw "$STORJ_ACCESS_GRANT_NSFW" \
             --arg sfw_bucket "$SFW_BUCKET" \
@@ -257,8 +259,7 @@ jobs:
               "data": [
                 {"key": "APP_IMAGE", "value": $app_image, "is_literal": true},
                 {"key": "IMAGE_TAG", "value": $image_tag, "is_literal": true},
-                {"key": "POSTGRES_HOST_AUTH_METHOD", "value": "trust", "is_literal": true},
-                {"key": "DATABASE_URL", "value": "postgres://storj@storj-db:5432/video_fingerprint_index", "is_literal": true},
+                {"key": "DATABASE_URL", "value": $database_url, "is_literal": true},
                 {"key": "PREVIEW_DOMAIN", "value": $preview_domain, "is_literal": true},
                 {"key": "SERVICE_NAME", "value": $service_name, "is_literal": true},
                 {"key": "STORJ_ACCESS_GRANT_SFW", "value": $storj_access_grant_sfw, "is_literal": true},
