@@ -2,14 +2,6 @@ services:
   storj-interface:
     image: ${APP_IMAGE}:${IMAGE_TAG}
     restart: unless-stopped
-    labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=coolify"
-      - "traefik.http.routers.${SERVICE_NAME}.rule=Host(`${PREVIEW_DOMAIN}`)"
-      - "traefik.http.routers.${SERVICE_NAME}.entrypoints=websecure"
-      - "traefik.http.routers.${SERVICE_NAME}.tls=true"
-      - "traefik.http.routers.${SERVICE_NAME}.tls.certresolver=letsencrypt"
-      - "traefik.http.services.${SERVICE_NAME}.loadbalancer.server.port=3000"
     environment:
       DATABASE_URL: ${DATABASE_URL}
       STORJ_ACCESS_GRANT_SFW: ${STORJ_ACCESS_GRANT_SFW}
@@ -26,9 +18,3 @@ services:
       STORJ_EU1_GATEWAY_ACCESS_KEY: ${STORJ_EU1_GATEWAY_ACCESS_KEY}
       STORJ_EU1_GATEWAY_SECRET_KEY: ${STORJ_EU1_GATEWAY_SECRET_KEY}
       STORJ_MIRROR_ACCESS_GRANT: ${STORJ_MIRROR_ACCESS_GRANT}
-    networks:
-      - coolify
-
-networks:
-  coolify:
-    external: true

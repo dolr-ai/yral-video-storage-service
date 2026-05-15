@@ -122,75 +122,94 @@ jobs:
             secret/data/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
             secret/data/COOLIFY_PROJECT_UUID value | COOLIFY_PROJECT_UUID ;
             secret/data/COOLIFY_SERVER_UUID value | COOLIFY_SERVER_UUID ;
-            secret/data/DATABASE_URL_STAGING value | DATABASE_URL_STAGING ;
+            secret/data/COOLIFY_ENV_UUID value | COOLIFY_ENV_UUID ;
 
-      - name: Create or Get Coolify Service
-        id: coolify_service
+      - name: Setup SSH
         run: |
-          SERVICE_NAME="${{ steps.meta.outputs.service_name }}"
-          COMPOSE_CONTENT=$(base64 -w 0 deploy/docker-compose.preview.yml)
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY_PRAKASH }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H 138.201.129.173 >> ~/.ssh/known_hosts 2>/dev/null
 
-          # Always delete and recreate so postgres gets a fresh volume and
-          # the new compose (tmpfs, updated image) is fully applied. Coolify's
-          # stop/start reuses existing containers and does not pick up compose
-          # changes, so reuse causes stale password/config issues.
+      - name: Provision Preview Postgres
+        env:
+          PREVIEW_DB_PASSWORD: ${{ secrets.PREVIEW_DB_PASSWORD }}
+        run: |
+          COOLIFY_IP=$(curl -s "https://coolify.yral.com/api/v1/servers" \
+            -H "Authorization: Bearer ${COOLIFY_TOKEN}" | jq -r '.[0].ip // empty')
+
+          ssh deploy@138.201.129.173 "
+            if ! docker ps -q -f name=yral-video-preview-db | grep -q .; then
+              docker run -d \
+                --name yral-video-preview-db \
+                --restart unless-stopped \
+                -e POSTGRES_USER=storj \
+                -e POSTGRES_PASSWORD='${PREVIEW_DB_PASSWORD}' \
+                -e POSTGRES_DB=video_fingerprint_index \
+                -p 138.201.129.173:5433:5432 \
+                postgres:16-alpine
+            fi
+            [ -n '${COOLIFY_IP}' ] && ufw allow from '${COOLIFY_IP}' to any port 5433 || true
+          "
+
+      - name: Create Coolify Application
+        id: coolify_app
+        run: |
+          APP_NAME="${{ steps.meta.outputs.service_name }}"
+          IMAGE="${{ steps.meta.outputs.image }}"
+          IMAGE_TAG="${{ steps.meta.outputs.image_tag }}"
+          PREVIEW_DOMAIN="${{ steps.meta.outputs.preview_domain }}"
+
           EXISTING=$(curl -s \
-            "https://coolify.yral.com/api/v1/services" \
+            "https://coolify.yral.com/api/v1/applications" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-            | jq -r --arg name "$SERVICE_NAME" '.[] | select(.name == $name) | .uuid // empty')
+            | jq -r --arg name "$APP_NAME" '.[] | select(.name == $name) | .uuid // empty')
 
           if [ -n "$EXISTING" ]; then
-            echo "Deleting existing service ${EXISTING} for clean recreation..."
-            curl -s -X DELETE \
-              "https://coolify.yral.com/api/v1/services/${EXISTING}" \
+            echo "Reusing existing application ${EXISTING}, updating image tag..."
+            APP_UUID="$EXISTING"
+            curl -s -X PATCH \
+              "https://coolify.yral.com/api/v1/applications/${APP_UUID}" \
               -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
               -H "Content-Type: application/json" \
-              -d '{"delete_configurations": true, "delete_volumes": true}' > /dev/null
-            sleep 5
-          fi
-
-          RESPONSE=$(curl -s -X POST \
-              "https://coolify.yral.com/api/v1/services" \
+              -d "{\"docker_registry_image_tag\": \"${IMAGE_TAG}\"}" > /dev/null
+          else
+            RESPONSE=$(curl -s -X POST \
+              "https://coolify.yral.com/api/v1/applications/dockerimage" \
               -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
               -H "Content-Type: application/json" \
               -d "$(jq -n \
-                --arg name "$SERVICE_NAME" \
+                --arg name "$APP_NAME" \
                 --arg project_uuid "$COOLIFY_PROJECT_UUID" \
                 --arg server_uuid "$COOLIFY_SERVER_UUID" \
-                --arg compose "$COMPOSE_CONTENT" \
+                --arg env_uuid "$COOLIFY_ENV_UUID" \
+                --arg image "$IMAGE" \
+                --arg image_tag "$IMAGE_TAG" \
+                --arg domains "https://${PREVIEW_DOMAIN}" \
                 '{
                   "name": $name,
                   "project_uuid": $project_uuid,
                   "server_uuid": $server_uuid,
                   "environment_name": "preview",
-                  "instant_deploy": false,
-                  "docker_compose_raw": $compose
+                  "environment_uuid": $env_uuid,
+                  "docker_registry_image_name": $image,
+                  "docker_registry_image_tag": $image_tag,
+                  "domains": $domains,
+                  "ports_exposes": "3000",
+                  "is_static": false
                 }')")
 
-            SERVICE_UUID=$(echo "$RESPONSE" | jq -r '.uuid // empty')
+            echo "Create response: ${RESPONSE:0:500}"
+            APP_UUID=$(echo "$RESPONSE" | jq -r '.uuid // empty')
 
-            if [ -z "$SERVICE_UUID" ]; then
-              echo "Failed to create Coolify service"
+            if [ -z "$APP_UUID" ]; then
+              echo "Failed to create Coolify application"
               echo "$RESPONSE"
               exit 1
             fi
+          fi
 
-            # Fetch full service details to understand structure and find app UUIDs
-            SERVICE_DETAILS=$(curl -s \
-              "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}" \
-              -H "Authorization: Bearer ${COOLIFY_TOKEN}")
-            echo "=== Service details (first 3000 chars) ==="
-            echo "${SERVICE_DETAILS:0:3000}"
-            echo "=========================================="
-
-            # Coolify creates per-container application records within the service.
-            # Extract the UUID for the storj-interface application so we can set fqdn on it.
-            APP_UUID=$(echo "$SERVICE_DETAILS" | \
-              jq -r '([.applications, .service_applications] | flatten | map(select(. != null))) | .[] | select(.name == "storj-interface") | .uuid // empty' 2>/dev/null || echo "")
-            echo "storj-interface app UUID: ${APP_UUID:-not found in response}"
-
-            echo "service_uuid=${SERVICE_UUID}" >> "$GITHUB_OUTPUT"
-            echo "app_uuid=${APP_UUID}" >> "$GITHUB_OUTPUT"
+          echo "app_uuid=${APP_UUID}" >> "$GITHUB_OUTPUT"
 
       - name: Push Environment Variables
         env:
@@ -209,38 +228,10 @@ jobs:
           STORJ_MIRROR_ACCESS_GRANT: ${{ secrets.STORJ_MIRROR_ACCESS_GRANT }}
           ENVIRONMENT: staging
         run: |
-          SERVICE_UUID="${{ steps.coolify_service.outputs.service_uuid }}"
-          IMAGE="${{ steps.meta.outputs.image }}"
-          IMAGE_TAG="${{ steps.meta.outputs.image_tag }}"
-
-          export APP_IMAGE="$IMAGE"
-          export IMAGE_TAG="$IMAGE_TAG"
-          export PREVIEW_DOMAIN="${{ steps.meta.outputs.preview_domain }}"
-          export SERVICE_NAME="${{ steps.meta.outputs.service_name }}"
-          export DATABASE_URL="${{ env.DATABASE_URL_STAGING }}"
-          # SFW_BUCKET, NSFW_BUCKET, HETZNER_* and other secrets are already in env via step env: block
-
-          # Substitute all ${VAR} in compose with actual values and PATCH Coolify.
-          # Coolify stores docker_compose_raw verbatim — it does NOT interpolate ${VAR} itself,
-          # so the image name and Traefik labels would otherwise be literal "${APP_IMAGE}" etc.
-          RESOLVED_COMPOSE=$(envsubst < deploy/docker-compose.preview.yml | base64 -w 0)
-          COMPOSE_PATCH_RESP=$(curl -s -o /tmp/coolify-compose-response.txt -w "%{http_code}" -X PATCH \
-            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}" \
-            -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n --arg compose "$RESOLVED_COMPOSE" '{"docker_compose_raw": $compose}')")
-          echo "Compose PATCH HTTP $COMPOSE_PATCH_RESP:"
-          cat /tmp/coolify-compose-response.txt
-          if [ "$COMPOSE_PATCH_RESP" -lt 200 ] || [ "$COMPOSE_PATCH_RESP" -ge 300 ]; then
-            exit 1
-          fi
+          APP_UUID="${{ steps.coolify_app.outputs.app_uuid }}"
 
           ENV_JSON=$(jq -n \
-            --arg app_image "$IMAGE" \
-            --arg image_tag "$IMAGE_TAG" \
-            --arg preview_domain "${{ steps.meta.outputs.preview_domain }}" \
-            --arg service_name "${{ steps.meta.outputs.service_name }}" \
-            --arg database_url "${{ env.DATABASE_URL_STAGING }}" \
+            --arg database_url "postgres://storj:${{ secrets.PREVIEW_DB_PASSWORD }}@138.201.129.173:5433/video_fingerprint_index" \
             --arg storj_access_grant_sfw "$STORJ_ACCESS_GRANT_SFW" \
             --arg storj_access_grant_nsfw "$STORJ_ACCESS_GRANT_NSFW" \
             --arg sfw_bucket "$SFW_BUCKET" \
@@ -257,11 +248,7 @@ jobs:
             --arg environment "$ENVIRONMENT" \
             '{
               "data": [
-                {"key": "APP_IMAGE", "value": $app_image, "is_literal": true},
-                {"key": "IMAGE_TAG", "value": $image_tag, "is_literal": true},
                 {"key": "DATABASE_URL", "value": $database_url, "is_literal": true},
-                {"key": "PREVIEW_DOMAIN", "value": $preview_domain, "is_literal": true},
-                {"key": "SERVICE_NAME", "value": $service_name, "is_literal": true},
                 {"key": "STORJ_ACCESS_GRANT_SFW", "value": $storj_access_grant_sfw, "is_literal": true},
                 {"key": "STORJ_ACCESS_GRANT_NSFW", "value": $storj_access_grant_nsfw, "is_literal": true},
                 {"key": "SFW_BUCKET", "value": $sfw_bucket, "is_literal": true},
@@ -280,7 +267,7 @@ jobs:
             }')
 
           RESPONSE=$(curl -s -o /tmp/coolify-env-response.txt -w "%{http_code}" -X PATCH \
-            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}/envs/bulk" \
+            "https://coolify.yral.com/api/v1/applications/${APP_UUID}/envs/bulk" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "${ENV_JSON}")
@@ -292,29 +279,51 @@ jobs:
           fi
 
       - name: Deploy
+        id: deploy
         run: |
-          SERVICE_UUID="${{ steps.coolify_service.outputs.service_uuid }}"
+          APP_UUID="${{ steps.coolify_app.outputs.app_uuid }}"
 
-          # Stop first so /start does `docker compose up --detach` (recreates containers
-          # from the patched compose). /restart calls `docker compose restart` which reuses
-          # cached container config and ignores compose changes.
-          curl -s -X POST \
-            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}/stop" \
+          BODY=$(curl -s -X POST \
+            "https://coolify.yral.com/api/v1/applications/${APP_UUID}/start" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-            -H "Content-Type: application/json" >/dev/null || true
+            -H "Content-Type: application/json" \
+            -d "{\"uuid\": \"${APP_UUID}\", \"force\": true}")
 
-          sleep 10
+          echo "Deploy response: ${BODY:0:300}"
+          DEPLOY_UUID=$(echo "$BODY" | jq -r '.deployment_uuid // empty')
 
-          RESPONSE=$(curl -s -o /tmp/coolify-deploy-response.txt -w "%{http_code}" -X POST \
-            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}/start" \
-            -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-            -H "Content-Type: application/json")
-
-          if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
-            echo "Failed to start Coolify service (HTTP $RESPONSE)"
-            cat /tmp/coolify-deploy-response.txt
+          if [ -z "$DEPLOY_UUID" ]; then
+            echo "Failed to get deployment UUID"
+            echo "$BODY"
             exit 1
           fi
+
+          echo "deploy_uuid=${DEPLOY_UUID}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for Deployment
+        run: |
+          DEPLOY_UUID="${{ steps.deploy.outputs.deploy_uuid }}"
+          MAX=60
+          for i in $(seq 1 $MAX); do
+            STATUS=$(curl -s \
+              "https://coolify.yral.com/api/v1/deployments/${DEPLOY_UUID}" \
+              -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+              | jq -r '.status // empty')
+            echo "Attempt ${i}/${MAX}: status=${STATUS}"
+            if [[ "$STATUS" == "finished" ]]; then
+              echo "Deployment finished successfully"
+              break
+            fi
+            if [[ "$STATUS" == "failed" || "$STATUS" == "error" ]]; then
+              echo "Deployment failed with status: ${STATUS}"
+              exit 1
+            fi
+            if [[ "$i" == "$MAX" ]]; then
+              echo "Deployment timed out"
+              exit 1
+            fi
+            sleep 10
+          done
 
       - name: Route smoke check
         run: |
@@ -372,28 +381,27 @@ jobs:
           secrets: |
             secret/data/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
 
-      - name: Find and Delete Coolify Service
+      - name: Find and Delete Coolify Application
         run: |
-          SERVICE_NAME="${{ steps.meta.outputs.service_name }}"
+          APP_NAME="${{ steps.meta.outputs.service_name }}"
 
-          SERVICE_UUID=$(curl -s \
-            "https://coolify.yral.com/api/v1/services" \
+          APP_UUID=$(curl -s \
+            "https://coolify.yral.com/api/v1/applications" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-            | jq -r --arg name "$SERVICE_NAME" '.[] | select(.name == $name) | .uuid // empty')
+            | jq -r --arg name "$APP_NAME" '.[] | select(.name == $name) | .uuid // empty')
 
-          if [ -z "$SERVICE_UUID" ]; then
-            echo "No Coolify service found for ${SERVICE_NAME}; skipping"
+          if [ -z "$APP_UUID" ]; then
+            echo "No Coolify application found for ${APP_NAME}; skipping"
             exit 0
           fi
 
           RESPONSE=$(curl -s -o /tmp/coolify-delete-response.txt -w "%{http_code}" -X DELETE \
-            "https://coolify.yral.com/api/v1/services/${SERVICE_UUID}" \
+            "https://coolify.yral.com/api/v1/applications/${APP_UUID}" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d '{"delete_configurations": true, "delete_volumes": true}')
+            -H "Content-Type: application/json")
 
           if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
-            echo "Failed to delete Coolify service ${SERVICE_NAME} (HTTP $RESPONSE)"
+            echo "Failed to delete Coolify application ${APP_NAME} (HTTP $RESPONSE)"
             cat /tmp/coolify-delete-response.txt
             exit 1
           fi
