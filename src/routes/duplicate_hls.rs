@@ -16,7 +16,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::breadcrumb;
-use crate::consts::{ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, YRAL_NSFW_VIDEOS, YRAL_VIDEOS};
+use crate::consts::{ACCESS_GRANT_NSFW, MIRROR_ACCESS_GRANT, STORJ_SFW_BUCKET, YRAL_NSFW_VIDEOS};
 use crate::s3_client::S3Client;
 use crate::AppState;
 
@@ -78,7 +78,7 @@ async fn upload_hls_to_storj(
     let (bucket, grant) = if is_nsfw {
         (YRAL_NSFW_VIDEOS.as_str(), ACCESS_GRANT_NSFW.as_str())
     } else {
-        (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
+        (STORJ_SFW_BUCKET.as_str(), MIRROR_ACCESS_GRANT.as_str())
     };
     let dest = format!("sj://{bucket}/{video_id}/hls/{hls_file_name}");
     let key = format!("{video_id}/hls/{hls_file_name}");
