@@ -1,0 +1,83 @@
+name: Verify Mirror Pipeline (Prakash)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Service URL to test against"
+        required: false
+        default: "https://storj-interface-preview.prakash.yral.com"
+      limit:
+        description: "Number of items to process per job"
+        required: false
+        default: "10"
+      run_scan_hetzner:
+        description: "Run scan-hetzner"
+        type: boolean
+        default: true
+      run_scan_storj:
+        description: "Run scan-storj"
+        type: boolean
+        default: true
+      run_phash:
+        description: "Run phash backfill"
+        type: boolean
+        default: true
+      run_mirror:
+        description: "Run mirror"
+        type: boolean
+        default: true
+
+jobs:
+  verify:
+    name: Verify Pipeline
+    runs-on: ubuntu-latest
+    env:
+      MIRROR_SERVICE_URL: ${{ inputs.target_url }}
+      SERVICE_SECRET_TOKEN: ${{ secrets.SERVICE_SECRET_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mirror-client-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Audit (before)
+        run: cargo run -p mirror-client -- audit
+
+      - name: Scan Hetzner (limit ${{ inputs.limit }})
+        if: inputs.run_scan_hetzner
+        run: |
+          cargo run -p mirror-client -- scan-hetzner --limit ${{ inputs.limit }}
+          sleep 15
+
+      - name: Scan Storj (limit ${{ inputs.limit }})
+        if: inputs.run_scan_storj
+        run: |
+          cargo run -p mirror-client -- scan-storj --limit ${{ inputs.limit }}
+          sleep 15
+
+      - name: Phash backfill (limit ${{ inputs.limit }})
+        if: inputs.run_phash
+        run: |
+          cargo run -p mirror-client -- phash --limit ${{ inputs.limit }}
+          sleep 120
+
+      - name: Mirror (limit ${{ inputs.limit }})
+        if: inputs.run_mirror
+        run: |
+          cargo run -p mirror-client -- mirror --limit ${{ inputs.limit }}
+          sleep 120
+
+      - name: Audit (after)
+        run: cargo run -p mirror-client -- audit

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
-members = [".", "crates/backfill-thumbnails"]
+members = [".", "crates/backfill-thumbnails", "crates/phash", "crates/mirror-client"]
 
 [lib]
 name = "storj_interface"
@@ -21,6 +21,7 @@ aws-sdk-s3 = "1.64"
 axum = { version = "0.8.1", features = ["multipart"] }
 bytes = "1.8"
 chrono = "0.4"
+futures = "0.3"
 futures-util = "0.3.31"
 http-body-util = "0.1"
 once_cell = "1.21.1"
@@ -39,7 +40,10 @@ sentry-tower = { version = "0.42.0", features = ["http"] }
 sentry-tracing = "0.42.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
+phash = { path = "crates/phash" }
 tempfile = "3"
+tokio-postgres = "0.7.15"
+tokio-util = { version = "0.7", features = ["rt"] }
 thiserror = "2.0.12"
 tower = "0.5"
 tokio = { version = "1.43.0", features = ["full"] }
@@ -47,3 +51,15 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http = { version = "0.6", features = ["cors"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+utoipa = { version = "5.3.1", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+# IC / canister deps
+candid = "0.10.6"
+ic-agent = "0.41.0"
+k256 = { version = "0.13.3", features = ["jwk"] }
+yral-canisters-client = { git = "https://github.com/dolr-ai/yral-common.git", branch = "master", features = ["full"] }
+yral-types = { git = "https://github.com/dolr-ai/yral-common", branch = "master" }
+stringreader = "0.1.1"

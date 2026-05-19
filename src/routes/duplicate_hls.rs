@@ -16,8 +16,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::breadcrumb;
-use crate::consts::{ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, YRAL_NSFW_VIDEOS, YRAL_VIDEOS};
+use crate::consts::{ACCESS_GRANT_NSFW, MIRROR_ACCESS_GRANT, STORJ_SFW_BUCKET, YRAL_NSFW_VIDEOS};
 use crate::s3_client::S3Client;
+use crate::AppState;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -58,7 +59,7 @@ impl IntoResponse for Error {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct HlsUploadParams {
     video_id: String,
     is_nsfw: bool,
@@ -77,7 +78,7 @@ async fn upload_hls_to_storj(
     let (bucket, grant) = if is_nsfw {
         (YRAL_NSFW_VIDEOS.as_str(), ACCESS_GRANT_NSFW.as_str())
     } else {
-        (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
+        (STORJ_SFW_BUCKET.as_str(), MIRROR_ACCESS_GRANT.as_str())
     };
     let dest = format!("sj://{bucket}/{video_id}/hls/{hls_file_name}");
     let key = format!("{video_id}/hls/{hls_file_name}");
@@ -157,9 +158,21 @@ async fn upload_hls_to_s3(
     Ok(())
 }
 
+#[utoipa::path(
+    post,
+    path = "/hls/duplicate",
+    tag = "videos",
+    params(HlsUploadParams),
+    request_body(content = Vec<u8>, content_type = "application/octet-stream", description = "HLS file bytes"),
+    responses(
+        (status = 200, description = "HLS file duplicated"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 #[tracing::instrument(skip_all)]
 pub async fn handler(
-    State(s3_client): State<S3Client>,
+    State(state): State<AppState>,
     Query(params): Query<HlsUploadParams>,
     body: Body,
 ) -> Result<impl IntoResponse, Error> {
@@ -189,6 +202,7 @@ pub async fn handler(
 
     // Additionally upload to S3 for SFW videos
     if !params.is_nsfw {
+        let s3_client = state.s3_client.clone();
         join_set.spawn(async move {
             upload_hls_to_s3(
                 &s3_client,

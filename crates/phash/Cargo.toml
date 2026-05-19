@@ -1,0 +1,11 @@
+[package]
+name = "phash"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+ffmpeg-next = "7"
+image = { version = "0.25", default-features = false }
+image_hasher = "3.0"
+log = "0.4"

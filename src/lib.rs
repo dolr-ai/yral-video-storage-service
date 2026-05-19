@@ -1,11 +1,14 @@
 pub mod consts;
+pub mod db;
+pub mod jobs;
+pub mod storj_s3_client;
 pub mod duplicate {
     use std::collections::BTreeMap;
 
     use serde::{Deserialize, Serialize};
 
     /// Args for duplication request
-    #[derive(Serialize, Deserialize, Debug, Clone)]
+    #[derive(Serialize, Deserialize, Debug, Clone, utoipa::ToSchema)]
     pub struct Args {
         /// The publisher user principal supplied to off chain agent
         ///
@@ -31,7 +34,7 @@ pub mod move2nsfw {
     use serde::{Deserialize, Serialize};
 
     /// Args for moving a video to nsfw bucket
-    #[derive(Serialize, Deserialize, Debug, Clone)]
+    #[derive(Serialize, Deserialize, Debug, Clone, utoipa::ToSchema)]
     pub struct Args {
         /// The publisher user principal supplied to off chain agent
         ///

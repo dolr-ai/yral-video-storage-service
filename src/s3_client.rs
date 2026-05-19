@@ -122,6 +122,10 @@ pub struct S3ObjectInfo {
 }
 
 impl S3Client {
+    pub fn from_raw(client: aws_sdk_s3::Client, bucket: String) -> Self {
+        Self { client, bucket }
+    }
+
     pub async fn new() -> Self {
         Self::new_with_bucket(None).await
     }
@@ -276,65 +280,107 @@ impl S3Client {
         &self.bucket
     }
 
-    #[allow(dead_code)]
-    pub async fn list_objects(&self, prefix: Option<&str>) -> Result<Vec<S3ObjectInfo>, String> {
+    /// Fetch a single S3 LIST page with retry. Returns (items, next_continuation_token).
+    pub async fn list_objects_page(
+        &self,
+        prefix: Option<&str>,
+        continuation_token: Option<&str>,
+        start_after: Option<&str>,
+    ) -> Result<(Vec<S3ObjectInfo>, Option<String>), String> {
+        let token = continuation_token.map(ToOwned::to_owned);
+        let after = start_after.map(ToOwned::to_owned);
+        let response = retry_s3_op_string("list_objects_page", "", || {
+            let mut request = self.client.list_objects_v2().bucket(self.bucket.as_str());
+            if let Some(p) = prefix {
+                request = request.prefix(p);
+            }
+            if let Some(t) = token.as_deref() {
+                request = request.continuation_token(t);
+            }
+            if let Some(a) = after.as_deref() {
+                request = request.start_after(a);
+            }
+            async move { request.send().await.map_err(|e| e.to_string()) }
+        })
+        .await?;
+
         let mut items = Vec::new();
-        let mut continuation_token = None;
+        for object in response.contents() {
+            let Some(key) = object.key() else {
+                continue;
+            };
+            let last_modified = object
+                .last_modified()
+                .and_then(|v| DateTime::<Utc>::from_timestamp(v.secs(), 0));
+            items.push(S3ObjectInfo {
+                key: key.to_string(),
+                last_modified,
+                size: object.size(),
+            });
+        }
+        let next_token = response.next_continuation_token().map(ToOwned::to_owned);
+        Ok((items, next_token))
+    }
 
+    #[allow(dead_code)]
+    pub async fn list_objects(
+        &self,
+        prefix: Option<&str>,
+        start_after: Option<&str>,
+    ) -> Result<Vec<S3ObjectInfo>, String> {
+        let mut all_items = Vec::new();
+        let mut continuation_token: Option<String> = None;
+        let mut is_first_page = true;
         loop {
-            let mut request = self.client.list_objects_v2().bucket(&self.bucket);
-            if let Some(prefix) = prefix {
-                request = request.prefix(prefix);
-            }
-            if let Some(token) = continuation_token.as_deref() {
-                request = request.continuation_token(token);
-            }
-
-            let response = request.send().await.map_err(|err| err.to_string())?;
-
-            for object in response.contents() {
-                let Some(key) = object.key() else {
-                    continue;
-                };
-                let last_modified = object
-                    .last_modified()
-                    .and_then(|value| DateTime::<Utc>::from_timestamp(value.secs(), 0));
-                items.push(S3ObjectInfo {
-                    key: key.to_string(),
-                    last_modified,
-                    size: object.size(),
-                });
-            }
-
-            continuation_token = response.next_continuation_token().map(ToOwned::to_owned);
+            let current_start_after = if is_first_page { start_after } else { None };
+            let (items, next_token) = self
+                .list_objects_page(prefix, continuation_token.as_deref(), current_start_after)
+                .await?;
+            is_first_page = false;
+            all_items.extend(items);
+            continuation_token = next_token;
             if continuation_token.is_none() {
                 break;
             }
         }
-
-        Ok(items)
+        Ok(all_items)
     }
 
     #[allow(dead_code)]
     pub async fn object_exists(&self, key: &str) -> Result<bool, String> {
-        match self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(err) => {
-                let message = err.to_string();
-                if message.contains("NotFound") || message.contains("404") {
-                    Ok(false)
-                } else {
-                    Err(message)
+        retry_s3_op_string("object_exists", key, || {
+            let request = self.client.head_object().bucket(&self.bucket).key(key);
+
+            async move {
+                match request.send().await {
+                    Ok(_) => Ok(true),
+                    Err(err) => {
+                        let is_not_found = match &err {
+                            aws_sdk_s3::error::SdkError::ServiceError(e) => {
+                                matches!(
+                                    e.err(),
+                                    aws_sdk_s3::operation::head_object::HeadObjectError::NotFound(
+                                        _
+                                    )
+                                )
+                            }
+                            _ => false,
+                        };
+                        if is_not_found {
+                            return Ok(false);
+                        }
+
+                        let message = err.to_string();
+                        if message.contains("NotFound") || message.contains("404") {
+                            Ok(false)
+                        } else {
+                            Err(message)
+                        }
+                    }
                 }
             }
-        }
+        })
+        .await
     }
 
     #[allow(dead_code)]
@@ -353,6 +399,81 @@ impl S3Client {
             Ok(data.into_bytes().to_vec())
         })
         .await
+    }
+
+    /// Stream an S3 object directly to an open file — avoids loading into memory.
+    /// Retries with exponential backoff; truncates the file before each retry.
+    pub async fn download_to_file(
+        &self,
+        key: &str,
+        file: &mut tokio::fs::File,
+    ) -> Result<(), String> {
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
+        let mut last_err = String::new();
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                file.seek(std::io::SeekFrom::Start(0))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                file.set_len(0).await.map_err(|e| e.to_string())?;
+
+                let delay_ms = BASE_DELAY_MS * 2u64.pow(attempt - 1);
+                let jitter = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos()
+                    % 250) as u64;
+                let total_delay = Duration::from_millis(delay_ms + jitter);
+                tracing::warn!(
+                    operation = "download_to_file",
+                    key = key,
+                    attempt = attempt,
+                    max_retries = MAX_RETRIES,
+                    delay_ms = total_delay.as_millis() as u64,
+                    error = %last_err,
+                    "S3 operation failed, retrying"
+                );
+                tokio::time::sleep(total_delay).await;
+            }
+
+            let result: Result<(), String> = async {
+                let resp = self
+                    .client
+                    .get_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let mut body = resp.body;
+                while let Some(chunk) = body.next().await {
+                    let bytes = chunk.map_err(|e| e.to_string())?;
+                    file.write_all(&bytes).await.map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            }
+            .await;
+
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if attempt == MAX_RETRIES {
+                        tracing::error!(
+                            operation = "download_to_file",
+                            key = key,
+                            attempts = attempt + 1,
+                            error = %e,
+                            "S3 operation failed after all retries"
+                        );
+                        return Err(e);
+                    }
+                    last_err = e;
+                }
+            }
+        }
+        Err(last_err)
     }
 
     #[allow(dead_code)]

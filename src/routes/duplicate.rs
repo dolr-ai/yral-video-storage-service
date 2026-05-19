@@ -11,8 +11,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::breadcrumb;
-use crate::consts::{ACCESS_GRANT_NSFW, ACCESS_GRANT_SFW, YRAL_NSFW_VIDEOS, YRAL_VIDEOS};
+use crate::consts::{ACCESS_GRANT_NSFW, MIRROR_ACCESS_GRANT, STORJ_SFW_BUCKET, YRAL_NSFW_VIDEOS};
 use crate::s3_client::S3Client;
+use crate::AppState;
 
 // TTL for pending uploads (in hours)
 const PENDING_UPLOAD_TTL_HOURS: u32 = 1;
@@ -35,7 +36,7 @@ async fn upload_thumbnail_to_storj(
     let (bucket, grant) = if is_nsfw {
         (YRAL_NSFW_VIDEOS.as_str(), ACCESS_GRANT_NSFW.as_str())
     } else {
-        (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
+        (STORJ_SFW_BUCKET.as_str(), MIRROR_ACCESS_GRANT.as_str())
     };
     let dest_under = format!("sj://{bucket}/{publisher_user_id}/{video_id}_thumbnail.png");
     let dest_dash = format!("sj://{bucket}/{publisher_user_id}/{video_id}-thumbnail.png");
@@ -123,7 +124,7 @@ async fn upload_thumbnail_to_storj_with_ttl(
     let (bucket, grant) = if is_nsfw {
         (YRAL_NSFW_VIDEOS.as_str(), ACCESS_GRANT_NSFW.as_str())
     } else {
-        (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
+        (STORJ_SFW_BUCKET.as_str(), MIRROR_ACCESS_GRANT.as_str())
     };
     let dest_under = format!("sj://{bucket}/{publisher_user_id}/{video_id}_thumbnail.png");
     let dest_dash = format!("sj://{bucket}/{publisher_user_id}/{video_id}-thumbnail.png");
@@ -289,7 +290,7 @@ async fn upload_to_storj(
     let (bucket, grant) = if is_nsfw {
         (YRAL_NSFW_VIDEOS.as_str(), ACCESS_GRANT_NSFW.as_str())
     } else {
-        (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
+        (STORJ_SFW_BUCKET.as_str(), MIRROR_ACCESS_GRANT.as_str())
     };
     let dest = format!("sj://{bucket}/{publisher_user_id}/{video_id}.mp4");
     let key = format!("{publisher_user_id}/{video_id}.mp4");
@@ -366,9 +367,20 @@ async fn upload_to_s3(
     Ok(())
 }
 
+#[utoipa::path(
+    post,
+    path = "/duplicate",
+    tag = "videos",
+    request_body = storj_interface::duplicate::Args,
+    responses(
+        (status = 200, description = "Video duplicated to Storj"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 #[tracing::instrument(skip_all)]
 pub async fn handler(
-    State(s3_client): State<S3Client>,
+    State(state): State<AppState>,
     Json(Args {
         publisher_user_id,
         video_id,
@@ -376,6 +388,7 @@ pub async fn handler(
         metadata,
     }): Json<Args>,
 ) -> Result<impl IntoResponse, Error> {
+    let s3_client = &state.s3_client;
     let source = format!(
         "https://customer-2p3jflss4r4hmpnz.cloudflarestream.com/{video_id}/downloads/default.mp4",
     );
@@ -443,9 +456,9 @@ pub async fn handler(
         let storj_thumbnail_upload =
             upload_thumbnail_to_storj(&publisher_user_id, &video_id, &thumbnail_data, is_nsfw);
         let s3_video_upload =
-            upload_to_s3(&s3_client, &publisher_user_id, &video_id, &metadata, &body);
+            upload_to_s3(s3_client, &publisher_user_id, &video_id, &metadata, &body);
         let s3_thumbnail_upload =
-            upload_thumbnail_to_s3(&s3_client, &publisher_user_id, &video_id, &thumbnail_data);
+            upload_thumbnail_to_s3(s3_client, &publisher_user_id, &video_id, &thumbnail_data);
 
         tokio::try_join!(
             storj_video_upload,
@@ -465,32 +478,44 @@ pub async fn handler(
     Ok(())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct RawUploadInitialParams {
     publisher_user_id: String,
     video_id: String,
     is_nsfw: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct RawFinalizeParams {
     publisher_user_id: String,
     video_id: String,
     is_nsfw: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct RawFinalizeBody {
     #[serde(default)]
     metadata: BTreeMap<String, String>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/duplicate_raw/upload",
+    tag = "videos",
+    params(RawUploadInitialParams),
+    request_body(content = Vec<u8>, content_type = "multipart/form-data", description = "Video file in 'file' field (max 500MB)"),
+    responses(
+        (status = 200, description = "Video uploaded to staging area"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 #[tracing::instrument(skip_all)]
 pub async fn handler_raw_upload_initial(
-    State(s3_client): State<S3Client>,
+    State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<RawUploadInitialParams>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, Error> {
+    let s3_client = &state.s3_client;
     // Extract the "file" field from the multipart upload
     let mut file_data = None;
     while let Some(field) = multipart
@@ -537,14 +562,14 @@ pub async fn handler_raw_upload_initial(
             params.is_nsfw,
         );
         let s3_video_upload = upload_to_s3(
-            &s3_client,
+            s3_client,
             &params.publisher_user_id,
             &params.video_id,
             &pending_metadata,
             &body_data,
         );
         let s3_thumbnail_upload = upload_thumbnail_to_s3(
-            &s3_client,
+            s3_client,
             &params.publisher_user_id,
             &params.video_id,
             &thumbnail_data,
@@ -583,18 +608,30 @@ pub async fn handler_raw_upload_initial(
     })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/duplicate_raw/finalize",
+    tag = "videos",
+    params(RawFinalizeParams),
+    request_body = RawFinalizeBody,
+    responses(
+        (status = 200, description = "Video finalized and pushed to Storj"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 #[tracing::instrument(skip_all)]
 pub async fn handler_raw_finalize(
-    State(s3_client): State<S3Client>,
+    State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<RawFinalizeParams>,
     Json(body): Json<RawFinalizeBody>,
 ) -> Result<impl IntoResponse, Error> {
+    let s3_client = &state.s3_client;
     let metadata = body.metadata;
 
     let (bucket, grant) = if params.is_nsfw {
         (YRAL_NSFW_VIDEOS.as_str(), ACCESS_GRANT_NSFW.as_str())
     } else {
-        (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
+        (STORJ_SFW_BUCKET.as_str(), MIRROR_ACCESS_GRANT.as_str())
     };
 
     let src_video_path = format!(
@@ -737,14 +774,14 @@ pub async fn handler_raw_finalize(
             params.is_nsfw,
         );
         let s3_video_upload = upload_to_s3(
-            &s3_client,
+            s3_client,
             &params.publisher_user_id,
             &params.video_id,
             &metadata,
             &file_data,
         );
         let s3_thumbnail_upload = upload_thumbnail_to_s3(
-            &s3_client,
+            s3_client,
             &params.publisher_user_id,
             &params.video_id,
             &thumbnail_data,
@@ -795,7 +832,7 @@ async fn upload_to_storj_with_ttl(
     let (bucket, grant) = if is_nsfw {
         (YRAL_NSFW_VIDEOS.as_str(), ACCESS_GRANT_NSFW.as_str())
     } else {
-        (YRAL_VIDEOS.as_str(), ACCESS_GRANT_SFW.as_str())
+        (STORJ_SFW_BUCKET.as_str(), MIRROR_ACCESS_GRANT.as_str())
     };
     let dest = format!("sj://{bucket}/{publisher_user_id}/{video_id}.mp4");
 

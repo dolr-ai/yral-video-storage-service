@@ -2,6 +2,11 @@ services:
   storj-interface:
     image: ${APP_IMAGE:-ghcr.io/dolr-ai/storj-interface}:${IMAGE_TAG:-latest}
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${HOST_PORT:-3004}:3000"
     environment:
       STORJ_ACCESS_GRANT_SFW: ${STORJ_ACCESS_GRANT_SFW}
       SFW_BUCKET: ${SFW_BUCKET:-yral-videos}
@@ -14,28 +19,38 @@ services:
       HETZNER_S3_REGION: ${HETZNER_S3_REGION:-eu-central}
       SERVICE_SECRET_TOKEN: ${SERVICE_SECRET_TOKEN}
       ENVIRONMENT: ${ENVIRONMENT:-production}
+      DATABASE_URL: postgres://storj:${POSTGRES_PASSWORD}@postgres:5432/video_fingerprint_index
+      STORJ_EU1_GATEWAY_ACCESS_KEY: ${STORJ_EU1_GATEWAY_ACCESS_KEY}
+      STORJ_EU1_GATEWAY_SECRET_KEY: ${STORJ_EU1_GATEWAY_SECRET_KEY}
+      STORJ_MIRROR_ACCESS_GRANT: ${STORJ_MIRROR_ACCESS_GRANT}
+      STORJ_SFW_BUCKET: ${STORJ_SFW_BUCKET:-yral-sfw}
+      PHASH_CONCURRENCY: ${PHASH_CONCURRENCY:-10}
+      MIRROR_CONCURRENCY: ${MIRROR_CONCURRENCY:-30}
+      SCAN_PAGE_SIZE: ${SCAN_PAGE_SIZE:-2500}
     networks:
       - storj-net
 
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: video_fingerprint_index
+      POSTGRES_USER: storj
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - postgres_data:/var/lib/postgresql/data
     networks:
       - storj-net
-    depends_on:
-      - storj-interface
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U storj -d video_fingerprint_index"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
 networks:
   storj-net:
     driver: bridge
 
 volumes:
-  caddy_data:
-  caddy_config:
+  postgres_data:

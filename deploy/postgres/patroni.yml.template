@@ -1,0 +1,64 @@
+scope: "storj-cluster"
+namespace: "/patroni"
+name: "${NODE_NAME}"
+
+restapi:
+  listen: "0.0.0.0:8008"
+  connect_address: "${APP_HOST}:18008"
+  authentication:
+    username: "patroni"
+    password: "${PATRONI_API_PASSWORD}"
+
+etcd3:
+  hosts: "${ETCD_HOSTS}"
+
+bootstrap:
+  post_init: /scripts/post_init.sh
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    synchronous_mode: true
+    synchronous_mode_strict: false
+    synchronous_node_count: 1
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        wal_level: replica
+        max_wal_senders: 10
+        max_replication_slots: 10
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+  pg_hba:
+    - host replication replicator 0.0.0.0/0 scram-sha-256
+    - host all all 0.0.0.0/0 scram-sha-256
+  users:
+    storj:
+      password: "${APP_DB_PASSWORD}"
+    replicator:
+      password: "${REPLICATOR_PASSWORD}"
+      options:
+        - replication
+
+postgresql:
+  listen: "0.0.0.0:5432"
+  connect_address: "${APP_HOST}:15432"
+  data_dir: "/var/lib/postgresql/data"
+  bin_dir: "/usr/local/bin"
+  pgpass: "/var/lib/postgresql/.pgpass"
+  authentication:
+    replication:
+      username: "replicator"
+      password: "${REPLICATOR_PASSWORD}"
+    superuser:
+      username: "postgres"
+      password: "${POSTGRES_SUPERUSER_PASSWORD}"
+  pg_hba:
+    - host replication replicator 0.0.0.0/0 scram-sha-256
+    - host all all 0.0.0.0/0 scram-sha-256
+  parameters:
+    shared_buffers: "256MB"
+    password_encryption: "scram-sha-256"
