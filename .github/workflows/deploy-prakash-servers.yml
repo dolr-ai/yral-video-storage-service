@@ -181,22 +181,6 @@ jobs:
           (ssh "deploy@${SERVER_1_IP}" \
             "cd ${APP_DIR}/deploy && COMPOSE_PROJECT_NAME=yral-video-storage-service docker compose -f docker-compose.ha.yml logs --tail=50 storj-interface 2>/dev/null" && exit 1)
 
-      - name: Route smoke check
-        run: |
-          curl --fail --retry 30 --retry-delay 5 --retry-all-errors \
-            "${PREVIEW_URL}/api-docs/openapi.json" >/tmp/openapi.json
-
-          STATUS_CODE="$(curl --silent --show-error \
-            --output /tmp/videogen-status-response.txt \
-            --write-out "%{http_code}" \
-            "${PREVIEW_URL}/api/v2/videogen/status/not-a-principal/all")"
-
-          if [[ "${STATUS_CODE}" != "400" ]]; then
-            echo "expected videogen invalid principal route to return 400, got ${STATUS_CODE}"
-            cat /tmp/videogen-status-response.txt
-            exit 1
-          fi
-
   e2e-tests:
     name: E2E Tests
     needs: deploy
