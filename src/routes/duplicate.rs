@@ -6,7 +6,6 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::process::Stdio;
-use storj_interface::duplicate::Args;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -241,9 +240,6 @@ pub enum Error {
     #[error(transparent)]
     Hyper(#[from] axum::Error),
 
-    #[error("Cloudflare returned non-ok status ({0}) when fetching the video")]
-    Clouflare(StatusCode),
-
     #[error("S3 operation failed: {0}")]
     S3(String),
 }
@@ -255,14 +251,6 @@ impl IntoResponse for Error {
             Error::Network(_) | Error::Io(_) | Error::Hyper(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error. Check server logs.",
-            ),
-            Error::Clouflare(StatusCode::NOT_FOUND) => (
-                StatusCode::NOT_FOUND,
-                "The video doesn't exist on cloudflare",
-            ),
-            Error::Clouflare(_) => (
-                StatusCode::BAD_REQUEST,
-                "The video couldn't fetched from cloudflare. Check server logs.",
             ),
             Error::S3(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -364,117 +352,6 @@ async fn upload_to_s3(
         })?;
 
     breadcrumb!("s3", "upload_video", key, true, "completed");
-    Ok(())
-}
-
-#[utoipa::path(
-    post,
-    path = "/duplicate",
-    tag = "videos",
-    request_body = storj_interface::duplicate::Args,
-    responses(
-        (status = 200, description = "Video duplicated to Storj"),
-        (status = 401, description = "Unauthorized"),
-        (status = 500, description = "Internal server error"),
-    )
-)]
-#[tracing::instrument(skip_all)]
-pub async fn handler(
-    State(state): State<AppState>,
-    Json(Args {
-        publisher_user_id,
-        video_id,
-        is_nsfw,
-        metadata,
-    }): Json<Args>,
-) -> Result<impl IntoResponse, Error> {
-    let s3_client = &state.s3_client;
-    let source = format!(
-        "https://customer-2p3jflss4r4hmpnz.cloudflarestream.com/{video_id}/downloads/default.mp4",
-    );
-
-    // Download video from Cloudflare
-    breadcrumb!("http", "download", source, true, "starting download");
-    let req = reqwest::get(&source).await?;
-    let status = req.status();
-
-    if status != StatusCode::OK {
-        breadcrumb!(
-            "http",
-            "download",
-            source,
-            false,
-            format!("status: {}", status)
-        );
-        return Err(Error::Clouflare(status));
-    }
-
-    // Collect all bytes into memory to extract thumbnail and upload
-    let body = req.bytes().await?;
-    breadcrumb!(
-        "http",
-        "download",
-        source,
-        true,
-        format!("downloaded {} bytes", body.len())
-    );
-
-    // Extract thumbnail from video
-    breadcrumb!(
-        "ffmpeg",
-        "extract_thumbnail",
-        video_id,
-        true,
-        "starting extraction"
-    );
-    let thumbnail_data = match extract_thumbnail(&body).await {
-        Ok(data) => {
-            breadcrumb!(
-                "ffmpeg",
-                "extract_thumbnail",
-                video_id,
-                true,
-                format!("extracted {} bytes", data.len())
-            );
-            data
-        }
-        Err(e) => {
-            breadcrumb!(
-                "ffmpeg",
-                "extract_thumbnail",
-                video_id,
-                false,
-                format!("{}", e)
-            );
-            return Err(e);
-        }
-    };
-
-    if !is_nsfw {
-        let storj_video_upload =
-            upload_to_storj(&publisher_user_id, &video_id, &metadata, &body, is_nsfw);
-        let storj_thumbnail_upload =
-            upload_thumbnail_to_storj(&publisher_user_id, &video_id, &thumbnail_data, is_nsfw);
-        let s3_video_upload =
-            upload_to_s3(s3_client, &publisher_user_id, &video_id, &metadata, &body);
-        let s3_thumbnail_upload =
-            upload_thumbnail_to_s3(s3_client, &publisher_user_id, &video_id, &thumbnail_data);
-
-        tokio::try_join!(
-            storj_video_upload,
-            storj_thumbnail_upload,
-            s3_video_upload,
-            s3_thumbnail_upload
-        )?;
-    } else {
-        let storj_video_upload =
-            upload_to_storj(&publisher_user_id, &video_id, &metadata, &body, is_nsfw);
-        let storj_thumbnail_upload =
-            upload_thumbnail_to_storj(&publisher_user_id, &video_id, &thumbnail_data, is_nsfw);
-
-        tokio::try_join!(storj_video_upload, storj_thumbnail_upload)?;
-    }
-
     Ok(())
 }
 

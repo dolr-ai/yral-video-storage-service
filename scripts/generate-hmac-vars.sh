@@ -5,7 +5,6 @@
 #
 # Produces variables consumed by .hurl test files:
 #   hmac_ts          – shared Unix timestamp
-#   hmac_sig_dup     – signature for POST /duplicate
 #   hmac_sig_move    – signature for POST /move-to-nsfw
 #   hmac_sig_hls_dup – signature for POST /hls/duplicate
 
@@ -26,7 +25,6 @@ sign() {
 
 {
   echo "hmac_ts=${TS}"
-  echo "hmac_sig_dup=$(sign POST /duplicate "$TS")"
   echo "hmac_sig_move=$(sign POST /move-to-nsfw "$TS")"
   echo "hmac_sig_hls_dup=$(sign POST /hls/duplicate "$TS")"
 } >> "$OUT"

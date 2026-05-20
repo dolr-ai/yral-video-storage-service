@@ -6,18 +6,23 @@ Storj interface is a rest interface to upload objects to storj via the uplink cl
 
 Storj interface is configured via the following environment variables.
 
-| Name                      | Description                                                    | Default (no default means `required`) |
-|---------------------------|----------------------------------------------------------------|---------------------------------------|
-| `STORJ_ACCESS_GRANT_SFW`  | Storj access grant that is used when accessing the sfw bucket  |                                       |
-| `STORJ_ACCESS_GRANT_NSFW` | Storj access grant that is used when accessing the nsfw bucket |                                       |
-| `SFW_BUCKET`              | The name of the sfw bucket                                     | yral-videos                           |
-| `NSFW_BUCKET`             | The name of the nsfw bucket                                    | yral-nsfw-videos                      |
-| `SERVICE_SECRET_TOKEN`    | Share secret between storj interface and the caller            |                                       |
+| Name                         | Description                                                                      | Default (no default means `required`) |
+|------------------------------|----------------------------------------------------------------------------------|---------------------------------------|
+| `STORJ_MIRROR_ACCESS_GRANT`  | Storj access grant for current sfw raw/HLS uploads and mirror jobs               |                                       |
+| `STORJ_SFW_BUCKET`           | Current sfw Storj bucket                                                         | yral-sfw                              |
+| `STORJ_ACCESS_GRANT_NSFW`    | Storj access grant that is used when accessing the nsfw bucket                   |                                       |
+| `NSFW_BUCKET`                | The name of the nsfw bucket                                                      | yral-nsfw-videos                      |
+| `HETZNER_S3_ACCESS_KEY`      | Hetzner S3 access key for current sfw raw/HLS uploads                            |                                       |
+| `HETZNER_S3_SECRET_KEY`      | Hetzner S3 secret key for current sfw raw/HLS uploads                            |                                       |
+| `HETZNER_S3_BUCKET`          | Hetzner S3 bucket for current sfw raw/HLS uploads                                |                                       |
+| `STORJ_ACCESS_GRANT_SFW`     | Legacy sfw access grant kept for compatibility with older startup configuration  |                                       |
+| `SFW_BUCKET`                 | Legacy sfw bucket kept for compatibility with older startup configuration        | yral-videos                           |
+| `SERVICE_SECRET_TOKEN`       | Shared secret between storj interface and the caller                             |                                       |
 
-For running locally, a storj account is required. 
+For running locally, a Storj account is required.
 - `cp .env.example .env`
-- Create two buckets, for storing sfw and nsfw videos. Update `.env` file accordingly.
-- Create access grants to the buckets. Update `.env` file accordingly.
+- Create/update the current sfw bucket (`yral-sfw`) and nsfw bucket (`yral-nsfw-videos`). Update `.env` file accordingly.
+- Create access grants to the buckets. Current sfw raw/HLS uploads use `STORJ_MIRROR_ACCESS_GRANT`; nsfw uploads use `STORJ_ACCESS_GRANT_NSFW`.
 
 ## Running prebuilt image
 
@@ -44,10 +49,10 @@ docker run --env-file .env --rm -it -p 3000:3000 storj-interface
 The rest api is tested via `hurl`, so make sure that is installed on the machine.
 An example variable file is available at `test/example-test.vars`.
 
-Following command can be used to test the rest api side of the storj interface's `duplication` request.
+Following command can be used to test the REST API side of the storage interface's raw upload request.
 
 ```sh
-hurl test/duplicate.hurl --variables-file test/local-test.vars --test
+hurl test/duplicate_raw_multipart.hurl --variables-file test/local-test.vars --test
 ```
 
 For more thorough e2e testing,
@@ -74,4 +79,3 @@ Uplink crate, as of writing this documentation, doesn't compile for `wasm32-unkn
 
 
 ## NOTE: Hetzner ie sfw upload is indirectly tested via move2nsfw test (the test that copies from hetzner to storj and then verifies on storj)
-
