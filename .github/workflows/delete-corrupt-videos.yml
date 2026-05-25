@@ -1,0 +1,108 @@
+name: Delete Corrupt AI-Gen Videos
+
+# One-off workflow to delete known corrupt AI-generated videos from Hetzner SFW bucket.
+# dry-run: verifies all objects exist (no changes).
+# execute: requires Production environment approval, then deletes all listed keys.
+
+on:
+  push:
+    branches:
+      - prakash/remove-corrupt-videos
+
+concurrency:
+  group: delete-corrupt-videos
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    name: "dry-run · verify objects exist"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify corrupt video objects exist
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.HETZNER_S3_REGION }}
+          HETZNER_S3_ENDPOINT: ${{ secrets.HETZNER_S3_ENDPOINT }}
+          HETZNER_S3_BUCKET: ${{ secrets.HETZNER_S3_BUCKET }}
+        run: |
+          set -euo pipefail
+
+          KEYS=(
+            "7wek2-uqur6-3bbai-3z3nq-zbzko-il67x-bu3eu-6bk25-spxtx-65hou-tqe/7ba82669a8eb489b87d800b02b55fe5e.mp4"
+            "nwfrx-xxjzx-uaveh-sqctt-nngud-stze4-k2ogj-npntl-cjyle-oda6r-aae/0e1a61b28cb14e7d860b28cd4b794fd0.mp4"
+            "nwfrx-xxjzx-uaveh-sqctt-nngud-stze4-k2ogj-npntl-cjyle-oda6r-aae/3528d486ee3745b4b4b2866a36a1d3ef.mp4"
+            "nwfrx-xxjzx-uaveh-sqctt-nngud-stze4-k2ogj-npntl-cjyle-oda6r-aae/51c02d3b533e484e9b662c5aa3c06d2b.mp4"
+            "nwfrx-xxjzx-uaveh-sqctt-nngud-stze4-k2ogj-npntl-cjyle-oda6r-aae/9f4d35e9bc984be7a09e8468ec6dfa5a.mp4"
+            "nwfrx-xxjzx-uaveh-sqctt-nngud-stze4-k2ogj-npntl-cjyle-oda6r-aae/fd2033afb74e44188f216835f3b0d758.mp4"
+            "q6mn5-bcoym-ajuor-qyeqi-34qql-7kthq-fqhyo-tly2e-eyb7o-skbbq-xae/55deccae224e4f55b0c84ee0f17430e1.mp4"
+            "qfyw6-yhnak-bqrxk-6csmr-aptij-rkqdt-o3qgd-26ygr-6727r-5h7ng-qae/4733bfe1-b3b7-48a3-99b7-639ed54147d5.mp4"
+            "rblwz-mzssg-rxuu5-vbnt6-54qmb-nhd73-hj3t3-54vrs-m6ma6-e2q6i-qae/50d940f9775646c785c3ba93220d0214.mp4"
+          )
+
+          MISSING=0
+          for key in "${KEYS[@]}"; do
+            if aws s3api head-object \
+              --bucket "$HETZNER_S3_BUCKET" \
+              --key "$key" \
+              --endpoint-url "$HETZNER_S3_ENDPOINT" \
+              --output text 2>/dev/null; then
+              echo "EXISTS:  $key"
+            else
+              echo "MISSING: $key"
+              MISSING=$((MISSING + 1))
+            fi
+          done
+
+          echo ""
+          echo "Total: ${#KEYS[@]}  Missing: $MISSING"
+
+  execute:
+    name: "execute · delete corrupt videos"
+    needs: [dry-run]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: Production
+    steps:
+      - name: Delete corrupt video objects
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.HETZNER_S3_REGION }}
+          HETZNER_S3_ENDPOINT: ${{ secrets.HETZNER_S3_ENDPOINT }}
+          HETZNER_S3_BUCKET: ${{ secrets.HETZNER_S3_BUCKET }}
+        run: |
+          set -euo pipefail
+
+          KEYS=(
+            "7wek2-uqur6-3bbai-3z3nq-zbzko-il67x-bu3eu-6bk25-spxtx-65hou-tqe/7ba82669a8eb489b87d800b02b55fe5e.mp4"
+            "nwfrx-xxjzx-uaveh-sqctt-nngud-stze4-k2ogj-npntl-cjyle-oda6r-aae/0e1a61b28cb14e7d860b28cd4b794fd0.mp4"
+            "nwfrx-xxjzx-uaveh-sqctt-nngud-stze4-k2ogj-npntl-cjyle-oda6r-aae/3528d486ee3745b4b4b2866a36a1d3ef.mp4"
+            "nwfrx-xxjzx-uaveh-sqctt-nngud-stze4-k2ogj-npntl-cjyle-oda6r-aae/51c02d3b533e484e9b662c5aa3c06d2b.mp4"
+            "nwfrx-xxjzx-uaveh-sqctt-nngud-stze4-k2ogj-npntl-cjyle-oda6r-aae/9f4d35e9bc984be7a09e8468ec6dfa5a.mp4"
+            "nwfrx-xxjzx-uaveh-sqctt-nngud-stze4-k2ogj-npntl-cjyle-oda6r-aae/fd2033afb74e44188f216835f3b0d758.mp4"
+            "q6mn5-bcoym-ajuor-qyeqi-34qql-7kthq-fqhyo-tly2e-eyb7o-skbbq-xae/55deccae224e4f55b0c84ee0f17430e1.mp4"
+            "qfyw6-yhnak-bqrxk-6csmr-aptij-rkqdt-o3qgd-26ygr-6727r-5h7ng-qae/4733bfe1-b3b7-48a3-99b7-639ed54147d5.mp4"
+            "rblwz-mzssg-rxuu5-vbnt6-54qmb-nhd73-hj3t3-54vrs-m6ma6-e2q6i-qae/50d940f9775646c785c3ba93220d0214.mp4"
+          )
+
+          FAILED=0
+          for key in "${KEYS[@]}"; do
+            if aws s3api delete-object \
+              --bucket "$HETZNER_S3_BUCKET" \
+              --key "$key" \
+              --endpoint-url "$HETZNER_S3_ENDPOINT"; then
+              echo "DELETED: $key"
+            else
+              echo "FAILED:  $key"
+              FAILED=$((FAILED + 1))
+            fi
+          done
+
+          echo ""
+          echo "Total: ${#KEYS[@]}  Failed: $FAILED"
+          [ "$FAILED" -eq 0 ] || exit 1
