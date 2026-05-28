@@ -1,0 +1,71 @@
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModerationInput {
+    pub request_id: String,
+    pub user_principal: String,
+    pub prompt: String,
+    pub image_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModerationDecision {
+    Safe,
+    Unsafe,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ModerationError {
+    #[error("moderation service request failed: {0}")]
+    RequestFailed(String),
+}
+
+#[async_trait::async_trait]
+pub trait ModerationClient: Send + Sync {
+    async fn moderate(&self, input: ModerationInput)
+        -> Result<ModerationDecision, ModerationError>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MockAllowModerationClient;
+
+#[async_trait::async_trait]
+impl ModerationClient for MockAllowModerationClient {
+    async fn moderate(
+        &self,
+        _input: ModerationInput,
+    ) -> Result<ModerationDecision, ModerationError> {
+        Ok(ModerationDecision::Safe)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MockAllowModerationClient, ModerationClient, ModerationDecision, ModerationInput};
+    use crate::videogen::config::{AnsumanModerationMode, VideogenConfig, VideogenConfigError};
+
+    #[tokio::test]
+    async fn mock_allow_returns_safe_decision() {
+        let client = MockAllowModerationClient;
+        let decision = client
+            .moderate(ModerationInput {
+                request_id: "018f5fa2-05c7-4b4a-8934-19b1f3c29d49".to_string(),
+                user_principal: "aaaaa-aa".to_string(),
+                prompt: "make a sunrise over mountains".to_string(),
+                image_url: Some("https://example.test/image.png".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(decision, ModerationDecision::Safe);
+    }
+
+    #[test]
+    fn production_rejects_mock_allow_moderation_config() {
+        let mut cfg = VideogenConfig::test_defaults();
+        cfg.ansuman_moderation_mode = AnsumanModerationMode::MockAllow;
+
+        assert_eq!(
+            cfg.validate_for_environment("production"),
+            Err(VideogenConfigError::MockModerationInProduction)
+        );
+    }
+}
