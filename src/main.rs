@@ -34,6 +34,7 @@ mod s3_client;
 pub(crate) mod sentry_utils;
 mod storj_s3_client;
 mod thumbnail;
+mod videogen;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -178,6 +179,8 @@ async fn run_server() -> anyhow::Result<()> {
     let _ = &*consts::STORJ_EU1_GATEWAY_ACCESS_KEY;
     let _ = &*consts::STORJ_EU1_GATEWAY_SECRET_KEY;
     let _ = &*consts::MIRROR_ACCESS_GRANT;
+    let _videogen_config =
+        videogen::config::VideogenConfig::from_env().context("Failed to load videogen config")?;
 
     // Initialize S3 client
     let s3_client = s3_client::S3Client::new().await;
