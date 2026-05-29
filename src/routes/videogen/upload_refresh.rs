@@ -24,7 +24,7 @@ const REFRESH_PATH: &str = "/api/v2/videogen/upload-url/refresh";
 
 // ─── Request / response types ─────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct UploadRefreshRequest {
     pub request_key: RefreshRequestKey,
     pub user_principal: String,
@@ -48,7 +48,7 @@ impl From<&RefreshRequestKey> for RateLimiterRequestKey {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct UploadRefreshResponse {
     pub video_id: String,
     pub object_key: String,
@@ -57,7 +57,7 @@ pub struct UploadRefreshResponse {
     pub expires_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct RefreshError {
     pub code: String,
     pub message: String,
@@ -324,6 +324,21 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 
 // ─── Axum handler ─────────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/api/v2/videogen/upload-url/refresh",
+    tag = "videogen",
+    request_body(
+        content = UploadRefreshRequest,
+        description = "Request a fresh upload URL (HMAC-authenticated)",
+        content_type = "application/json"
+    ),
+    responses(
+        (status = 200, description = "Fresh upload URL", body = UploadRefreshResponse),
+        (status = 401, description = "HMAC authentication failed", body = RefreshError),
+        (status = 409, description = "Conflict or unknown request", body = RefreshError),
+    )
+)]
 pub async fn refresh_upload_url(
     State(state): State<AppState>,
     headers: HeaderMap,

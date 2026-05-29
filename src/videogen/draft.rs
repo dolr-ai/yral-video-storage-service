@@ -29,6 +29,7 @@ pub struct LoggingDraftServiceClient;
 #[async_trait::async_trait]
 impl DraftServiceClient for LoggingDraftServiceClient {
     async fn create_draft(&self, request: DraftCreationRequest) -> Result<(), DraftServiceError> {
+        metrics::counter!(crate::videogen::metrics::DRAFT_CREATION_TOTAL).increment(1);
         tracing::info!(
             request_id = %request.request_id,
             principal = %request.request_key.principal,

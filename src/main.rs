@@ -1,9 +1,10 @@
 use anyhow::Context;
 use axum::{
+    body::Body,
     extract::{DefaultBodyLimit, Request},
     http::{HeaderMap, Method},
     middleware::{self, Next},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
@@ -81,6 +82,10 @@ pub(crate) struct AppState {
         routes::mirror::update_config,
         routes::videogen::get_in_progress_drafts,
         routes::videogen::generate_video,
+        routes::videogen::get_providers,
+        routes::videogen::get_providers_all,
+        routes::videogen::complete_video,
+        routes::videogen::refresh_upload_url,
         // routes::videogen::get_in_progress_by_principal,
         // routes::videogen::get_all_status_by_principal,
     ),
@@ -110,6 +115,16 @@ pub(crate) struct AppState {
         routes::videogen::ImageSource,
         routes::videogen::VideoGenError,
         routes::videogen::VideoUploadHandling,
+        routes::videogen::ProvidersResponse,
+        routes::videogen::ProviderItem,
+        routes::videogen::ProviderCost,
+        routes::videogen::CompleteVideoRequest,
+        routes::videogen::CompletionStatus,
+        routes::videogen::CompletionError,
+        routes::videogen::CompletionRequestKey,
+        routes::videogen::UploadRefreshRequest,
+        routes::videogen::UploadRefreshResponse,
+        routes::videogen::RefreshError,
         // routes::videogen::AllStatusItem,
         // routes::videogen::AllStatusResponse,
     )),
@@ -193,6 +208,12 @@ async fn run_server() -> anyhow::Result<()> {
     let _ = &*consts::MIRROR_ACCESS_GRANT;
     let videogen_config =
         videogen::config::VideogenConfig::from_env().context("Failed to load videogen config")?;
+
+    // Install Prometheus metrics recorder and register metric descriptions
+    let metrics_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .expect("failed to install Prometheus metrics recorder");
+    videogen::metrics::init_metrics();
 
     // Initialize S3 client
     let s3_client = s3_client::S3Client::new().await;
@@ -405,6 +426,26 @@ async fn run_server() -> anyhow::Result<()> {
         //     "/api/v2/videogen/status/{principal}/all",
         //     get(routes::videogen::get_all_status_by_principal).with_state(app_state.clone()),
         // )
+        .route(
+            "/api/v2/videogen/providers",
+            get(routes::videogen::get_providers),
+        )
+        .route(
+            "/api/v2/videogen/providers-all",
+            get(routes::videogen::get_providers_all),
+        )
+        .route(
+            "/metrics",
+            get({
+                let handle = metrics_handle.clone();
+                move || async move {
+                    Response::builder()
+                        .header("content-type", "text/plain; version=0.0.4")
+                        .body(Body::from(handle.render()))
+                        .unwrap()
+                }
+            }),
+        )
         .route("/health", get(health))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(middleware::from_fn(sentry_utils::sentry_request_logger))

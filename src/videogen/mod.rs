@@ -5,6 +5,7 @@ pub mod draft;
 pub mod fingerprint;
 pub mod hmac;
 pub mod identity_crypto;
+pub mod metrics;
 pub mod rate_limiter;
 pub mod reconcile;
 pub mod types;

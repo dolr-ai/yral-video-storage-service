@@ -68,3 +68,5 @@ k256 = { version = "0.13.3", features = ["jwk"] }
 yral-canisters-client = { git = "https://github.com/dolr-ai/yral-common.git", branch = "master", features = ["full"] }
 yral-types = { git = "https://github.com/dolr-ai/yral-common", branch = "master" }
 stringreader = "0.1.1"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"

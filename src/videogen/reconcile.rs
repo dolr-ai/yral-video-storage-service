@@ -267,6 +267,7 @@ async fn reconcile_uploaded<D: ReconcileDeps>(deps: &D, config: &ReconcileConfig
 
     for row in &rows {
         let key = &row.request_key;
+        metrics::counter!(crate::videogen::metrics::DRAFT_CREATION_TOTAL).increment(1);
         if let Err(error) = deps.mark_draft_creating(key).await {
             tracing::warn!(
                 principal = %key.principal,
@@ -326,6 +327,7 @@ async fn reconcile_draft_creating<D: ReconcileDeps>(deps: &D, config: &Reconcile
             }
         } else {
             // Retry draft creation.
+            metrics::counter!(crate::videogen::metrics::DRAFT_CREATION_TOTAL).increment(1);
             if let Err(error) = deps.create_draft_for_upload(row).await {
                 tracing::warn!(
                     principal = %key.principal,
@@ -407,6 +409,7 @@ async fn reconcile_draft_created<D: ReconcileDeps>(deps: &D, config: &ReconcileC
 // ---------------------------------------------------------------------------
 
 pub async fn run_reconciliation_cycle<D: ReconcileDeps>(deps: &D, config: &ReconcileConfig) {
+    metrics::counter!(crate::videogen::metrics::RECONCILIATION_ACTIONS_TOTAL).increment(1);
     reconcile_context_created(deps, config).await;
     reconcile_submitted(deps, config).await;
     reconcile_uploaded(deps, config).await;

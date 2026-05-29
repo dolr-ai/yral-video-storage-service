@@ -21,7 +21,7 @@ use crate::{
 
 // ─── Request / response types ────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct CompletionRequestKey {
     pub principal: String,
     pub counter: u64,
@@ -36,7 +36,7 @@ impl From<&CompletionRequestKey> for RateLimiterRequestKey {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct CompleteVideoRequest {
     pub request_key: CompletionRequestKey,
     pub user_principal: String,
@@ -55,14 +55,14 @@ pub struct CompleteVideoRequest {
     pub checksum: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum CompletionStatus {
     Success,
     Failure,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct CompletionError {
     pub code: String,
     pub message: String,
@@ -169,8 +169,13 @@ pub async fn complete_with_dependencies<D: CompletionDeps>(
     raw_body: &[u8],
     path: &str,
 ) -> Result<StatusCode, (StatusCode, Json<CompletionError>)> {
+    metrics::counter!(crate::videogen::metrics::COMPLETION_CALLBACKS_TOTAL).increment(1);
+
     // Step 1: verify HMAC before any JSON parse or state mutation
-    verify_hmac(deps, headers, raw_body, path)?;
+    verify_hmac(deps, headers, raw_body, path).map_err(|e| {
+        metrics::counter!(crate::videogen::metrics::COMPLETION_HMAC_FAILURES_TOTAL).increment(1);
+        e
+    })?;
 
     // Step 2: parse body
     let req: CompleteVideoRequest = serde_json::from_slice(raw_body).map_err(|e| {
@@ -271,6 +276,7 @@ async fn handle_success_completion<D: CompletionDeps>(
     })?;
 
     // Step 6: call draft service
+    metrics::counter!(crate::videogen::metrics::DRAFT_CREATION_TOTAL).increment(1);
     let draft_req = DraftCreationRequest {
         request_id: req.request_id.clone(),
         request_key: request_key.clone(),
@@ -582,6 +588,22 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 
 // ─── Axum handler ────────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/api/v2/videogen/complete",
+    tag = "videogen",
+    request_body(
+        content = CompleteVideoRequest,
+        description = "Completion callback from Vast (HMAC-authenticated)",
+        content_type = "application/json"
+    ),
+    responses(
+        (status = 200, description = "Completion accepted"),
+        (status = 202, description = "Already in progress"),
+        (status = 401, description = "HMAC authentication failed", body = CompletionError),
+        (status = 409, description = "Conflict or terminal state", body = CompletionError),
+    )
+)]
 pub async fn complete_video(
     State(state): State<AppState>,
     headers: HeaderMap,

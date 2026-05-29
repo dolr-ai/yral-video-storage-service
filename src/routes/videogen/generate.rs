@@ -555,6 +555,8 @@ async fn generate_inner<D: GenerateDeps>(
     deps: &D,
     config: GenerateConfig,
 ) -> Result<GenerateResponse, GenerateError> {
+    metrics::counter!(crate::videogen::metrics::GENERATE_REQUESTS_TOTAL).increment(1);
+
     let claimed_principal = Principal::from_str(&request.user_id)
         .map_err(|error| GenerateError::InvalidInput(format!("Invalid user_id: {error}")))?;
     if request.identity_principal != claimed_principal.to_string() {
@@ -590,6 +592,7 @@ async fn generate_inner<D: GenerateDeps>(
         .image
         .as_ref()
         .and_then(image_reference_for_moderation);
+    metrics::counter!(crate::videogen::metrics::ANSUMAN_REQUESTS_TOTAL).increment(1);
     let moderation_decision = deps
         .moderate(ModerationInput {
             request_id: fingerprint.request_fingerprint.clone(),
@@ -713,6 +716,7 @@ async fn generate_inner<D: GenerateDeps>(
         upload_destination: upload_destination.clone(),
     };
 
+    metrics::counter!(crate::videogen::metrics::VAST_SUBMIT_TOTAL).increment(1);
     let accepted = match deps.submit_vast(vast_request).await {
         Ok(accepted)
             if accepted.request_id == request_id && is_accepted_status(&accepted.status) =>
