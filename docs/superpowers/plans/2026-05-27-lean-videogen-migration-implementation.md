@@ -233,7 +233,7 @@ git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service commit -m "doc
 - Create: `/Users/prk-jr/Desktop/work/dolr/yral-video-storage-service/src/routes/videogen/mod.rs`
 - Create: `/Users/prk-jr/Desktop/work/dolr/yral-video-storage-service/src/routes/videogen/drafts.rs`
 
-- [ ] **Step 1: Write the failing route preservation test**
+- [x] **Step 1: Write the failing route preservation test**
 
 Create the new module shell with a crate-local test proving `routes::videogen::get_in_progress_drafts` is re-exported. Do not import routes from the library crate for this test: route modules currently depend on binary `AppState`, so exporting `routes` from `src/lib.rs` would fail unless `AppState` is moved into the library.
 
@@ -255,7 +255,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails before exports are public**
+- [x] **Step 2: Run test to verify it fails before exports are public**
 
 Run:
 
@@ -266,7 +266,7 @@ cargo test videogen_drafts_handler_is_exported
 
 Expected: compile failure because both `src/routes/videogen.rs` and `src/routes/videogen/mod.rs` exist, or because `drafts.rs` has not yet been created.
 
-- [ ] **Step 3: Move current code unchanged**
+- [x] **Step 3: Move current code unchanged**
 
 Move the current in-progress implementation into `src/routes/videogen/drafts.rs`. Delete `src/routes/videogen.rs`; Rust cannot keep both `src/routes/videogen.rs` and `src/routes/videogen/mod.rs` for the same module.
 
@@ -283,7 +283,7 @@ pub use drafts::{
 
 Update `src/routes/mod.rs` to keep `pub mod videogen;`. Do not update `src/lib.rs` in this task.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run:
 
@@ -295,7 +295,7 @@ cargo test
 
 Expected: `videogen_drafts_handler_is_exported` passes and the existing suite remains green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service add -A src/routes/mod.rs src/routes/videogen.rs src/routes/videogen tests/videogen_generate.rs
@@ -314,7 +314,7 @@ git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service commit -m "ref
 - Create: `/Users/prk-jr/Desktop/work/dolr/yral-video-storage-service/src/videogen/config.rs`
 - Create: `/Users/prk-jr/Desktop/work/dolr/yral-video-storage-service/src/videogen/types.rs`
 
-- [ ] **Step 1: Write failing schema/config tests**
+- [x] **Step 1: Write failing schema/config tests**
 
 Add tests for default config values and schema states:
 
@@ -340,7 +340,7 @@ fn terminal_states_are_absorbing() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -351,7 +351,7 @@ cargo test videogen::config
 
 Expected: compile failure because modules do not exist.
 
-- [ ] **Step 3: Add dependencies and config**
+- [x] **Step 3: Add dependencies and config**
 
 Add dependencies as needed:
 
@@ -401,7 +401,7 @@ Implement `VideogenConfig` with every timeout/key setting from the spec, includi
 
 Production startup must reject `ANSUMAN_MODERATION_MODE=mock_allow` when `ENVIRONMENT=production`.
 
-- [ ] **Step 4: Add context state enum**
+- [x] **Step 4: Add context state enum**
 
 Implement:
 
@@ -423,7 +423,7 @@ pub enum VideogenContextState {
 
 Add `as_str`, `try_from_db`, `is_terminal`, and transition validation helpers.
 
-- [ ] **Step 5: Extend inline schema**
+- [x] **Step 5: Extend inline schema**
 
 Add `videogen_completion_contexts` to `src/db.rs` `SCHEMA_SQL` with at least:
 
@@ -478,7 +478,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_videogen_context_request_id
 
 Do not attach the generic `update_updated_at()` trigger to `videogen_completion_contexts`. State-progress updates must explicitly set `updated_at = NOW()`. Reconciliation canister-unavailable handling must be able to record `last_reconciliation_error` while preserving the old `updated_at`, because stale-row selection depends on that timestamp.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run:
 
@@ -490,7 +490,7 @@ cargo test
 
 Expected: config and state tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service add Cargo.toml Cargo.lock src/consts.rs src/db.rs src/lib.rs src/main.rs src/videogen
@@ -505,7 +505,7 @@ git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service commit -m "fea
 - Create: `/Users/prk-jr/Desktop/work/dolr/yral-video-storage-service/src/videogen/identity_crypto.rs`
 - Modify: `/Users/prk-jr/Desktop/work/dolr/yral-video-storage-service/src/videogen/mod.rs`
 
-- [ ] **Step 1: Write failing fingerprint tests**
+- [x] **Step 1: Write failing fingerprint tests**
 
 Test canonical JSON stability, field inclusion, and decoded-image hashing:
 
@@ -519,7 +519,7 @@ fn fingerprint_hashes_decoded_base64_image_bytes() {
 }
 ```
 
-- [ ] **Step 2: Write failing HMAC tests**
+- [x] **Step 2: Write failing HMAC tests**
 
 ```rust
 #[test]
@@ -540,11 +540,11 @@ fn unknown_key_id_fails_without_fallback() {
 }
 ```
 
-- [ ] **Step 3: Write failing identity encryption tests**
+- [x] **Step 3: Write failing identity encryption tests**
 
 Test encrypt/decrypt with `encryption_key_id`, and decryption failure with missing old key.
 
-- [ ] **Step 4: Run tests to verify they fail**
+- [x] **Step 4: Run tests to verify they fail**
 
 Run:
 
@@ -555,7 +555,7 @@ cargo test videogen::fingerprint videogen::hmac videogen::identity_crypto
 
 Expected: compile failures.
 
-- [ ] **Step 5: Implement helpers**
+- [x] **Step 5: Implement helpers**
 
 Implement canonical fingerprinting exactly as the spec says:
 
@@ -568,7 +568,7 @@ Implement HMAC signing/verification with timestamp skew and raw-body SHA-256.
 
 Implement AES-256-GCM identity encryption with a 96-bit random nonce and key registry parsing from base64 32-byte keys.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run:
 
@@ -581,7 +581,7 @@ cargo test videogen::identity_crypto
 
 Expected: all helper tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service add Cargo.toml Cargo.lock src/videogen/fingerprint.rs src/videogen/hmac.rs src/videogen/identity_crypto.rs src/videogen/mod.rs
@@ -598,7 +598,7 @@ git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service commit -m "fea
 - Create: `/Users/prk-jr/Desktop/work/dolr/yral-video-storage-service/src/videogen/draft.rs`
 - Modify: `/Users/prk-jr/Desktop/work/dolr/yral-video-storage-service/src/videogen/mod.rs`
 
-- [ ] **Step 1: Write failing boundary tests**
+- [x] **Step 1: Write failing boundary tests**
 
 Use trait-based boundaries so route tests can run without real Ansuman, RateLimiter, upload service, or Vast:
 
@@ -621,7 +621,7 @@ Test that:
 - Vast accepted response must echo the exact `request_id`.
 - Vast submit serializes `Authorization: Bearer <VAST_API_KEY>`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -632,7 +632,7 @@ cargo test videogen::ansuman videogen::vast
 
 Expected: compile failures.
 
-- [ ] **Step 3: Implement clients and request/response DTOs**
+- [x] **Step 3: Implement clients and request/response DTOs**
 
 Implement DTOs for:
 
@@ -650,7 +650,7 @@ The real RateLimiter wrapper should preserve the no-deduction behavior:
 - `is_paid`: `false`.
 - `payment_amount`: `None`.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run:
 
@@ -663,7 +663,7 @@ cargo test videogen::rate_limiter
 
 Expected: service-boundary tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service add src/videogen
@@ -679,7 +679,7 @@ git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service commit -m "fea
 - Modify: `/Users/prk-jr/Desktop/work/dolr/yral-video-storage-service/src/videogen/context.rs`
 - Modify: `/Users/prk-jr/Desktop/work/dolr/yral-video-storage-service/tests/videogen_generate.rs`
 
-- [ ] **Step 1: Write failing route tests for rejection order**
+- [x] **Step 1: Write failing route tests for rejection order**
 
 Tests must prove:
 
@@ -689,7 +689,7 @@ Tests must prove:
 - RateLimiter rejection returns `429` and does not call Vast.
 - image staging timeout marks RateLimiter failed and does not call Vast.
 
-- [ ] **Step 2: Write failing safe-path test**
+- [x] **Step 2: Write failing safe-path test**
 
 Test a safe request:
 
@@ -706,7 +706,7 @@ Test a safe request:
 - verifies echoed `request_id`
 - returns `operation_id`, `provider`, `request_key`
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run:
 
@@ -717,7 +717,7 @@ cargo test --test videogen_generate
 
 Expected: failing tests because the route does not exist.
 
-- [ ] **Step 4: Implement the route as a thin orchestration layer**
+- [x] **Step 4: Implement the route as a thin orchestration layer**
 
 Route order must be:
 
@@ -742,7 +742,7 @@ If Postgres context creation fails after RateLimiter accepts, immediately call R
 
 If Vast submit times out or is not accepted, mark `submit_failed`, update RateLimiter failed, decrement usage, release upload destination, redact encrypted identity, and return `503`.
 
-- [ ] **Step 5: Register route and OpenAPI**
+- [x] **Step 5: Register route and OpenAPI**
 
 Add:
 
@@ -752,7 +752,7 @@ Add:
 
 Add OpenAPI path and schemas for the request, success, and error DTOs.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run:
 
@@ -764,7 +764,7 @@ cargo test
 
 Expected: generate route tests and full suite pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service add src/main.rs src/routes/videogen src/videogen tests/videogen_generate.rs
@@ -781,7 +781,7 @@ git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service commit -m "fea
 - Modify: `/Users/prk-jr/Desktop/work/dolr/yral-video-storage-service/src/main.rs`
 - Modify: `/Users/prk-jr/Desktop/work/dolr/yral-video-storage-service/tests/videogen_completion.rs`
 
-- [ ] **Step 1: Write failing HMAC and body-limit tests**
+- [x] **Step 1: Write failing HMAC and body-limit tests**
 
 Tests must cover:
 
@@ -792,7 +792,7 @@ Tests must cover:
 - failure callbacks require the same HMAC headers as success callbacks.
 - authenticated generation/upload failure callbacks from `submitted` update RateLimiter to `Failed(reason)`, release the reserved upload destination when possible, redact encrypted identity, and transition the context to `failed`.
 
-- [ ] **Step 2: Write failing idempotency/concurrency tests**
+- [x] **Step 2: Write failing idempotency/concurrency tests**
 
 Tests must cover:
 
@@ -803,7 +803,7 @@ Tests must cover:
 - mismatched principal, `request_id`, or object key returns `409`.
 - `202` is returned when another handler already claimed the row.
 
-- [ ] **Step 3: Write failing refresh endpoint tests**
+- [x] **Step 3: Write failing refresh endpoint tests**
 
 Tests must cover:
 
@@ -812,7 +812,7 @@ Tests must cover:
 - unknown or mismatched `request_id` returns `409`.
 - refresh validates request key, principal, `request_id`, and object key against context.
 
-- [ ] **Step 4: Run tests to verify they fail**
+- [x] **Step 4: Run tests to verify they fail**
 
 Run:
 
@@ -823,7 +823,7 @@ cargo test --test videogen_completion
 
 Expected: failures because endpoints do not exist.
 
-- [ ] **Step 5: Implement completion endpoint**
+- [x] **Step 5: Implement completion endpoint**
 
 Implement `POST /api/v2/videogen/complete` with:
 
@@ -845,11 +845,11 @@ Completion step wording must be sequential:
 4. call RateLimiter `Complete(bucket_url)`
 5. transition to `complete`
 
-- [ ] **Step 6: Implement refresh endpoint**
+- [x] **Step 6: Implement refresh endpoint**
 
 Implement `POST /api/v2/videogen/upload-url/refresh` with the same HMAC scheme and small body limit. Include this route only when refresh is enabled by config.
 
-- [ ] **Step 7: Run tests**
+- [x] **Step 7: Run tests**
 
 Run:
 
@@ -861,7 +861,7 @@ cargo test
 
 Expected: completion, refresh, and full suite pass.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service add src/main.rs src/routes/videogen src/videogen tests/videogen_completion.rs
