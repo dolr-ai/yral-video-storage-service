@@ -6,6 +6,7 @@ pub mod fingerprint;
 pub mod hmac;
 pub mod identity_crypto;
 pub mod rate_limiter;
+pub mod reconcile;
 pub mod types;
 pub mod upload_destination;
 pub mod vast;
