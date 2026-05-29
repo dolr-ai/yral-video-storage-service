@@ -357,6 +357,18 @@ async fn run_server() -> anyhow::Result<()> {
                 .with_state(app_state.clone())
                 .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
+        .route(
+            "/api/v2/videogen/complete",
+            post(routes::videogen::complete_video)
+                .with_state(app_state.clone())
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/api/v2/videogen/upload-url/refresh",
+            post(routes::videogen::refresh_upload_url)
+                .with_state(app_state.clone())
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         // .route(
         //     "/api/v2/videogen/in-progress/{principal}",
         //     get(routes::videogen::get_in_progress_by_principal).with_state(app_state.clone()),

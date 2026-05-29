@@ -160,8 +160,8 @@ impl PostgresVideogenContextStore {
                      updated_at = NOW()
                  WHERE principal = $1
                    AND counter = $2
-                   AND request_id = $3
-                   AND state = 'context_created'",
+                   AND state = 'context_created'
+                   AND request_id IS NULL",
                 &[&request_key.principal, &counter, &request_id],
             )
             .await
@@ -273,6 +273,194 @@ impl PostgresVideogenContextStore {
             .map_err(|error| ContextStoreError::Unavailable(error.to_string()))?;
         Ok(())
     }
+
+    /// Atomically claim a submitted row for completion processing.
+    /// Returns Some(row) if the claim succeeded (state was 'submitted' with matching request_id),
+    /// or None if the row was already claimed by another handler.
+    pub async fn claim_for_completion(
+        &self,
+        request_key: &RateLimiterRequestKey,
+        request_id: &str,
+    ) -> Result<Option<CompletionContextRow>, ContextStoreError> {
+        let counter = request_key.counter as i64;
+        let row = self
+            .client
+            .query_opt(
+                "UPDATE videogen_completion_contexts
+                 SET state = 'uploaded',
+                     updated_at = NOW()
+                 WHERE principal = $1
+                   AND counter = $2
+                   AND request_id = $3
+                   AND state = 'submitted'
+                 RETURNING principal, counter, request_id, state, object_key, draft_video_id",
+                &[&request_key.principal, &counter, &request_id],
+            )
+            .await
+            .map_err(|error| ContextStoreError::Unavailable(error.to_string()))?;
+
+        Ok(row.map(|row| CompletionContextRow {
+            request_key: RateLimiterRequestKey {
+                principal: row.get(0),
+                counter: row.get::<_, i64>(1) as u64,
+            },
+            request_id: row.get(2),
+            state: row.get(3),
+            object_key: row.get(4),
+            video_id: row.get(5),
+        }))
+    }
+
+    pub async fn mark_draft_creating(
+        &self,
+        request_key: &RateLimiterRequestKey,
+    ) -> Result<(), ContextStoreError> {
+        let counter = request_key.counter as i64;
+        let rows = self
+            .client
+            .execute(
+                "UPDATE videogen_completion_contexts
+                 SET state = 'draft_creating',
+                     updated_at = NOW()
+                 WHERE principal = $1
+                   AND counter = $2
+                   AND state = 'uploaded'",
+                &[&request_key.principal, &counter],
+            )
+            .await
+            .map_err(|error| ContextStoreError::Unavailable(error.to_string()))?;
+        if rows == 0 {
+            return Err(ContextStoreError::InvalidState(
+                "context was not in uploaded".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn mark_draft_created(
+        &self,
+        request_key: &RateLimiterRequestKey,
+    ) -> Result<(), ContextStoreError> {
+        let counter = request_key.counter as i64;
+        let rows = self
+            .client
+            .execute(
+                "UPDATE videogen_completion_contexts
+                 SET state = 'draft_created',
+                     updated_at = NOW()
+                 WHERE principal = $1
+                   AND counter = $2
+                   AND state = 'draft_creating'",
+                &[&request_key.principal, &counter],
+            )
+            .await
+            .map_err(|error| ContextStoreError::Unavailable(error.to_string()))?;
+        if rows == 0 {
+            return Err(ContextStoreError::InvalidState(
+                "context was not in draft_creating".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn mark_complete(
+        &self,
+        request_key: &RateLimiterRequestKey,
+        bucket_url: &str,
+    ) -> Result<(), ContextStoreError> {
+        let counter = request_key.counter as i64;
+        let rows = self
+            .client
+            .execute(
+                "UPDATE videogen_completion_contexts
+                 SET state = 'complete',
+                     bucket_url = $3,
+                     encrypted_delegated_identity = NULL,
+                     identity_nonce = NULL,
+                     encryption_key_id = NULL,
+                     updated_at = NOW()
+                 WHERE principal = $1
+                   AND counter = $2
+                   AND state = 'draft_created'",
+                &[&request_key.principal, &counter, &bucket_url],
+            )
+            .await
+            .map_err(|error| ContextStoreError::Unavailable(error.to_string()))?;
+        if rows == 0 {
+            return Err(ContextStoreError::InvalidState(
+                "context was not in draft_created".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn mark_generation_failed(
+        &self,
+        request_key: &RateLimiterRequestKey,
+        reason: &str,
+    ) -> Result<(), ContextStoreError> {
+        let counter = request_key.counter as i64;
+        self.client
+            .execute(
+                "UPDATE videogen_completion_contexts
+                 SET state = 'failed',
+                     last_error = $3,
+                     encrypted_delegated_identity = NULL,
+                     identity_nonce = NULL,
+                     encryption_key_id = NULL,
+                     updated_at = NOW()
+                 WHERE principal = $1
+                   AND counter = $2
+                   AND state IN ('context_created', 'submitted')",
+                &[&request_key.principal, &counter, &reason],
+            )
+            .await
+            .map_err(|error| ContextStoreError::Unavailable(error.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn get_context_state(
+        &self,
+        request_key: &RateLimiterRequestKey,
+    ) -> Result<Option<ContextStateRow>, ContextStoreError> {
+        let counter = request_key.counter as i64;
+        let row = self
+            .client
+            .query_opt(
+                "SELECT state, request_id, principal, object_key
+                 FROM videogen_completion_contexts
+                 WHERE principal = $1 AND counter = $2",
+                &[&request_key.principal, &counter],
+            )
+            .await
+            .map_err(|error| ContextStoreError::Unavailable(error.to_string()))?;
+
+        Ok(row.map(|row| ContextStateRow {
+            state: row.get(0),
+            request_id: row.get(1),
+            principal: row.get(2),
+            object_key: row.get(3),
+        }))
+    }
+}
+
+/// A row returned from atomic claim or query operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionContextRow {
+    pub request_key: RateLimiterRequestKey,
+    pub request_id: String,
+    pub state: String,
+    pub object_key: Option<String>,
+    pub video_id: Option<String>,
+}
+
+/// A lightweight row for idempotency checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextStateRow {
+    pub state: String,
+    pub request_id: Option<String>,
+    pub principal: String,
+    pub object_key: Option<String>,
 }
 
 #[cfg(test)]

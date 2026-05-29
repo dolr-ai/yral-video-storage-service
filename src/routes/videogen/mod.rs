@@ -8,3 +8,9 @@ mod drafts;
 pub use drafts::{
     get_in_progress_drafts, InProgressDraftItem, InProgressDraftsRequest, InProgressDraftsResponse,
 };
+
+mod complete;
+pub use complete::complete_video;
+
+mod upload_refresh;
+pub use upload_refresh::refresh_upload_url;
