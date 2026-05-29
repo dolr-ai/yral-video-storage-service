@@ -1,9 +1,22 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+use std::fmt;
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct ModerationInput {
     pub request_id: String,
     pub user_principal: String,
     pub prompt: String,
     pub image_url: Option<String>,
+}
+
+impl fmt::Debug for ModerationInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ModerationInput")
+            .field("request_id", &self.request_id)
+            .field("user_principal", &self.user_principal)
+            .field("prompt", &"<redacted>")
+            .field("image_url", &self.image_url.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

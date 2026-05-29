@@ -1,14 +1,15 @@
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 pub struct RateLimiterRequestKey {
     pub principal: String,
     pub counter: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 pub enum RateLimiterTokenType {
     Free,
-    Paid,
+    Sats,
+    Dolr,
+    YralProSubscription,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,10 +58,10 @@ mod tests {
                 principal: "aaaaa-aa".to_string(),
                 counter: 123,
             },
-            Some(RateLimiterTokenType::Paid),
+            Some(RateLimiterTokenType::Sats),
         );
 
-        assert_eq!(options.token_type, RateLimiterTokenType::Paid);
+        assert_eq!(options.token_type, RateLimiterTokenType::Sats);
         assert!(!options.is_paid);
         assert_eq!(options.payment_amount, None);
     }

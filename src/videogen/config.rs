@@ -27,8 +27,10 @@ impl AnsumanModerationMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideogenConfig {
+    pub ansuman_timeout_ms: u64,
     pub generate_dedupe_window_secs: u64,
     pub vast_submit_timeout_secs: u64,
+    pub upload_destination_timeout_secs: u64,
     pub upload_url_pre_submit_margin_secs: u64,
     pub vast_image_stage_timeout_secs: u64,
     pub context_created_timeout_secs: u64,
@@ -61,11 +63,16 @@ pub enum VideogenConfigError {
 impl VideogenConfig {
     pub fn from_env() -> Result<Self, VideogenConfigError> {
         let cfg = Self {
+            ansuman_timeout_ms: read_u64(consts::ANSUMAN_TIMEOUT_MS, 3000)?,
             generate_dedupe_window_secs: read_u64(
                 consts::VIDEOGEN_GENERATE_DEDUPE_WINDOW_SECS,
                 120,
             )?,
             vast_submit_timeout_secs: read_u64(consts::VIDEOGEN_VAST_SUBMIT_TIMEOUT_SECS, 10)?,
+            upload_destination_timeout_secs: read_u64(
+                consts::VIDEOGEN_UPLOAD_DESTINATION_TIMEOUT_SECS,
+                10,
+            )?,
             upload_url_pre_submit_margin_secs: read_u64(
                 consts::VIDEOGEN_UPLOAD_URL_PRE_SUBMIT_MARGIN_SECS,
                 10,
@@ -128,8 +135,10 @@ impl VideogenConfig {
 
     pub fn test_defaults() -> Self {
         Self {
+            ansuman_timeout_ms: 3000,
             generate_dedupe_window_secs: 120,
             vast_submit_timeout_secs: 10,
+            upload_destination_timeout_secs: 10,
             upload_url_pre_submit_margin_secs: 10,
             vast_image_stage_timeout_secs: 30,
             context_created_timeout_secs: 120,
