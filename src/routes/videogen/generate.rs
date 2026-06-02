@@ -44,6 +44,7 @@ const IDENTITY_KEYS_ENV: &str = "VIDEOGEN_IDENTITY_ENCRYPTION_KEYS";
 const IDENTITY_ACTIVE_KEY_ENV: &str = "VIDEOGEN_IDENTITY_ACTIVE_KEY_ID";
 const PUBLIC_BASE_URL_ENV: &str = "PRAKASH_PUBLIC_BASE_URL";
 const UPLOAD_URL_REFRESH_ENABLED_ENV: &str = "VIDEOGEN_UPLOAD_URL_REFRESH_ENABLED";
+const MODERATION_SERVICE_URL_ENV: &str = crate::consts::MODERATION_SERVICE_URL;
 const UPLOAD_SERVICE_URL_ENV: &str = crate::consts::VIDEOGEN_UPLOAD_SERVICE_URL_ENV;
 const LEGACY_UPLOAD_SERVICE_URL_ENV: &str = crate::consts::VIDEOGEN_LEGACY_UPLOAD_SERVICE_URL_ENV;
 const VAST_GENERATE_URL_ENV: &str = "VIDEOGEN_VAST_GENERATE_URL";
@@ -606,7 +607,7 @@ async fn generate_inner<D: GenerateDeps>(
         .image
         .as_ref()
         .and_then(image_reference_for_moderation);
-    metrics::counter!(crate::videogen::metrics::ANSUMAN_REQUESTS_TOTAL).increment(1);
+    metrics::counter!(crate::videogen::metrics::MODERATION_REQUESTS_TOTAL).increment(1);
     let moderation_decision = deps
         .moderate(ModerationInput {
             request_id: fingerprint.request_fingerprint.clone(),
@@ -940,8 +941,10 @@ impl GenerateDeps for RuntimeGenerateDeps {
         match self.config.moderation_mode {
             ModerationMode::MockAllow => Ok(ModerationDecision::Safe),
             ModerationMode::Remote => {
-                let url = std::env::var("ANSUMAN_URL").map_err(|_| {
-                    ModerationError::RequestFailed("ANSUMAN_URL is required".to_string())
+                let url = std::env::var(MODERATION_SERVICE_URL_ENV).map_err(|_| {
+                    ModerationError::RequestFailed(format!(
+                        "{MODERATION_SERVICE_URL_ENV} is required"
+                    ))
                 })?;
                 let response = self
                     .http
@@ -964,7 +967,7 @@ impl GenerateDeps for RuntimeGenerateDeps {
                     .map_err(|error| ModerationError::RequestFailed(error.to_string()))?;
                 if !response.status().is_success() {
                     return Err(ModerationError::RequestFailed(format!(
-                        "Ansuman returned {}",
+                        "Moderation service returned {}",
                         response.status()
                     )));
                 }

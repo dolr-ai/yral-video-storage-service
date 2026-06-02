@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Move the LTX videogen flow from off-chain-agent into Prakash, with Ansuman moderation, RateLimiter accounting, direct Vast submission, Vast-owned bucket upload, and Prakash-owned completion/draft handling.
+**Goal:** Move the LTX videogen flow from off-chain-agent into Prakash, with moderation, RateLimiter accounting, direct Vast submission, Vast-owned bucket upload, and Prakash-owned completion/draft handling.
 
 **Architecture:** Prakash becomes the mobile-facing videogen API and durable orchestration point. Vast owns generation, bucket upload, local output cleanup, and authenticated completion callbacks. Off-chain-agent remains live only for legacy in-flight LTX jobs until the old QStash/callback path drains.
 
@@ -399,7 +399,7 @@ Implement `VideogenConfig` with every timeout/key setting from the spec, includi
 - `VIDEOGEN_DRAFT_RETRY_RETENTION_HOURS=72`
 - `VIDEOGEN_COMPLETION_HMAC_SKEW_SECS=120`
 
-Production startup must reject `ANSUMAN_MODERATION_MODE=mock_allow` when `ENVIRONMENT=production`.
+Production startup must reject `MODERATION_MODE=mock_allow` when `ENVIRONMENT=production`.
 
 - [x] **Step 4: Add context state enum**
 
@@ -600,7 +600,7 @@ git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service commit -m "fea
 
 - [x] **Step 1: Write failing boundary tests**
 
-Use trait-based boundaries so route tests can run without real Ansuman, RateLimiter, upload service, or Vast:
+Use trait-based boundaries so route tests can run without real moderation service, RateLimiter, upload service, or Vast:
 
 ```rust
 #[async_trait::async_trait]
@@ -616,7 +616,7 @@ pub trait VastClient {
 
 Test that:
 
-- Ansuman `mock_allow` returns safe.
+- moderation service `mock_allow` returns safe.
 - production `mock_allow` config is rejected.
 - Vast accepted response must echo the exact `request_id`.
 - Vast submit serializes `Authorization: Bearer <VAST_API_KEY>`.
@@ -727,7 +727,7 @@ Route order must be:
 4. model/input extraction
 5. `ServerDraft` validation
 6. fingerprint dedupe lookup
-7. Ansuman moderation
+7. moderation
 8. RateLimiter create/check
 9. Postgres context create
 10. image staging
@@ -957,7 +957,7 @@ Ensure these metric names are emitted or registered:
 
 - `videogen_generate_requests_total`
 - `videogen_generate_duration_ms`
-- `videogen_ansuman_requests_total`
+- `videogen_moderation_requests_total`
 - `videogen_vast_submit_total`
 - `videogen_completion_callbacks_total`
 - `videogen_completion_hmac_failures_total`
@@ -1415,7 +1415,7 @@ git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service commit -m "doc
 
 Use mock HTTP servers for:
 
-- Ansuman
+- moderation service
 - RateLimiter wrapper if canister integration is not available locally
 - upload destination service
 - draft metadata service

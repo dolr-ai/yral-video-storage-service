@@ -2,7 +2,7 @@
 
 pub const GENERATE_REQUESTS_TOTAL: &str = "videogen_generate_requests_total";
 pub const GENERATE_DURATION_MS: &str = "videogen_generate_duration_ms";
-pub const ANSUMAN_REQUESTS_TOTAL: &str = "videogen_ansuman_requests_total";
+pub const MODERATION_REQUESTS_TOTAL: &str = "videogen_moderation_requests_total";
 pub const VAST_SUBMIT_TOTAL: &str = "videogen_vast_submit_total";
 pub const COMPLETION_CALLBACKS_TOTAL: &str = "videogen_completion_callbacks_total";
 pub const COMPLETION_HMAC_FAILURES_TOTAL: &str = "videogen_completion_hmac_failures_total";
@@ -17,7 +17,7 @@ pub fn init_metrics() {
         GENERATE_DURATION_MS,
         "Videogen generate request duration in ms"
     );
-    metrics::describe_counter!(ANSUMAN_REQUESTS_TOTAL, "Total Ansuman moderation requests");
+    metrics::describe_counter!(MODERATION_REQUESTS_TOTAL, "Total moderation requests");
     metrics::describe_counter!(VAST_SUBMIT_TOTAL, "Total Vast submit attempts");
     metrics::describe_counter!(COMPLETION_CALLBACKS_TOTAL, "Total completion callbacks");
     metrics::describe_counter!(
@@ -37,7 +37,7 @@ mod tests {
     fn all_metric_names_defined() {
         assert!(!GENERATE_REQUESTS_TOTAL.is_empty());
         assert!(!GENERATE_DURATION_MS.is_empty());
-        assert!(!ANSUMAN_REQUESTS_TOTAL.is_empty());
+        assert!(!MODERATION_REQUESTS_TOTAL.is_empty());
         assert!(!VAST_SUBMIT_TOTAL.is_empty());
         assert!(!COMPLETION_CALLBACKS_TOTAL.is_empty());
         assert!(!COMPLETION_HMAC_FAILURES_TOTAL.is_empty());

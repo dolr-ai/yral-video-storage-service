@@ -4,7 +4,7 @@ Date: 2026-05-27
 
 ## Summary
 
-Move the mobile-facing video generation flow out of off-chain-agent and into the Prakash service while keeping the endpoint lean. The new Prakash endpoint will accept the same videogen request payload shape mobile sends today, validate the delegated identity, run prompt/image moderation through Ansuman, create a RateLimiter request when allowed, submit directly to the LTX service on Vast, and return the submitted request identifier immediately.
+Move the mobile-facing video generation flow out of off-chain-agent and into the Prakash service while keeping the endpoint lean. The new Prakash endpoint will accept the same videogen request payload shape mobile sends today, validate the delegated identity, run prompt/image moderation through a moderation service, create a RateLimiter request when allowed, submit directly to the LTX service on Vast, and return the submitted request identifier immediately.
 
 The Vast LTX service owns generation output handling. When generation completes, it uploads the video to the bucket, deletes local disk output only after upload succeeds, and calls a Prakash completion endpoint. Prakash then updates RateLimiter and creates the user's draft when the request asked for server-side draft handling.
 
@@ -12,7 +12,7 @@ The Vast LTX service owns generation output handling. When generation completes,
 
 - Preserve the existing mobile request contract for videogen.
 - Keep the Prakash `/api/v2/videogen/generate` path small and synchronous.
-- Add an Ansuman moderation seam for prompt/image NSFW scorecards before rate limit consumption.
+- Add a moderation seam for prompt/image NSFW scorecards before rate limit consumption.
 - Use RateLimiter as the source of generation request state and in-progress drafts.
 - Remove QStash from the LTX path.
 - Remove token cost lookup, DOLR/Sats deduction, HON JWT use, DOLR user-agent creation, and rollback behavior from this flow.
@@ -54,7 +54,7 @@ The selected architecture has two cooperating services:
 
 1. **Prakash videogen API**
    - Owns mobile-facing request validation.
-   - Owns Ansuman moderation call.
+   - Owns moderation call.
    - Owns RateLimiter create/check and status update calls.
    - Owns actual draft creation after Vast completes.
    - Does not own generated-file upload for this flow.
@@ -146,17 +146,17 @@ The generate endpoint should return errors in the existing `VideoGenError` JSON 
 - NSFW rejection: `400` with `InvalidInput(message)` and a stable user-safe message such as "Content violates safety guidelines".
 - Rate limit exceeded: `429` with a parseable `ProviderError(message)` or existing RateLimiter-compatible error variant.
 - Vast submit unavailable: `503` with `NetworkError(message)` or `ProviderError(message)`.
-- Ansuman unavailable in production: `503` with `NetworkError(message)`.
+- moderation service unavailable in production: `503` with `NetworkError(message)`.
 
 Mobile maps status codes to existing error types, so introducing a new error variant would require mobile work and is outside this migration.
 
 ### Image/Text Input Contract
 
-Ansuman must receive the same content the user submitted: prompt plus optional image. For image requests, Prakash must support mobile's current base64 image shape.
+moderation service must receive the same content the user submitted: prompt plus optional image. For image requests, Prakash must support mobile's current base64 image shape.
 
 For Vast submission, Prakash should normalize image input to the format Vast expects. The current Vast worker supports `image_url` for I2V, and also exposes `/upload/image`. A practical implementation path is:
 
-1. Use the original prompt/image for Ansuman moderation.
+1. Use the original prompt/image for moderation.
 2. After moderation and RateLimiter success, upload the image to Vast `/upload/image` or another configured image staging location.
 3. Pass the resulting image URL/reference to Vast `/generate`.
 
@@ -383,8 +383,8 @@ This migration touches three repositories with different cleanup responsibilitie
 6. Prakash extracts the model id, prompt, image input, token type, and `handle_video_upload`.
 7. If `handle_video_upload != ServerDraft`, Prakash returns `400 InvalidInput` before moderation, RateLimiter, image staging, or Vast calls. The migrated LTX endpoint supports only `ServerDraft` in this phase.
 8. Prakash computes the generate request fingerprint and checks for a dedupe hit within `VIDEOGEN_GENERATE_DEDUPE_WINDOW_SECS`.
-9. Prakash sends the prompt/image combo to Ansuman moderation.
-10. If Ansuman returns NSFW, Prakash returns an NSFW error response immediately. No RateLimiter request is created.
+9. Prakash sends the prompt/image combo to moderation.
+10. If moderation service returns NSFW, Prakash returns an NSFW error response immediately. No RateLimiter request is created.
 11. If moderation passes, Prakash calls RateLimiter to create/check the video generation request.
 12. If RateLimiter rejects the request, Prakash returns a rate-limit error immediately.
 13. If RateLimiter accepts, Prakash persists the minimal Postgres completion context keyed by the returned RateLimiter request key. If this Postgres write fails, Prakash must immediately update RateLimiter to `Failed(reason)`, call `decrement_video_generation_counter_v_1` for `VIDEOGEN`, release the reserved upload destination if one was created, and return an error to the caller. A RateLimiter request must not remain pending without a completion context row.
@@ -566,27 +566,27 @@ Encrypted delegated identity retention by state:
 | `failed` | Redact immediately for generation/upload failures after RateLimiter is marked failed. |
 | no context row | No ciphertext is stored for moderation/rate-limit rejections. |
 
-## Ansuman Moderation
+## Moderation Service
 
-Add a moderation client boundary rather than hard-coding Ansuman directly into the route handler.
+Add a moderation client boundary rather than hard-coding the moderation provider directly into the route handler.
 
 Expected behavior:
 
 - Input: prompt text plus optional image reference or image payload.
 - Output: scorecard with a boolean NSFW decision and optional category/confidence details.
 - If NSFW is true: return a stable Prakash error response that mobile can map to the existing blocked-content message.
-- If Ansuman is unavailable in production: return a provider/moderation unavailable error before RateLimiter is consumed.
-- For local development and staging before Ansuman is live: support a config-gated mock mode that returns safe responses.
+- If moderation service is unavailable in production: return a provider/moderation unavailable error before RateLimiter is consumed.
+- For local development and staging before moderation service is live: support a config-gated mock mode that returns safe responses.
 
 Configuration:
 
-- `ANSUMAN_MODERATION_MODE=remote|mock_allow`.
-- `ANSUMAN_URL`: required when mode is `remote`.
-- `ANSUMAN_TIMEOUT_MS`: default `3000`.
+- `MODERATION_MODE=remote|mock_allow`.
+- `MODERATION_SERVICE_URL`: required when mode is `remote`.
+- `MODERATION_TIMEOUT_MS`: default `3000`.
 
 Production guard:
 
-- If `ENVIRONMENT=production`, startup must fail when `ANSUMAN_MODERATION_MODE=mock_allow`.
+- If `ENVIRONMENT=production`, startup must fail when `MODERATION_MODE=mock_allow`.
 - Mock mode should be allowed only in local development or explicitly isolated staging.
 
 This replaces the current Gemini-based off-chain moderation behavior for the migrated LTX flow.
@@ -611,9 +611,9 @@ Error responses:
 
 - `401`: invalid delegated identity or identity/user mismatch.
 - `400`: invalid request or unsupported model/input combination.
-- `400`: blocked by Ansuman, serialized as an existing `VideoGenError::InvalidInput` payload.
+- `400`: blocked by moderation service, serialized as an existing `VideoGenError::InvalidInput` payload.
 - `429`: RateLimiter exceeded.
-- `502` or `503`: Ansuman, RateLimiter, or Vast submit unavailable.
+- `502` or `503`: moderation service, RateLimiter, or Vast submit unavailable.
 
 ### Provider Endpoints
 
@@ -754,11 +754,11 @@ After drain:
 - Redact prompt, image data, delegated identity, and bucket credentials from logs.
 - Do not fetch arbitrary callback-provided URLs from Prakash. Use stored upload destination metadata and expected object keys to validate completion output.
 - Require non-guessable Vast request ids. Prakash should generate UUIDv4 `request_id` values and store the exact expected id before submission.
-- Add HTTP-layer rate limiting before delegated identity parsing and before Ansuman/RateLimiter calls. Suggested controls: per-IP request rate, body size limit, and optional service gateway/WAF rules.
+- Add HTTP-layer rate limiting before delegated identity parsing and before moderation service/RateLimiter calls. Suggested controls: per-IP request rate, body size limit, and optional service gateway/WAF rules.
 
 ## Performance And Scope
 
-The generate endpoint is "lean" relative to off-chain billing/QStash/DOLR work, but it still performs synchronous network work: Ansuman moderation, RateLimiter create/check, optional image staging, upload destination preparation, Postgres context write, and Vast submission.
+The generate endpoint is "lean" relative to off-chain billing/QStash/DOLR work, but it still performs synchronous network work: moderation, RateLimiter create/check, optional image staging, upload destination preparation, Postgres context write, and Vast submission.
 
 Target behavior:
 
@@ -791,7 +791,7 @@ Prakash should treat each persisted generation request as a small state machine.
 
 Ephemeral handler phases before context creation:
 
-- `moderating`: request accepted by HTTP handler, before Ansuman decision. No Postgres context row exists.
+- `moderating`: request accepted by HTTP handler, before moderation decision. No Postgres context row exists.
 - `rate_limited`: terminal rejection before usage is consumed. No Postgres context row exists.
 
 Persisted states:
@@ -827,7 +827,7 @@ Terminal states are absorbing: `complete`, `submit_failed`, `stale_failed`, `dra
 
 ## Retry And Recovery
 
-- Ansuman call failures should be fail-closed in production and fail-open only in explicit local/mock mode.
+- moderation service call failures should be fail-closed in production and fail-open only in explicit local/mock mode.
 - Vast submission can be retried by Prakash only if the request is still before `submitted`.
 - Vast bucket upload can be retried by Vast while the local file exists.
 - Prakash completion can be retried by Vast. Prakash must make this idempotent.
@@ -896,7 +896,7 @@ Add structured logs and Sentry context for:
 - `operation_id`.
 - RateLimiter request key.
 - Vast `request_id`.
-- Ansuman decision, without logging raw prompt/image.
+- moderation decision, without logging raw prompt/image.
 - Vast submit result.
 - Bucket upload result.
 - Completion callback authentication result.
@@ -909,7 +909,7 @@ Metrics to define before rollout:
 
 - `videogen_generate_requests_total{status,provider,model}`.
 - `videogen_generate_duration_ms{provider,model}` histogram.
-- `videogen_ansuman_requests_total{result}` and `videogen_ansuman_duration_ms` histogram.
+- `videogen_moderation_requests_total{result}` and `videogen_moderation_duration_ms` histogram.
 - `videogen_vast_submit_total{result}` and `videogen_vast_submit_duration_ms` histogram.
 - `videogen_completion_callbacks_total{result,provider}`.
 - `videogen_completion_hmac_failures_total{reason}`.
@@ -930,7 +930,7 @@ Unit tests:
 - Unsupported `upload_handling` returns `400 InvalidInput` before moderation or RateLimiter creation.
 - Request fingerprint uses canonical JSON, the expected field set, and decoded-image SHA-256 for base64 images.
 - Generate retry with matching fingerprint inside dedupe window returns the existing operation id and request key.
-- Base64 image request is sent to Ansuman before image staging.
+- Base64 image request is sent to moderation service before image staging.
 - Image staging uses `VIDEOGEN_VAST_IMAGE_STAGE_TIMEOUT_SECS` and fails the RateLimiter request without submitting to Vast on timeout.
 - Image staging failure after RateLimiter acceptance marks request failed and does not submit to Vast.
 - Safe request submits to Vast with request key, Prakash callback URL, caller-provided UUID `request_id`, Vast auth header, and upload destination expiry.
@@ -963,7 +963,7 @@ Unit tests:
 
 Integration tests:
 
-- Mock Ansuman, RateLimiter, Vast, and upload metadata service.
+- Mock moderation service, RateLimiter, Vast, and upload metadata service.
 - Verify the full safe path from generate to completion.
 - Verify success response matches mobile's current `GenerateVideoSuccessDto`.
 - Verify `providers` and `providers-all` deserialize through the actual mobile DTO structs copied/imported into the contract-test crate, including field names, optionality, and unknown-field behavior.
@@ -1002,7 +1002,7 @@ Manual smoke test:
 ## Rollout
 
 1. Add Prakash generate endpoint and HMAC-protected completion endpoint behind config. The completion endpoint must not be enabled without HMAC verification.
-2. Add Ansuman moderation client with mock mode for non-production while Ansuman is not live.
+2. Add a moderation client with mock mode for non-production while moderation service is not live.
 3. Add Postgres completion-context persistence, encryption key registry, and transactional idempotency.
 4. Confirm the upload service can issue scoped upload URLs valid for at least `VIDEOGEN_UPLOAD_URL_TTL_SECS=4200`. If it cannot, implement `/api/v2/videogen/upload-url/refresh` as part of upload destination preparation, not later.
 5. Add upload destination preparation for Vast using a service-issued upload URL and `video_id`.
@@ -1041,7 +1041,7 @@ Before disabling the old off-chain LTX route:
 
 ## External Follow-Ups
 
-- Confirm the exact Ansuman request/response schema when the service is live. The Prakash client boundary is fixed to prompt/image input plus a boolean NSFW decision and optional scorecard metadata.
+- Confirm the exact moderation service request/response schema when the service is live. The Prakash client boundary is fixed to prompt/image input plus a boolean NSFW decision and optional scorecard metadata.
 - Confirm the exact upload-service bucket URL/object-key format while implementing upload destination preparation. The security contract remains fixed: Prakash validates callback output against stored `video_id`/object key and does not fetch arbitrary callback URLs.
 - Turn the off-chain drain runbook into release commands before disabling legacy LTX callbacks. The release gate is fixed: old RateLimiter `Pending`/`Processing` requests are resolved and old QStash LTX queues are empty or manually drained.
 - Keep the existing unpaginated in-progress endpoint behavior for this migration. Pagination can be handled as a separate hardening task if RateLimiter responses become too large.

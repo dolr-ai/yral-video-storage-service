@@ -54,16 +54,16 @@ pub struct VideogenConfig {
 pub enum VideogenConfigError {
     #[error("{name} must be a valid integer: {value}")]
     InvalidInteger { name: &'static str, value: String },
-    #[error("ANSUMAN_MODERATION_MODE must be remote or mock_allow: {0}")]
+    #[error("MODERATION_MODE must be remote or mock_allow: {0}")]
     InvalidModerationMode(String),
-    #[error("ANSUMAN_MODERATION_MODE=mock_allow is not allowed when ENVIRONMENT=production")]
+    #[error("MODERATION_MODE=mock_allow is not allowed when ENVIRONMENT=production")]
     MockModerationInProduction,
 }
 
 impl VideogenConfig {
     pub fn from_env() -> Result<Self, VideogenConfigError> {
         let cfg = Self {
-            moderation_timeout_ms: read_u64(consts::ANSUMAN_TIMEOUT_MS, 3000)?,
+            moderation_timeout_ms: read_u64(consts::MODERATION_TIMEOUT_MS, 3000)?,
             generate_dedupe_window_secs: read_u64(
                 consts::VIDEOGEN_GENERATE_DEDUPE_WINDOW_SECS,
                 120,
@@ -123,8 +123,7 @@ impl VideogenConfig {
             )?,
             completion_hmac_skew_secs: read_u64(consts::VIDEOGEN_COMPLETION_HMAC_SKEW_SECS, 120)?,
             moderation_mode: Self::parse_moderation_mode(
-                &std::env::var(consts::ANSUMAN_MODERATION_MODE)
-                    .unwrap_or_else(|_| "remote".to_string()),
+                &std::env::var(consts::MODERATION_MODE).unwrap_or_else(|_| "remote".to_string()),
             )?,
         };
         cfg.validate_for_environment(
