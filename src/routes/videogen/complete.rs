@@ -276,7 +276,6 @@ async fn handle_success_completion<D: CompletionDeps>(
     })?;
 
     // Step 6: call draft service
-    metrics::counter!(crate::videogen::metrics::DRAFT_CREATION_TOTAL).increment(1);
     let draft_req = DraftCreationRequest {
         request_id: req.request_id.clone(),
         request_key: request_key.clone(),

@@ -53,7 +53,7 @@ impl ModerationClient for MockAllowModerationClient {
 #[cfg(test)]
 mod tests {
     use super::{MockAllowModerationClient, ModerationClient, ModerationDecision, ModerationInput};
-    use crate::videogen::config::{AnsumanModerationMode, VideogenConfig, VideogenConfigError};
+    use crate::videogen::config::{ModerationMode, VideogenConfig, VideogenConfigError};
 
     #[tokio::test]
     async fn mock_allow_returns_safe_decision() {
@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn production_rejects_mock_allow_moderation_config() {
         let mut cfg = VideogenConfig::test_defaults();
-        cfg.ansuman_moderation_mode = AnsumanModerationMode::MockAllow;
+        cfg.moderation_mode = ModerationMode::MockAllow;
 
         assert_eq!(
             cfg.validate_for_environment("production"),

@@ -21,13 +21,13 @@ use crate::{
     consts::RATE_LIMITS_CANISTER_ID,
     db,
     videogen::{
-        ansuman::{ModerationDecision, ModerationError, ModerationInput},
-        config::{AnsumanModerationMode, VideogenConfig},
+        config::{ModerationMode, VideogenConfig},
         context::{ContextStoreError, PendingVideogenContext, PostgresVideogenContextStore},
         fingerprint::{compute_request_fingerprint, ImageIdentityInput, RequestFingerprintInput},
         identity_crypto::{
             encrypt_delegated_identity, EncryptedDelegatedIdentity, IdentityEncryptionKeyRegistry,
         },
+        moderation::{ModerationDecision, ModerationError, ModerationInput},
         rate_limiter::{
             prepare_create_request_options, RateLimiterCreateOptions, RateLimiterRequestKey,
             RateLimiterTokenType,
@@ -550,11 +550,25 @@ pub async fn generate_with_dependencies<D: GenerateDeps>(
         .map_err(GenerateHttpError::from)
 }
 
+struct DurationGuard {
+    start: std::time::Instant,
+}
+
+impl Drop for DurationGuard {
+    fn drop(&mut self) {
+        metrics::histogram!(crate::videogen::metrics::GENERATE_DURATION_MS)
+            .record(self.start.elapsed().as_millis() as f64);
+    }
+}
+
 async fn generate_inner<D: GenerateDeps>(
     request: GenerateRequest,
     deps: &D,
     config: GenerateConfig,
 ) -> Result<GenerateResponse, GenerateError> {
+    let _duration_guard = DurationGuard {
+        start: std::time::Instant::now(),
+    };
     metrics::counter!(crate::videogen::metrics::GENERATE_REQUESTS_TOTAL).increment(1);
 
     let claimed_principal = Principal::from_str(&request.user_id)
@@ -923,9 +937,9 @@ impl GenerateDeps for RuntimeGenerateDeps {
         &self,
         input: ModerationInput,
     ) -> Result<ModerationDecision, ModerationError> {
-        match self.config.ansuman_moderation_mode {
-            AnsumanModerationMode::MockAllow => Ok(ModerationDecision::Safe),
-            AnsumanModerationMode::Remote => {
+        match self.config.moderation_mode {
+            ModerationMode::MockAllow => Ok(ModerationDecision::Safe),
+            ModerationMode::Remote => {
                 let url = std::env::var("ANSUMAN_URL").map_err(|_| {
                     ModerationError::RequestFailed("ANSUMAN_URL is required".to_string())
                 })?;
@@ -934,7 +948,7 @@ impl GenerateDeps for RuntimeGenerateDeps {
                     .post(url)
                     .header(CONTENT_TYPE, "application/json")
                     .timeout(std::time::Duration::from_millis(
-                        self.config.ansuman_timeout_ms,
+                        self.config.moderation_timeout_ms,
                     ))
                     .body(
                         serde_json::to_vec(&json!({
@@ -1368,7 +1382,7 @@ fn canister_request_key(
 mod tests {
     use super::*;
     use crate::videogen::{
-        ansuman::{ModerationDecision, ModerationError, ModerationInput},
+        moderation::{ModerationDecision, ModerationError, ModerationInput},
         rate_limiter::{RateLimiterCreateOptions, RateLimiterRequestKey},
         upload_destination::UploadDestination,
         vast::{VastSubmitAccepted, VastSubmitError, VastSubmitRequest},

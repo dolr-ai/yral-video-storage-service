@@ -118,6 +118,9 @@ pub trait ReconcileDeps: Send + Sync {
         request_key: &RateLimiterRequestKey,
     ) -> Result<(), ContextStoreError>;
 
+    /// Count contexts grouped by state for gauge metrics. Best-effort.
+    async fn count_contexts_by_state(&self) -> Result<Vec<(String, i64)>, String>;
+
     /// Attempt to create a draft for an already-uploaded video. Best-effort.
     async fn create_draft_for_upload(&self, row: &StaleDraftCreatingRow) -> Result<(), String>;
 
@@ -197,6 +200,7 @@ async fn handle_stale_failed_row<D: ReconcileDeps>(deps: &D, row: &StaleRow, fro
     // Step 5 — atomically terminalize the Postgres row.
     match deps.mark_stale_failed(key, &[from_state]).await {
         Ok(true) => {
+            metrics::counter!(crate::videogen::metrics::RECONCILIATION_ACTIONS_TOTAL).increment(1);
             tracing::info!(
                 principal = %key.principal,
                 counter = key.counter,
@@ -267,7 +271,6 @@ async fn reconcile_uploaded<D: ReconcileDeps>(deps: &D, config: &ReconcileConfig
 
     for row in &rows {
         let key = &row.request_key;
-        metrics::counter!(crate::videogen::metrics::DRAFT_CREATION_TOTAL).increment(1);
         if let Err(error) = deps.mark_draft_creating(key).await {
             tracing::warn!(
                 principal = %key.principal,
@@ -279,6 +282,7 @@ async fn reconcile_uploaded<D: ReconcileDeps>(deps: &D, config: &ReconcileConfig
                 .record_reconciliation_error(key, &error.to_string())
                 .await;
         } else {
+            metrics::counter!(crate::videogen::metrics::RECONCILIATION_ACTIONS_TOTAL).increment(1);
             tracing::info!(
                 principal = %key.principal,
                 counter = key.counter,
@@ -324,10 +328,12 @@ async fn reconcile_draft_creating<D: ReconcileDeps>(deps: &D, config: &Reconcile
                     error = %error,
                     "reconcile: mark_draft_failed failed"
                 );
+            } else {
+                metrics::counter!(crate::videogen::metrics::RECONCILIATION_ACTIONS_TOTAL)
+                    .increment(1);
             }
         } else {
             // Retry draft creation.
-            metrics::counter!(crate::videogen::metrics::DRAFT_CREATION_TOTAL).increment(1);
             if let Err(error) = deps.create_draft_for_upload(row).await {
                 tracing::warn!(
                     principal = %key.principal,
@@ -336,6 +342,9 @@ async fn reconcile_draft_creating<D: ReconcileDeps>(deps: &D, config: &Reconcile
                     "reconcile: create_draft_for_upload failed"
                 );
                 let _ = deps.record_reconciliation_error(key, &error).await;
+            } else {
+                metrics::counter!(crate::videogen::metrics::RECONCILIATION_ACTIONS_TOTAL)
+                    .increment(1);
             }
             if let Err(error) = deps.increment_draft_attempts(key).await {
                 tracing::warn!(
@@ -395,6 +404,7 @@ async fn reconcile_draft_created<D: ReconcileDeps>(deps: &D, config: &ReconcileC
                 "reconcile: mark_complete_with_bucket_url failed"
             );
         } else {
+            metrics::counter!(crate::videogen::metrics::RECONCILIATION_ACTIONS_TOTAL).increment(1);
             tracing::info!(
                 principal = %key.principal,
                 counter = key.counter,
@@ -409,7 +419,15 @@ async fn reconcile_draft_created<D: ReconcileDeps>(deps: &D, config: &ReconcileC
 // ---------------------------------------------------------------------------
 
 pub async fn run_reconciliation_cycle<D: ReconcileDeps>(deps: &D, config: &ReconcileConfig) {
-    metrics::counter!(crate::videogen::metrics::RECONCILIATION_ACTIONS_TOTAL).increment(1);
+    if let Ok(counts) = deps.count_contexts_by_state().await {
+        for (state, count) in counts {
+            metrics::gauge!(
+                crate::videogen::metrics::CONTEXTS_BY_STATE,
+                "state" => state
+            )
+            .set(count as f64);
+        }
+    }
     reconcile_context_created(deps, config).await;
     reconcile_submitted(deps, config).await;
     reconcile_uploaded(deps, config).await;
@@ -586,6 +604,15 @@ impl ReconcileDeps for RuntimeReconcileDeps {
             .await?
             .redact_identity(request_key)
             .await
+    }
+
+    async fn count_contexts_by_state(&self) -> Result<Vec<(String, i64)>, String> {
+        self.context_store()
+            .await
+            .map_err(|e| e.to_string())?
+            .count_contexts_by_state()
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn create_draft_for_upload(&self, row: &StaleDraftCreatingRow) -> Result<(), String> {
@@ -846,6 +873,10 @@ mod tests {
         ) -> Result<(), ContextStoreError> {
             self.push(Call::RedactIdentity);
             Ok(())
+        }
+
+        async fn count_contexts_by_state(&self) -> Result<Vec<(String, i64)>, String> {
+            Ok(vec![])
         }
 
         async fn create_draft_for_upload(

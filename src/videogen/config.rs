@@ -1,12 +1,12 @@
 use crate::consts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnsumanModerationMode {
+pub enum ModerationMode {
     Remote,
     MockAllow,
 }
 
-impl AnsumanModerationMode {
+impl ModerationMode {
     fn parse(value: &str) -> Result<Self, VideogenConfigError> {
         match value.trim().to_ascii_lowercase().as_str() {
             "remote" => Ok(Self::Remote),
@@ -27,7 +27,7 @@ impl AnsumanModerationMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideogenConfig {
-    pub ansuman_timeout_ms: u64,
+    pub moderation_timeout_ms: u64,
     pub generate_dedupe_window_secs: u64,
     pub vast_submit_timeout_secs: u64,
     pub upload_destination_timeout_secs: u64,
@@ -47,7 +47,7 @@ pub struct VideogenConfig {
     pub draft_created_complete_timeout_secs: u64,
     pub draft_retry_retention_hours: u64,
     pub completion_hmac_skew_secs: u64,
-    pub ansuman_moderation_mode: AnsumanModerationMode,
+    pub moderation_mode: ModerationMode,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -63,7 +63,7 @@ pub enum VideogenConfigError {
 impl VideogenConfig {
     pub fn from_env() -> Result<Self, VideogenConfigError> {
         let cfg = Self {
-            ansuman_timeout_ms: read_u64(consts::ANSUMAN_TIMEOUT_MS, 3000)?,
+            moderation_timeout_ms: read_u64(consts::ANSUMAN_TIMEOUT_MS, 3000)?,
             generate_dedupe_window_secs: read_u64(
                 consts::VIDEOGEN_GENERATE_DEDUPE_WINDOW_SECS,
                 120,
@@ -122,7 +122,7 @@ impl VideogenConfig {
                 72,
             )?,
             completion_hmac_skew_secs: read_u64(consts::VIDEOGEN_COMPLETION_HMAC_SKEW_SECS, 120)?,
-            ansuman_moderation_mode: Self::parse_moderation_mode(
+            moderation_mode: Self::parse_moderation_mode(
                 &std::env::var(consts::ANSUMAN_MODERATION_MODE)
                     .unwrap_or_else(|_| "remote".to_string()),
             )?,
@@ -135,7 +135,7 @@ impl VideogenConfig {
 
     pub fn test_defaults() -> Self {
         Self {
-            ansuman_timeout_ms: 3000,
+            moderation_timeout_ms: 3000,
             generate_dedupe_window_secs: 120,
             vast_submit_timeout_secs: 10,
             upload_destination_timeout_secs: 10,
@@ -155,17 +155,17 @@ impl VideogenConfig {
             draft_created_complete_timeout_secs: 120,
             draft_retry_retention_hours: 72,
             completion_hmac_skew_secs: 120,
-            ansuman_moderation_mode: AnsumanModerationMode::Remote,
+            moderation_mode: ModerationMode::Remote,
         }
     }
 
-    fn parse_moderation_mode(value: &str) -> Result<AnsumanModerationMode, VideogenConfigError> {
-        AnsumanModerationMode::parse(value)
+    fn parse_moderation_mode(value: &str) -> Result<ModerationMode, VideogenConfigError> {
+        ModerationMode::parse(value)
     }
 
     pub fn validate_for_environment(&self, environment: &str) -> Result<(), VideogenConfigError> {
         if environment.trim().eq_ignore_ascii_case("production")
-            && self.ansuman_moderation_mode == AnsumanModerationMode::MockAllow
+            && self.moderation_mode == ModerationMode::MockAllow
         {
             return Err(VideogenConfigError::MockModerationInProduction);
         }
@@ -193,7 +193,7 @@ fn read_u32(name: &'static str, default: u32) -> Result<u32, VideogenConfigError
 
 #[cfg(test)]
 mod tests {
-    use super::{AnsumanModerationMode, VideogenConfig, VideogenConfigError};
+    use super::{ModerationMode, VideogenConfig, VideogenConfigError};
     use crate::videogen::types::VideogenContextState;
 
     #[test]
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn production_rejects_mock_moderation() {
         let mut cfg = VideogenConfig::test_defaults();
-        cfg.ansuman_moderation_mode = AnsumanModerationMode::MockAllow;
+        cfg.moderation_mode = ModerationMode::MockAllow;
 
         assert_eq!(
             cfg.validate_for_environment("production"),
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn production_rejects_mock_moderation_with_case_and_spacing() {
         let mut cfg = VideogenConfig::test_defaults();
-        cfg.ansuman_moderation_mode = VideogenConfig::parse_moderation_mode("MOCK_ALLOW ").unwrap();
+        cfg.moderation_mode = VideogenConfig::parse_moderation_mode("MOCK_ALLOW ").unwrap();
 
         assert_eq!(
             cfg.validate_for_environment("production"),
@@ -255,9 +255,9 @@ mod tests {
     fn moderation_mode_accepts_remote_with_case_and_spacing() {
         assert_eq!(
             VideogenConfig::parse_moderation_mode(" REMOTE ").unwrap(),
-            AnsumanModerationMode::Remote
+            ModerationMode::Remote
         );
-        assert_eq!(AnsumanModerationMode::Remote.as_str(), "remote");
+        assert_eq!(ModerationMode::Remote.as_str(), "remote");
     }
 
     #[test]
