@@ -8,16 +8,18 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    consts, db,
+    consts::{self, RATE_LIMITS_CANISTER_ID},
+    db,
     videogen::{
         config::VideogenConfig,
         context::{ContextStateRow, ContextStoreError, PostgresVideogenContextStore},
         draft::{DraftCreationRequest, DraftServiceError},
         hmac::{body_sha256_hex, verify_completion_signature, HmacError, HmacKeyRegistry},
-        rate_limiter::RateLimiterRequestKey,
+        rate_limiter::{to_canister_request_key, RateLimiterRequestKey},
     },
     AppState,
 };
+use yral_canisters_client::rate_limits::{RateLimits, Result1 as CanisterResult, VideoGenRequestStatus};
 
 // ─── Request / response types ────────────────────────────────────────────────
 
@@ -128,6 +130,7 @@ pub trait CompletionDeps: Send + Sync {
     async fn mark_rate_limit_complete(
         &self,
         request_key: &RateLimiterRequestKey,
+        bucket_url: &str,
     ) -> Result<(), String>;
 
     /// draft_created → complete (also stores bucket_url and redacts identity)
@@ -301,7 +304,7 @@ async fn handle_success_completion<D: CompletionDeps>(
     })?;
 
     // Step 7b: notify rate limiter of success (best-effort)
-    if let Err(e) = deps.mark_rate_limit_complete(request_key).await {
+    if let Err(e) = deps.mark_rate_limit_complete(request_key, bucket_url).await {
         tracing::warn!("mark_rate_limit_complete failed (best-effort): {e}");
     }
 
@@ -633,6 +636,7 @@ pub async fn complete_video(
 struct RuntimeCompletionDeps {
     db_url: String,
     config: VideogenConfig,
+    ic_agent: ic_agent::Agent,
 }
 
 impl RuntimeCompletionDeps {
@@ -640,6 +644,7 @@ impl RuntimeCompletionDeps {
         Self {
             db_url: state.db_url,
             config,
+            ic_agent: state.ic_agent,
         }
     }
 
@@ -728,29 +733,58 @@ impl CompletionDeps for RuntimeCompletionDeps {
 
     async fn mark_rate_limit_complete(
         &self,
-        _request_key: &RateLimiterRequestKey,
+        request_key: &RateLimiterRequestKey,
+        bucket_url: &str,
     ) -> Result<(), String> {
-        // Rate limiter calls go to IC canister — stubbed for now (Task 7)
-        tracing::info!("mark_rate_limit_complete stub called");
-        Ok(())
+        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
+        let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
+        match rate_limits
+            .update_video_generation_status(
+                key,
+                VideoGenRequestStatus::Complete(bucket_url.to_string()),
+            )
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            CanisterResult::Ok => Ok(()),
+            CanisterResult::Err(e) => Err(e),
+        }
     }
 
     async fn mark_rate_limit_failed(
         &self,
-        _request_key: &RateLimiterRequestKey,
-        _reason: &str,
+        request_key: &RateLimiterRequestKey,
+        reason: &str,
     ) -> Result<(), String> {
-        // Rate limiter calls go to IC canister — stubbed for now
-        tracing::info!("rate_limit_failed stub called");
-        Ok(())
+        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
+        let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
+        match rate_limits
+            .update_video_generation_status(
+                key,
+                VideoGenRequestStatus::Failed(reason.to_string()),
+            )
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            CanisterResult::Ok => Ok(()),
+            CanisterResult::Err(e) => Err(e),
+        }
     }
 
     async fn decrement_rate_limit(
         &self,
-        _request_key: &RateLimiterRequestKey,
+        request_key: &RateLimiterRequestKey,
     ) -> Result<(), String> {
-        tracing::info!("decrement_rate_limit stub called");
-        Ok(())
+        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
+        let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
+        match rate_limits
+            .decrement_video_generation_counter_v_1(key, "VIDEOGEN".to_string())
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            CanisterResult::Ok => Ok(()),
+            CanisterResult::Err(e) => Err(e),
+        }
     }
 
     async fn release_upload_destination(
@@ -1017,6 +1051,7 @@ mod tests {
         async fn mark_rate_limit_complete(
             &self,
             _request_key: &RateLimiterRequestKey,
+            _bucket_url: &str,
         ) -> Result<(), String> {
             self.push(Call::MarkRateLimitComplete);
             Ok(())

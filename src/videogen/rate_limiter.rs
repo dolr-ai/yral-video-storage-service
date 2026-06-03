@@ -100,4 +100,17 @@ mod tests {
         assert!(!options.is_paid);
         assert_eq!(options.payment_amount, None);
     }
+
+    #[test]
+    fn complete_status_uses_bucket_url() {
+        use yral_canisters_client::rate_limits::VideoGenRequestStatus;
+        let status =
+            VideoGenRequestStatus::Complete("https://bucket.example/video.mp4".to_string());
+        match status {
+            VideoGenRequestStatus::Complete(url) => {
+                assert_eq!(url, "https://bucket.example/video.mp4")
+            }
+            _ => panic!("expected complete status"),
+        }
+    }
 }
