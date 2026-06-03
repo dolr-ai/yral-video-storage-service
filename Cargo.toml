@@ -50,7 +50,7 @@ tokio-postgres = { version = "0.7.15", features = ["with-chrono-0_4", "with-serd
 tokio-util = { version = "0.7", features = ["rt"] }
 thiserror = "2.0.12"
 tower = "0.5"
-tokio = { version = "1.43.0", features = ["full"] }
+tokio = { version = "1.52.0", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -70,3 +70,4 @@ yral-types = { git = "https://github.com/dolr-ai/yral-common", branch = "master"
 stringreader = "0.1.1"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+lapin = { version = "4.2.1", default-features = false, features = ["rustls", "tokio"] }

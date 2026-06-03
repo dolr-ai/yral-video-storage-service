@@ -25,6 +25,24 @@ impl ModerationMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VastSubmitTransport {
+    Http,
+    RabbitMq,
+}
+
+impl VastSubmitTransport {
+    pub fn parse(value: &str) -> Result<Self, VideogenConfigError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "http" => Ok(Self::Http),
+            "rabbitmq" | "amqp" => Ok(Self::RabbitMq),
+            _ => Err(VideogenConfigError::InvalidVastSubmitTransport(
+                value.to_string(),
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideogenConfig {
     pub moderation_timeout_ms: u64,
@@ -47,6 +65,13 @@ pub struct VideogenConfig {
     pub draft_created_complete_timeout_secs: u64,
     pub draft_retry_retention_hours: u64,
     pub completion_hmac_skew_secs: u64,
+    pub vast_submit_transport: VastSubmitTransport,
+    pub rabbitmq_amqps_urls: Vec<String>,
+    pub rabbitmq_exchange: String,
+    pub rabbitmq_routing_key: String,
+    pub rabbitmq_publish_timeout_secs: u64,
+    pub rabbitmq_connection_name: String,
+    pub rabbitmq_tls_ca_cert_pem_b64: Option<String>,
     pub moderation_mode: ModerationMode,
 }
 
@@ -58,6 +83,10 @@ pub enum VideogenConfigError {
     InvalidModerationMode(String),
     #[error("MODERATION_MODE=mock_allow is not allowed when ENVIRONMENT=production")]
     MockModerationInProduction,
+    #[error("VIDEOGEN_VAST_SUBMIT_TRANSPORT must be http, rabbitmq, or amqp: {0}")]
+    InvalidVastSubmitTransport(String),
+    #[error("VIDEOGEN_RABBITMQ_AMQPS_URLS is required when VIDEOGEN_VAST_SUBMIT_TRANSPORT=rabbitmq")]
+    RabbitMqUrlsRequired,
 }
 
 impl VideogenConfig {
@@ -122,6 +151,34 @@ impl VideogenConfig {
                 72,
             )?,
             completion_hmac_skew_secs: read_u64(consts::VIDEOGEN_COMPLETION_HMAC_SKEW_SECS, 120)?,
+            vast_submit_transport: VastSubmitTransport::parse(
+                &std::env::var(consts::VIDEOGEN_VAST_SUBMIT_TRANSPORT)
+                    .unwrap_or_else(|_| "http".to_string()),
+            )?,
+            rabbitmq_amqps_urls: std::env::var(consts::VIDEOGEN_RABBITMQ_AMQPS_URLS)
+                .map(|s| {
+                    s.split(',')
+                        .map(|u| u.trim().to_string())
+                        .filter(|u| !u.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            rabbitmq_exchange: std::env::var(consts::VIDEOGEN_RABBITMQ_EXCHANGE)
+                .unwrap_or_else(|_| "videogen.jobs".to_string()),
+            rabbitmq_routing_key: std::env::var(consts::VIDEOGEN_RABBITMQ_ROUTING_KEY)
+                .unwrap_or_else(|_| "ltx.generate".to_string()),
+            rabbitmq_publish_timeout_secs: read_u64(
+                consts::VIDEOGEN_RABBITMQ_PUBLISH_TIMEOUT_SECS,
+                10,
+            )?,
+            rabbitmq_connection_name: std::env::var(consts::VIDEOGEN_RABBITMQ_CONNECTION_NAME)
+                .unwrap_or_else(|_| {
+                    "yral-video-storage-service-videogen-publisher".to_string()
+                }),
+            rabbitmq_tls_ca_cert_pem_b64: std::env::var(
+                consts::VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64,
+            )
+            .ok(),
             moderation_mode: Self::parse_moderation_mode(
                 &std::env::var(consts::MODERATION_MODE).unwrap_or_else(|_| "remote".to_string()),
             )?,
@@ -154,6 +211,13 @@ impl VideogenConfig {
             draft_created_complete_timeout_secs: 120,
             draft_retry_retention_hours: 72,
             completion_hmac_skew_secs: 120,
+            vast_submit_transport: VastSubmitTransport::Http,
+            rabbitmq_amqps_urls: vec![],
+            rabbitmq_exchange: "videogen.jobs".to_string(),
+            rabbitmq_routing_key: "ltx.generate".to_string(),
+            rabbitmq_publish_timeout_secs: 10,
+            rabbitmq_connection_name: "yral-video-storage-service-videogen-publisher".to_string(),
+            rabbitmq_tls_ca_cert_pem_b64: None,
             moderation_mode: ModerationMode::Remote,
         }
     }
@@ -167,6 +231,11 @@ impl VideogenConfig {
             && self.moderation_mode == ModerationMode::MockAllow
         {
             return Err(VideogenConfigError::MockModerationInProduction);
+        }
+        if self.vast_submit_transport == VastSubmitTransport::RabbitMq
+            && self.rabbitmq_amqps_urls.is_empty()
+        {
+            return Err(VideogenConfigError::RabbitMqUrlsRequired);
         }
         Ok(())
     }
@@ -192,8 +261,32 @@ fn read_u32(name: &'static str, default: u32) -> Result<u32, VideogenConfigError
 
 #[cfg(test)]
 mod tests {
-    use super::{ModerationMode, VideogenConfig, VideogenConfigError};
+    use super::{ModerationMode, VastSubmitTransport, VideogenConfig, VideogenConfigError};
     use crate::videogen::types::VideogenContextState;
+
+    #[test]
+    fn default_submit_transport_is_http_for_rollback() {
+        let cfg = VideogenConfig::test_defaults();
+        assert_eq!(cfg.vast_submit_transport, VastSubmitTransport::Http);
+    }
+
+    #[test]
+    fn parses_rabbitmq_submit_transport() {
+        assert_eq!(
+            VastSubmitTransport::parse("rabbitmq").unwrap(),
+            VastSubmitTransport::RabbitMq
+        );
+        assert_eq!(
+            VastSubmitTransport::parse("amqp").unwrap(),
+            VastSubmitTransport::RabbitMq
+        );
+    }
+
+    #[test]
+    fn rabbitmq_publish_confirm_timeout_defaults_to_submit_timeout() {
+        let cfg = VideogenConfig::test_defaults();
+        assert_eq!(cfg.rabbitmq_publish_timeout_secs, cfg.vast_submit_timeout_secs);
+    }
 
     #[test]
     fn upload_url_ttl_default_exceeds_required_window() {
