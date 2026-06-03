@@ -6,6 +6,7 @@ pub mod hmac;
 pub mod identity_crypto;
 pub mod metrics;
 pub mod moderation;
+pub mod rabbitmq;
 pub mod rate_limiter;
 pub mod reconcile;
 pub mod types;
