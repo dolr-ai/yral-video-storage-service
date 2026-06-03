@@ -4,7 +4,12 @@ use chrono::{DateTime, Duration, Utc};
 use ic_agent::Agent;
 use tokio::sync::Mutex;
 
+use yral_canisters_client::rate_limits::{
+    RateLimits, Result1 as CanisterResult, VideoGenRequestStatus,
+};
+
 use crate::{
+    consts::RATE_LIMITS_CANISTER_ID,
     db,
     videogen::{
         config::VideogenConfig,
@@ -13,7 +18,7 @@ use crate::{
             StaleDraftCreatingRow, StaleRow, StaleUploadedRow,
         },
         draft::{DraftCreationRequest, LoggingDraftServiceClient},
-        rate_limiter::RateLimiterRequestKey,
+        rate_limiter::{to_canister_request_key, RateLimiterRequestKey},
     },
 };
 
@@ -443,14 +448,13 @@ pub async fn run_reconciliation_cycle<D: ReconcileDeps>(deps: &D, config: &Recon
 // Runtime implementation
 // ---------------------------------------------------------------------------
 
-/// A concrete `ReconcileDeps` implementation backed by Postgres and IC canister
-/// stubs (the canister calls are best-effort no-ops until the IC wiring is done).
+/// A concrete `ReconcileDeps` implementation backed by Postgres and live IC canister
+/// calls for rate-limiter operations.
 ///
 /// The `db_client` is lazily connected and reused across all operations within a
 /// reconciliation cycle, avoiding a new TCP connection per DB call.
 pub struct RuntimeReconcileDeps {
     pub db_url: String,
-    #[allow(dead_code)] // TODO: wire canister calls (Task 7 stub)
     pub ic_agent: Agent,
     /// Lazily-initialised, cycle-wide Postgres connection.
     db_client: Arc<Mutex<Option<tokio_postgres::Client>>>,
@@ -564,31 +568,55 @@ impl ReconcileDeps for RuntimeReconcileDeps {
 
     async fn mark_rate_limit_failed(
         &self,
-        _request_key: &RateLimiterRequestKey,
-        _reason: &str,
+        request_key: &RateLimiterRequestKey,
+        reason: &str,
     ) -> Result<(), String> {
-        // TODO: wire actual IC canister call (uses self.ic_agent)
-        tracing::info!("reconcile: mark_rate_limit_failed stub");
-        Ok(())
+        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
+        let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
+        match rate_limits
+            .update_video_generation_status(key, VideoGenRequestStatus::Failed(reason.to_string()))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            CanisterResult::Ok => Ok(()),
+            CanisterResult::Err(e) => Err(e),
+        }
     }
 
     async fn decrement_rate_limit(
         &self,
-        _request_key: &RateLimiterRequestKey,
+        request_key: &RateLimiterRequestKey,
     ) -> Result<(), String> {
-        // TODO: wire actual IC canister call
-        tracing::info!("reconcile: decrement_rate_limit stub");
-        Ok(())
+        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
+        let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
+        match rate_limits
+            .decrement_video_generation_counter_v_1(key, "VIDEOGEN".to_string())
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            CanisterResult::Ok => Ok(()),
+            CanisterResult::Err(e) => Err(e),
+        }
     }
 
     async fn mark_rate_limit_complete(
         &self,
-        _request_key: &RateLimiterRequestKey,
-        _bucket_url: &str,
+        request_key: &RateLimiterRequestKey,
+        bucket_url: &str,
     ) -> Result<(), String> {
-        // TODO: wire actual IC canister call
-        tracing::info!("reconcile: mark_rate_limit_complete stub");
-        Ok(())
+        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
+        let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
+        match rate_limits
+            .update_video_generation_status(
+                key,
+                VideoGenRequestStatus::Complete(bucket_url.to_string()),
+            )
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            CanisterResult::Ok => Ok(()),
+            CanisterResult::Err(e) => Err(e),
+        }
     }
 
     async fn release_upload_destination(
@@ -1152,6 +1180,18 @@ mod tests {
         assert!(calls.contains(&Call::FetchStaleDraftCreated));
         assert!(calls.contains(&Call::MarkRateLimitComplete));
         assert!(calls.contains(&Call::MarkCompleteWithBucketUrl));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test — no stubs remain in RuntimeReconcileDeps
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn runtime_reconcile_deps_uses_real_rate_limiter_paths() {
+        let source = include_str!("reconcile.rs");
+        assert!(!source.contains("mark_rate_limit_failed stub"));
+        assert!(!source.contains("decrement_rate_limit stub"));
+        assert!(!source.contains("mark_rate_limit_complete stub"));
     }
 
     // -----------------------------------------------------------------------
