@@ -9,6 +9,7 @@ pub const COMPLETION_HMAC_FAILURES_TOTAL: &str = "videogen_completion_hmac_failu
 pub const CONTEXTS_BY_STATE: &str = "videogen_contexts_by_state";
 pub const RECONCILIATION_ACTIONS_TOTAL: &str = "videogen_reconciliation_actions_total";
 pub const DRAFT_CREATION_TOTAL: &str = "videogen_draft_creation_total";
+pub const SUBMIT_TRANSPORT_TOTAL: &str = "videogen_submit_transport_total";
 
 /// Call at startup to register all metric descriptions with the recorder.
 pub fn init_metrics() {
@@ -27,6 +28,10 @@ pub fn init_metrics() {
     metrics::describe_gauge!(CONTEXTS_BY_STATE, "Videogen contexts by state");
     metrics::describe_counter!(RECONCILIATION_ACTIONS_TOTAL, "Total reconciliation actions");
     metrics::describe_counter!(DRAFT_CREATION_TOTAL, "Total draft creation attempts");
+    metrics::describe_counter!(
+        SUBMIT_TRANSPORT_TOTAL,
+        "Total videogen submit attempts by transport"
+    );
 }
 
 #[cfg(test)]
@@ -44,5 +49,6 @@ mod tests {
         assert!(!CONTEXTS_BY_STATE.is_empty());
         assert!(!RECONCILIATION_ACTIONS_TOTAL.is_empty());
         assert!(!DRAFT_CREATION_TOTAL.is_empty());
+        assert!(!SUBMIT_TRANSPORT_TOTAL.is_empty());
     }
 }

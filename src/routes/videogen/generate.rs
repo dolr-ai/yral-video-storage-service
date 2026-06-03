@@ -1291,6 +1291,22 @@ impl GenerateDeps for RuntimeGenerateDeps {
         &self,
         request: VastSubmitRequest,
     ) -> Result<VastSubmitAccepted, VastSubmitError> {
+        use crate::videogen::config::VastSubmitTransport;
+        match self.config.vast_submit_transport {
+            VastSubmitTransport::Http => self.submit_vast_http(request).await,
+            VastSubmitTransport::RabbitMq => self.submit_vast_rabbitmq(request).await,
+        }
+    }
+
+    async fn submit_vast_http(
+        &self,
+        request: VastSubmitRequest,
+    ) -> Result<VastSubmitAccepted, VastSubmitError> {
+        metrics::counter!(
+            crate::videogen::metrics::SUBMIT_TRANSPORT_TOTAL,
+            "transport" => "http"
+        )
+        .increment(1);
         let endpoint = std::env::var(VAST_GENERATE_URL_ENV).map_err(|_| {
             VastSubmitError::RequestFailed(format!("{VAST_GENERATE_URL_ENV} is required"))
         })?;
@@ -1326,6 +1342,30 @@ impl GenerateDeps for RuntimeGenerateDeps {
                     .map(|value| value.with_timezone(&Utc))
                     .unwrap_or_else(Utc::now),
             })
+    }
+
+    async fn submit_vast_rabbitmq(
+        &self,
+        request: VastSubmitRequest,
+    ) -> Result<VastSubmitAccepted, VastSubmitError> {
+        use crate::videogen::rabbitmq::{RabbitMqPublishConfig, RabbitMqPublisher};
+        metrics::counter!(
+            crate::videogen::metrics::SUBMIT_TRANSPORT_TOTAL,
+            "transport" => "rabbitmq"
+        )
+        .increment(1);
+        let config = RabbitMqPublishConfig {
+            amqps_urls: self.config.rabbitmq_amqps_urls.clone(),
+            exchange: self.config.rabbitmq_exchange.clone(),
+            routing_key: self.config.rabbitmq_routing_key.clone(),
+            connection_name: self.config.rabbitmq_connection_name.clone(),
+            publish_timeout_secs: self.config.rabbitmq_publish_timeout_secs,
+            tls_ca_cert_pem_b64: self.config.rabbitmq_tls_ca_cert_pem_b64.clone(),
+        };
+        RabbitMqPublisher::new(config)
+            .publish(request)
+            .await
+            .map_err(|e| VastSubmitError::RequestFailed(e.to_string()))
     }
 }
 
@@ -1420,7 +1460,7 @@ mod tests {
         moderation: Option<ModerationDecision>,
         rate_limit: Option<Result<RateLimiterRequestKey, RateLimiterError>>,
         stage_image: Option<Result<Option<String>, ImageStageError>>,
-        vast: Option<VastSubmitAccepted>,
+        vast: Option<Result<VastSubmitAccepted, String>>,
     }
 
     impl FakeDeps {
@@ -1600,15 +1640,14 @@ mod tests {
                 Some("https://prakash.example.test/api/v2/videogen/upload-url/refresh")
             );
             self.push(Call::VastSubmit);
-            if let Some(accepted) = self.vast.clone() {
-                Ok(accepted)
-            } else {
-                Ok(VastSubmitAccepted {
-                    request_id: request.request_id,
-                    status: "submitted".to_string(),
-                    accepted_at: accepted_at(),
-                })
+            if let Some(result) = self.vast.clone() {
+                return result.map_err(VastSubmitError::RequestFailed);
             }
+            Ok(VastSubmitAccepted {
+                request_id: request.request_id,
+                status: "submitted".to_string(),
+                accepted_at: accepted_at(),
+            })
         }
     }
 
@@ -1961,6 +2000,53 @@ mod tests {
                 Call::RequestIdStored,
                 Call::VastSubmit,
                 Call::ContextSubmitted,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_submit_success_marks_context_submitted_and_returns_operation_id() {
+        let deps = FakeDeps::with_calls();
+
+        let response = generate_with_dependencies(request(), &deps, config())
+            .await
+            .unwrap();
+
+        assert_eq!(response.operation_id, "aaaaa-aa_17");
+        assert!(deps.calls().contains(&Call::VastSubmit));
+        assert!(deps.calls().contains(&Call::ContextSubmitted));
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_submit_failure_rolls_back_rate_limiter_and_redacts_identity() {
+        let deps = FakeDeps {
+            vast: Some(Err("RabbitMQ publish timed out".to_string())),
+            ..FakeDeps::with_calls()
+        };
+
+        let err = generate_with_dependencies(request(), &deps, config())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            deps.calls(),
+            vec![
+                Call::DedupeLookup,
+                Call::Moderate,
+                Call::RateLimiterCreate,
+                Call::ContextCreate,
+                Call::StageImage,
+                Call::WorkflowJson,
+                Call::ReserveUpload,
+                Call::SaveUpload,
+                Call::RequestIdStored,
+                Call::VastSubmit,
+                Call::ContextSubmitFailed,
+                Call::RateLimiterFailed,
+                Call::RateLimiterDecrement,
+                Call::ReleaseUpload,
+                Call::RedactIdentity,
             ]
         );
     }
