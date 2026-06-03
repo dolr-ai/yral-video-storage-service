@@ -344,6 +344,7 @@ pub trait GenerateDeps: Send + Sync {
     }
     async fn release_upload_destination(
         &self,
+        request_key: &RateLimiterRequestKey,
         destination: &UploadDestination,
     ) -> Result<(), UploadDestinationError>;
     async fn stage_image(
@@ -781,7 +782,9 @@ async fn fail_after_rate_limit<D: GenerateDeps>(
         .decrement_rate_limit(request_key, VIDEOGEN_PROPERTY)
         .await;
     if let Some(destination) = upload_destination {
-        let _ = deps.release_upload_destination(destination).await;
+        let _ = deps
+            .release_upload_destination(request_key, destination)
+            .await;
     }
     let _ = deps.redact_identity(request_key).await;
 }
@@ -1196,9 +1199,20 @@ impl GenerateDeps for RuntimeGenerateDeps {
 
     async fn release_upload_destination(
         &self,
-        _destination: &UploadDestination,
+        request_key: &RateLimiterRequestKey,
+        destination: &UploadDestination,
     ) -> Result<(), UploadDestinationError> {
-        Ok(())
+        use crate::videogen::upload_destination::{
+            ReleaseUploadDestinationRequest, UploadDestinationReleaseClient,
+        };
+        UploadDestinationReleaseClient::from_env()
+            .release(ReleaseUploadDestinationRequest {
+                request_key: request_key.clone(),
+                video_id: destination.video_id.clone(),
+                object_key: destination.object_key.clone(),
+            })
+            .await
+            .map_err(UploadDestinationError::Unavailable)
     }
 
     async fn save_upload_destination(
@@ -1580,6 +1594,7 @@ mod tests {
 
         async fn release_upload_destination(
             &self,
+            _request_key: &RateLimiterRequestKey,
             _destination: &UploadDestination,
         ) -> Result<(), UploadDestinationError> {
             self.push(Call::ReleaseUpload);
@@ -1910,9 +1925,12 @@ mod tests {
 
             async fn release_upload_destination(
                 &self,
+                request_key: &RateLimiterRequestKey,
                 destination: &UploadDestination,
             ) -> Result<(), UploadDestinationError> {
-                self.0.release_upload_destination(destination).await
+                self.0
+                    .release_upload_destination(request_key, destination)
+                    .await
             }
 
             async fn save_upload_destination(

@@ -489,7 +489,7 @@ impl PostgresVideogenContextStore {
         let counter = request_key.counter as i64;
         let row = c
             .query_opt(
-                "SELECT state, request_id, principal, object_key
+                "SELECT state, request_id, principal, object_key, draft_video_id
                  FROM videogen_completion_contexts
                  WHERE principal = $1 AND counter = $2",
                 &[&request_key.principal, &counter],
@@ -502,6 +502,7 @@ impl PostgresVideogenContextStore {
             request_id: row.get(1),
             principal: row.get(2),
             object_key: row.get(3),
+            video_id: row.get(4),
         }))
     }
 }
@@ -858,6 +859,7 @@ pub struct ContextStateRow {
     pub request_id: Option<String>,
     pub principal: String,
     pub object_key: Option<String>,
+    pub video_id: Option<String>,
 }
 
 #[cfg(test)]

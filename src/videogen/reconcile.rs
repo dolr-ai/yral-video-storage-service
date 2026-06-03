@@ -110,6 +110,7 @@ pub trait ReconcileDeps: Send + Sync {
     async fn release_upload_destination(
         &self,
         request_key: &RateLimiterRequestKey,
+        destination: Option<&crate::videogen::upload_destination::UploadDestination>,
     ) -> Result<(), String>;
 
     /// Redact the encrypted identity from the row. Best-effort.
@@ -180,7 +181,10 @@ async fn handle_stale_failed_row<D: ReconcileDeps>(deps: &D, row: &StaleRow, fro
     }
 
     // Step 3 — best-effort release of upload slot.
-    if let Err(error) = deps.release_upload_destination(key).await {
+    if let Err(error) = deps
+        .release_upload_destination(key, row.upload_destination.as_ref())
+        .await
+    {
         tracing::warn!(
             principal = %key.principal,
             counter = key.counter,
@@ -589,11 +593,28 @@ impl ReconcileDeps for RuntimeReconcileDeps {
 
     async fn release_upload_destination(
         &self,
-        _request_key: &RateLimiterRequestKey,
+        request_key: &RateLimiterRequestKey,
+        destination: Option<&crate::videogen::upload_destination::UploadDestination>,
     ) -> Result<(), String> {
-        // TODO: wire actual upload service release
-        tracing::info!("reconcile: release_upload_destination stub");
-        Ok(())
+        use crate::videogen::upload_destination::{
+            ReleaseUploadDestinationRequest, UploadDestinationReleaseClient,
+        };
+        let Some(dest) = destination else {
+            tracing::info!(
+                principal = %request_key.principal,
+                counter = request_key.counter,
+                mode = "no_destination",
+                "reconcile: release_upload_destination skipped (no destination)"
+            );
+            return Ok(());
+        };
+        UploadDestinationReleaseClient::from_env()
+            .release(ReleaseUploadDestinationRequest {
+                request_key: request_key.clone(),
+                video_id: dest.video_id.clone(),
+                object_key: dest.object_key.clone(),
+            })
+            .await
     }
 
     async fn redact_identity(
@@ -862,6 +883,7 @@ mod tests {
         async fn release_upload_destination(
             &self,
             _request_key: &RateLimiterRequestKey,
+            _destination: Option<&crate::videogen::upload_destination::UploadDestination>,
         ) -> Result<(), String> {
             self.push(Call::ReleaseUploadDestination);
             Ok(())

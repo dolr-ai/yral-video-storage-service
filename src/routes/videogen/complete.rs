@@ -156,6 +156,8 @@ pub trait CompletionDeps: Send + Sync {
     async fn release_upload_destination(
         &self,
         request_key: &RateLimiterRequestKey,
+        video_id: Option<&str>,
+        object_key: Option<&str>,
     ) -> Result<(), String>;
 
     async fn create_draft(&self, request: DraftCreationRequest) -> Result<(), DraftServiceError>;
@@ -399,7 +401,12 @@ async fn handle_failure_completion<D: CompletionDeps>(
     if let Err(e) = deps.decrement_rate_limit(request_key).await {
         tracing::warn!("decrement_rate_limit failed: {e}");
     }
-    if let Err(e) = deps.release_upload_destination(request_key).await {
+    let vid = state_row.as_ref().and_then(|r| r.video_id.as_deref());
+    let key = state_row.as_ref().and_then(|r| r.object_key.as_deref());
+    if let Err(e) = deps
+        .release_upload_destination(request_key, vid, key)
+        .await
+    {
         tracing::warn!("release_upload_destination failed: {e}");
     }
 
@@ -748,10 +755,27 @@ impl CompletionDeps for RuntimeCompletionDeps {
 
     async fn release_upload_destination(
         &self,
-        _request_key: &RateLimiterRequestKey,
+        request_key: &RateLimiterRequestKey,
+        video_id: Option<&str>,
+        object_key: Option<&str>,
     ) -> Result<(), String> {
-        tracing::info!("release_upload_destination stub called");
-        Ok(())
+        use crate::videogen::upload_destination::{
+            ReleaseUploadDestinationRequest, UploadDestinationReleaseClient,
+        };
+        let (Some(vid), Some(key)) = (video_id, object_key) else {
+            tracing::info!(
+                principal = %request_key.principal,
+                "release_upload_destination: missing video_id or object_key, skipping"
+            );
+            return Ok(());
+        };
+        UploadDestinationReleaseClient::from_env()
+            .release(ReleaseUploadDestinationRequest {
+                request_key: request_key.clone(),
+                video_id: vid.to_string(),
+                object_key: key.to_string(),
+            })
+            .await
     }
 
     async fn create_draft(&self, request: DraftCreationRequest) -> Result<(), DraftServiceError> {
@@ -890,6 +914,7 @@ mod tests {
                     request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
                     principal: "aaaaa-aa".to_string(),
                     object_key: Some("generated/video-17.mp4".to_string()),
+                    video_id: Some("video-17".to_string()),
                 })),
                 ..Self::new()
             }
@@ -903,6 +928,7 @@ mod tests {
                     request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
                     principal: "aaaaa-aa".to_string(),
                     object_key: Some("generated/video-17.mp4".to_string()),
+                    video_id: None,
                 })),
                 ..Self::new()
             }
@@ -968,6 +994,7 @@ mod tests {
                 request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
                 principal: "aaaaa-aa".to_string(),
                 object_key: Some("generated/video-17.mp4".to_string()),
+                video_id: None,
             })))
         }
 
@@ -1033,6 +1060,8 @@ mod tests {
         async fn release_upload_destination(
             &self,
             _request_key: &RateLimiterRequestKey,
+            _video_id: Option<&str>,
+            _object_key: Option<&str>,
         ) -> Result<(), String> {
             self.push(Call::ReleaseUploadDestination);
             Ok(())
@@ -1233,6 +1262,7 @@ mod tests {
                 request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
                 principal: "aaaaa-aa".to_string(),
                 object_key: Some("generated/video-17.mp4".to_string()),
+                video_id: None,
             })),
             ..FakeCompletionDeps::new()
         };
@@ -1254,6 +1284,7 @@ mod tests {
                 request_id: Some("99999999-9999-9999-9999-999999999999".to_string()), // different
                 principal: "aaaaa-aa".to_string(),
                 object_key: Some("generated/video-17.mp4".to_string()),
+                video_id: None,
             })),
             ..FakeCompletionDeps::new()
         };
@@ -1275,6 +1306,7 @@ mod tests {
                 request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
                 principal: "aaaaa-aa".to_string(),
                 object_key: Some("generated/video-17.mp4".to_string()),
+                video_id: Some("video-17".to_string()),
             })),
             ..FakeCompletionDeps::new()
         };
