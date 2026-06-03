@@ -171,17 +171,13 @@ impl RabbitMqPublisher {
             .await
             .map_err(|e| RabbitMqPublishError::Publish(e.to_string()))?;
 
-        let pending = channel
+        let returned = channel
             .wait_for_confirms()
             .await
             .map_err(|e| RabbitMqPublishError::Publish(e.to_string()))?;
-        // Any returned messages (e.g. unroutable with mandatory=true) indicate broker rejection.
-        if !pending.is_empty() {
-            return Err(RabbitMqPublishError::NotConfirmed);
-        }
 
         match confirmation {
-            lapin::Confirmation::Ack(None) => {}
+            lapin::Confirmation::Ack(None) if returned.is_empty() => {}
             _ => return Err(RabbitMqPublishError::NotConfirmed),
         }
 
