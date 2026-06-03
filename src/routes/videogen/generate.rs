@@ -12,8 +12,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use yral_canisters_client::rate_limits::{
     RateLimits, Result1 as CanisterResult, Result_ as CanisterCreateResult,
-    TokenType as CanisterTokenType, VideoGenRequestKey as CanisterVideoGenRequestKey,
-    VideoGenRequestStatus,
+    TokenType as CanisterTokenType, VideoGenRequestStatus,
 };
 use yral_types::delegated_identity::DelegatedIdentityWire;
 
@@ -29,8 +28,8 @@ use crate::{
         },
         moderation::{ModerationDecision, ModerationError, ModerationInput},
         rate_limiter::{
-            prepare_create_request_options, RateLimiterCreateOptions, RateLimiterRequestKey,
-            RateLimiterTokenType,
+            prepare_create_request_options, to_canister_request_key, RateLimiterCreateOptions,
+            RateLimiterRequestKey, RateLimiterTokenType,
         },
         upload_destination::UploadDestination,
         vast::{VastHttpClient, VastSubmitAccepted, VastSubmitError, VastSubmitRequest},
@@ -251,15 +250,7 @@ pub struct UploadDestinationRequest {
     pub model_id: String,
 }
 
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
-pub enum RateLimiterError {
-    #[error("rate limit exceeded: {0}")]
-    Limited(String),
-    #[error("rate limiter unavailable: {0}")]
-    Unavailable(String),
-    #[error("rate limiter rejected request: {0}")]
-    Rejected(String),
-}
+pub use crate::videogen::rate_limiter::RateLimiterError;
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum UploadDestinationError {
@@ -1050,7 +1041,7 @@ impl GenerateDeps for RuntimeGenerateDeps {
         reason: &str,
     ) -> Result<(), RateLimiterError> {
         let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
-        let key = canister_request_key(request_key)?;
+        let key = to_canister_request_key(request_key)?;
         match rate_limits
             .update_video_generation_status(key, VideoGenRequestStatus::Failed(reason.to_string()))
             .await
@@ -1067,7 +1058,7 @@ impl GenerateDeps for RuntimeGenerateDeps {
         property: &str,
     ) -> Result<(), RateLimiterError> {
         let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
-        let key = canister_request_key(request_key)?;
+        let key = to_canister_request_key(request_key)?;
         match rate_limits
             .decrement_video_generation_counter_v_1(key, property.to_string())
             .await
@@ -1423,16 +1414,6 @@ fn image_extension(mime_type: &str) -> &'static str {
         "image/png" => "png",
         _ => "png",
     }
-}
-
-fn canister_request_key(
-    request_key: &RateLimiterRequestKey,
-) -> Result<CanisterVideoGenRequestKey, RateLimiterError> {
-    Ok(CanisterVideoGenRequestKey {
-        principal: Principal::from_text(&request_key.principal)
-            .map_err(|error| RateLimiterError::Rejected(error.to_string()))?,
-        counter: request_key.counter,
-    })
 }
 
 #[cfg(test)]

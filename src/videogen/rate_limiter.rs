@@ -1,3 +1,16 @@
+use candid::Principal;
+use yral_canisters_client::rate_limits::VideoGenRequestKey as CanisterVideoGenRequestKey;
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum RateLimiterError {
+    #[error("rate limit exceeded: {0}")]
+    Limited(String),
+    #[error("rate limiter unavailable: {0}")]
+    Unavailable(String),
+    #[error("rate limiter rejected request: {0}")]
+    Rejected(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 pub struct RateLimiterRequestKey {
     pub principal: String,
@@ -32,9 +45,22 @@ pub fn prepare_create_request_options(
     }
 }
 
+pub fn to_canister_request_key(
+    request_key: &RateLimiterRequestKey,
+) -> Result<CanisterVideoGenRequestKey, RateLimiterError> {
+    Ok(CanisterVideoGenRequestKey {
+        principal: Principal::from_text(&request_key.principal)
+            .map_err(|error| RateLimiterError::Rejected(error.to_string()))?,
+        counter: request_key.counter,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{prepare_create_request_options, RateLimiterRequestKey, RateLimiterTokenType};
+    use super::{
+        prepare_create_request_options, to_canister_request_key, RateLimiterRequestKey,
+        RateLimiterTokenType,
+    };
 
     #[test]
     fn create_options_default_to_free_without_deducting_tokens() {
@@ -49,6 +75,15 @@ mod tests {
         assert_eq!(options.token_type, RateLimiterTokenType::Free);
         assert!(!options.is_paid);
         assert_eq!(options.payment_amount, None);
+    }
+
+    #[test]
+    fn canister_request_key_rejects_invalid_principal() {
+        let key = RateLimiterRequestKey {
+            principal: "not-a-principal".to_string(),
+            counter: 7,
+        };
+        assert!(to_canister_request_key(&key).is_err());
     }
 
     #[test]
