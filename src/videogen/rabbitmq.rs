@@ -5,6 +5,7 @@ use lapin::{
     options::{BasicPublishOptions, ConfirmSelectOptions},
     tcp::OwnedTLSConfig,
 };
+use std::fmt;
 
 pub struct RabbitMqPublishConfig {
     pub amqps_urls: Vec<String>,
@@ -13,6 +14,21 @@ pub struct RabbitMqPublishConfig {
     pub connection_name: String,
     pub publish_timeout_secs: u64,
     pub tls_ca_cert_pem_b64: Option<String>,
+}
+
+impl fmt::Debug for RabbitMqPublishConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RabbitMqPublishConfig")
+            .field(
+                "amqps_urls",
+                &format!("[{} url(s) redacted]", self.amqps_urls.len()),
+            )
+            .field("exchange", &self.exchange)
+            .field("routing_key", &self.routing_key)
+            .field("connection_name", &self.connection_name)
+            .field("publish_timeout_secs", &self.publish_timeout_secs)
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct RabbitMqPublishEnvelope {
@@ -146,7 +162,7 @@ impl RabbitMqPublisher {
                     .with_content_type(content_type.as_str().into())
                     .with_message_id(message_id.as_str().into())
                     .with_correlation_id(correlation_id.as_str().into())
-                    .with_delivery_mode(2),
+                    .with_delivery_mode(if envelope.persistent { 2 } else { 1 }),
             )
             .await
             .map_err(|e| RabbitMqPublishError::Publish(e.to_string()))?;
@@ -155,10 +171,14 @@ impl RabbitMqPublisher {
             .await
             .map_err(|e| RabbitMqPublishError::Publish(e.to_string()))?;
 
-        let _pending = channel
+        let pending = channel
             .wait_for_confirms()
             .await
             .map_err(|e| RabbitMqPublishError::Publish(e.to_string()))?;
+        // Any returned messages (e.g. unroutable with mandatory=true) indicate broker rejection.
+        if !pending.is_empty() {
+            return Err(RabbitMqPublishError::NotConfirmed);
+        }
 
         match confirmation {
             lapin::Confirmation::Ack(None) => {}
