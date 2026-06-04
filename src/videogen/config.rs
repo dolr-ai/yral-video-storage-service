@@ -155,14 +155,26 @@ impl VideogenConfig {
                 &std::env::var(consts::VIDEOGEN_VAST_SUBMIT_TRANSPORT)
                     .unwrap_or_else(|_| "http".to_string()),
             )?,
-            rabbitmq_amqps_urls: std::env::var(consts::VIDEOGEN_RABBITMQ_AMQPS_URLS)
-                .map(|s| {
-                    s.split(',')
-                        .map(|u| u.trim().to_string())
-                        .filter(|u| !u.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default(),
+            rabbitmq_amqps_urls: {
+                let password = std::env::var(consts::VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD)
+                    .unwrap_or_default();
+                if !password.is_empty() {
+                    vec![
+                        format!("amqps://prakash_videogen_publisher:{password}@94.130.13.115:5671/%2Fvideogen"),
+                        format!("amqps://prakash_videogen_publisher:{password}@88.99.151.102:5671/%2Fvideogen"),
+                        format!("amqps://prakash_videogen_publisher:{password}@138.201.129.173:5671/%2Fvideogen"),
+                    ]
+                } else {
+                    std::env::var(consts::VIDEOGEN_RABBITMQ_AMQPS_URLS)
+                        .map(|s| {
+                            s.split(',')
+                                .map(|u| u.trim().to_string())
+                                .filter(|u| !u.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
+            },
             rabbitmq_exchange: std::env::var(consts::VIDEOGEN_RABBITMQ_EXCHANGE)
                 .unwrap_or_else(|_| "videogen.jobs".to_string()),
             rabbitmq_routing_key: std::env::var(consts::VIDEOGEN_RABBITMQ_ROUTING_KEY)

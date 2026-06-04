@@ -244,8 +244,16 @@ jobs:
           STORJ_EU1_GATEWAY_SECRET_KEY: ${{ secrets.STORJ_EU1_GATEWAY_SECRET_KEY }}
           STORJ_MIRROR_ACCESS_GRANT: ${{ secrets.STORJ_MIRROR_ACCESS_GRANT }}
           ENVIRONMENT: staging
+          VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD: ${{ secrets.VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD }}
+          VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64: ${{ secrets.VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64 }}
+          VIDEOGEN_COMPLETION_HMAC_KEYS: ${{ secrets.VIDEOGEN_COMPLETION_HMAC_KEYS }}
+          VIDEOGEN_UPLOAD_SERVICE_URL: ${{ secrets.VIDEOGEN_UPLOAD_SERVICE_URL }}
+          MODERATION_SERVICE_URL: ${{ secrets.MODERATION_SERVICE_URL }}
+          VIDEOGEN_IDENTITY_ENCRYPTION_KEYS: ${{ secrets.VIDEOGEN_IDENTITY_ENCRYPTION_KEYS }}
+          VIDEOGEN_IDENTITY_ACTIVE_KEY_ID: ${{ secrets.VIDEOGEN_IDENTITY_ACTIVE_KEY_ID }}
         run: |
           APP_UUID="${{ steps.coolify_app.outputs.app_uuid }}"
+          PREVIEW_URL="${{ steps.meta.outputs.preview_url }}"
 
           ENV_JSON=$(jq -n \
             --arg database_url "postgres://storj:${{ secrets.PREVIEW_DB_PASSWORD }}@138.201.129.173:5433/video_fingerprint_index" \
@@ -263,6 +271,14 @@ jobs:
             --arg storj_eu1_gateway_secret_key "$STORJ_EU1_GATEWAY_SECRET_KEY" \
             --arg storj_mirror_access_grant "$STORJ_MIRROR_ACCESS_GRANT" \
             --arg environment "$ENVIRONMENT" \
+            --arg prakash_public_base_url "$PREVIEW_URL" \
+            --arg videogen_rabbitmq_publisher_password "$VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD" \
+            --arg videogen_rabbitmq_tls_ca_cert_pem_b64 "$VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64" \
+            --arg videogen_completion_hmac_keys "$VIDEOGEN_COMPLETION_HMAC_KEYS" \
+            --arg videogen_upload_service_url "$VIDEOGEN_UPLOAD_SERVICE_URL" \
+            --arg moderation_service_url "$MODERATION_SERVICE_URL" \
+            --arg videogen_identity_encryption_keys "$VIDEOGEN_IDENTITY_ENCRYPTION_KEYS" \
+            --arg videogen_identity_active_key_id "$VIDEOGEN_IDENTITY_ACTIVE_KEY_ID" \
             '{
               "data": [
                 {"key": "DATABASE_URL", "value": $database_url, "is_literal": true},
@@ -279,7 +295,17 @@ jobs:
                 {"key": "STORJ_EU1_GATEWAY_ACCESS_KEY", "value": $storj_eu1_gateway_access_key, "is_literal": true},
                 {"key": "STORJ_EU1_GATEWAY_SECRET_KEY", "value": $storj_eu1_gateway_secret_key, "is_literal": true},
                 {"key": "STORJ_MIRROR_ACCESS_GRANT", "value": $storj_mirror_access_grant, "is_literal": true},
-                {"key": "ENVIRONMENT", "value": $environment, "is_literal": true}
+                {"key": "ENVIRONMENT", "value": $environment, "is_literal": true},
+                {"key": "PRAKASH_PUBLIC_BASE_URL", "value": $prakash_public_base_url, "is_literal": true},
+                {"key": "VIDEOGEN_VAST_SUBMIT_TRANSPORT", "value": "rabbitmq", "is_literal": true},
+                {"key": "MODERATION_MODE", "value": "remote", "is_literal": true},
+                {"key": "VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD", "value": $videogen_rabbitmq_publisher_password, "is_literal": true},
+                {"key": "VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64", "value": $videogen_rabbitmq_tls_ca_cert_pem_b64, "is_literal": true},
+                {"key": "VIDEOGEN_COMPLETION_HMAC_KEYS", "value": $videogen_completion_hmac_keys, "is_literal": true},
+                {"key": "VIDEOGEN_UPLOAD_SERVICE_URL", "value": $videogen_upload_service_url, "is_literal": true},
+                {"key": "MODERATION_SERVICE_URL", "value": $moderation_service_url, "is_literal": true},
+                {"key": "VIDEOGEN_IDENTITY_ENCRYPTION_KEYS", "value": $videogen_identity_encryption_keys, "is_literal": true},
+                {"key": "VIDEOGEN_IDENTITY_ACTIVE_KEY_ID", "value": $videogen_identity_active_key_id, "is_literal": true}
               ]
             }')
 
