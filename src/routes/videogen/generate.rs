@@ -880,11 +880,7 @@ impl GenerateDeps for RuntimeGenerateDeps {
     ) -> Result<UploadDestination, UploadDestinationError> {
         let base_url = std::env::var(UPLOAD_SERVICE_URL_ENV)
             .or_else(|_| std::env::var(LEGACY_UPLOAD_SERVICE_URL_ENV))
-            .map_err(|_| {
-                UploadDestinationError::Unavailable(format!(
-                    "{UPLOAD_SERVICE_URL_ENV} or {LEGACY_UPLOAD_SERVICE_URL_ENV} is required"
-                ))
-            })?;
+            .unwrap_or_else(|_| crate::consts::VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL.to_string());
         let url = format!("{}/get-upload-url", base_url.trim_end_matches('/'));
         let body = serde_json::to_vec(&json!({
             "publisher_user_id": request.user_principal,
