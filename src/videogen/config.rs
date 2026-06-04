@@ -49,21 +49,10 @@ pub struct VideogenConfig {
     pub generate_dedupe_window_secs: u64,
     pub vast_submit_timeout_secs: u64,
     pub upload_destination_timeout_secs: u64,
-    pub upload_url_pre_submit_margin_secs: u64,
     pub vast_image_stage_timeout_secs: u64,
-    pub context_created_timeout_secs: u64,
     pub ltx_generation_timeout_secs: u64,
-    pub completion_retry_grace_secs: u64,
-    pub vast_upload_retry_window_secs: u64,
     pub vast_upload_expiry_refresh_margin_secs: u64,
-    pub upload_url_safety_buffer_secs: u64,
     pub upload_url_ttl_secs: u64,
-    pub reconciliation_interval_secs: u64,
-    pub reconciliation_batch_size: u32,
-    pub draft_create_max_attempts: u32,
-    pub draft_create_timeout_secs: u64,
-    pub draft_created_complete_timeout_secs: u64,
-    pub draft_retry_retention_hours: u64,
     pub completion_hmac_skew_secs: u64,
     pub vast_submit_transport: VastSubmitTransport,
     pub rabbitmq_amqps_urls: Vec<String>,
@@ -102,54 +91,19 @@ impl VideogenConfig {
                 consts::VIDEOGEN_UPLOAD_DESTINATION_TIMEOUT_SECS,
                 10,
             )?,
-            upload_url_pre_submit_margin_secs: read_u64(
-                consts::VIDEOGEN_UPLOAD_URL_PRE_SUBMIT_MARGIN_SECS,
-                10,
-            )?,
             vast_image_stage_timeout_secs: read_u64(
                 consts::VIDEOGEN_VAST_IMAGE_STAGE_TIMEOUT_SECS,
                 30,
-            )?,
-            context_created_timeout_secs: read_u64(
-                consts::VIDEOGEN_CONTEXT_CREATED_TIMEOUT_SECS,
-                120,
             )?,
             ltx_generation_timeout_secs: read_u64(
                 consts::VIDEOGEN_LTX_GENERATION_TIMEOUT_SECS,
                 1800,
             )?,
-            completion_retry_grace_secs: read_u64(
-                consts::VIDEOGEN_COMPLETION_RETRY_GRACE_SECS,
-                900,
-            )?,
-            vast_upload_retry_window_secs: read_u64(
-                consts::VIDEOGEN_VAST_UPLOAD_RETRY_WINDOW_SECS,
-                900,
-            )?,
             vast_upload_expiry_refresh_margin_secs: read_u64(
                 consts::VIDEOGEN_VAST_UPLOAD_EXPIRY_REFRESH_MARGIN_SECS,
                 300,
             )?,
-            upload_url_safety_buffer_secs: read_u64(
-                consts::VIDEOGEN_UPLOAD_URL_SAFETY_BUFFER_SECS,
-                300,
-            )?,
             upload_url_ttl_secs: read_u64(consts::VIDEOGEN_UPLOAD_URL_TTL_SECS, 4200)?,
-            reconciliation_interval_secs: read_u64(
-                consts::VIDEOGEN_RECONCILIATION_INTERVAL_SECS,
-                60,
-            )?,
-            reconciliation_batch_size: read_u32(consts::VIDEOGEN_RECONCILIATION_BATCH_SIZE, 100)?,
-            draft_create_max_attempts: read_u32(consts::VIDEOGEN_DRAFT_CREATE_MAX_ATTEMPTS, 3)?,
-            draft_create_timeout_secs: read_u64(consts::VIDEOGEN_DRAFT_CREATE_TIMEOUT_SECS, 600)?,
-            draft_created_complete_timeout_secs: read_u64(
-                consts::VIDEOGEN_DRAFT_CREATED_COMPLETE_TIMEOUT_SECS,
-                120,
-            )?,
-            draft_retry_retention_hours: read_u64(
-                consts::VIDEOGEN_DRAFT_RETRY_RETENTION_HOURS,
-                72,
-            )?,
             completion_hmac_skew_secs: read_u64(consts::VIDEOGEN_COMPLETION_HMAC_SKEW_SECS, 120)?,
             vast_submit_transport: VastSubmitTransport::parse(
                 &std::env::var(consts::VIDEOGEN_VAST_SUBMIT_TRANSPORT)
@@ -207,21 +161,10 @@ impl VideogenConfig {
             generate_dedupe_window_secs: 120,
             vast_submit_timeout_secs: 10,
             upload_destination_timeout_secs: 10,
-            upload_url_pre_submit_margin_secs: 10,
             vast_image_stage_timeout_secs: 30,
-            context_created_timeout_secs: 120,
             ltx_generation_timeout_secs: 1800,
-            completion_retry_grace_secs: 900,
-            vast_upload_retry_window_secs: 900,
             vast_upload_expiry_refresh_margin_secs: 300,
-            upload_url_safety_buffer_secs: 300,
             upload_url_ttl_secs: 4200,
-            reconciliation_interval_secs: 60,
-            reconciliation_batch_size: 100,
-            draft_create_max_attempts: 3,
-            draft_create_timeout_secs: 600,
-            draft_created_complete_timeout_secs: 120,
-            draft_retry_retention_hours: 72,
             completion_hmac_skew_secs: 120,
             vast_submit_transport: VastSubmitTransport::Http,
             rabbitmq_amqps_urls: vec![],
@@ -301,16 +244,8 @@ mod tests {
     }
 
     #[test]
-    fn upload_url_ttl_default_exceeds_required_window() {
+    fn upload_url_ttl_default_has_expected_value() {
         let cfg = VideogenConfig::test_defaults();
-        assert!(
-            cfg.upload_url_ttl_secs
-                >= cfg.upload_url_pre_submit_margin_secs
-                    + cfg.ltx_generation_timeout_secs
-                    + cfg.completion_retry_grace_secs
-                    + cfg.vast_upload_retry_window_secs
-                    + cfg.upload_url_safety_buffer_secs
-        );
         assert_eq!(cfg.upload_url_ttl_secs, 4200);
     }
 
