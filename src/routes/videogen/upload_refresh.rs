@@ -223,7 +223,7 @@ fn verify_hmac<D: UploadRefreshDeps>(
         "POST",
         REFRESH_PATH,
         timestamp,
-        &body_hash,
+        body_hash,
         sig_hex,
         now,
         deps.hmac_skew_secs(),

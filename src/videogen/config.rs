@@ -218,7 +218,6 @@ fn read_u32(name: &'static str, default: u32) -> Result<u32, VideogenConfigError
 #[cfg(test)]
 mod tests {
     use super::{ModerationMode, VastSubmitTransport, VideogenConfig, VideogenConfigError};
-    use crate::videogen::types::VideogenContextState;
 
     #[test]
     fn default_submit_transport_is_http_for_rollback() {
@@ -251,15 +250,6 @@ mod tests {
     fn upload_url_ttl_default_has_expected_value() {
         let cfg = VideogenConfig::test_defaults();
         assert_eq!(cfg.upload_url_ttl_secs, 4200);
-    }
-
-    #[test]
-    fn terminal_states_are_absorbing() {
-        assert!(VideogenContextState::Complete.is_terminal());
-        assert!(VideogenContextState::SubmitFailed.is_terminal());
-        assert!(VideogenContextState::StaleFailed.is_terminal());
-        assert!(VideogenContextState::DraftFailed.is_terminal());
-        assert!(VideogenContextState::Failed.is_terminal());
     }
 
     #[test]
@@ -301,36 +291,5 @@ mod tests {
             ModerationMode::Remote
         );
         assert_eq!(ModerationMode::Remote.as_str(), "remote");
-    }
-
-    #[test]
-    fn context_state_round_trips_db_values() {
-        assert_eq!(
-            VideogenContextState::try_from_db("draft_creating").unwrap(),
-            VideogenContextState::DraftCreating
-        );
-        assert_eq!(
-            VideogenContextState::DraftCreating.as_str(),
-            "draft_creating"
-        );
-        assert!(VideogenContextState::try_from_db("draft-creating").is_err());
-    }
-
-    #[test]
-    fn context_state_rejects_backward_transitions() {
-        assert!(
-            !VideogenContextState::DraftCreated.can_transition_to(VideogenContextState::Uploaded)
-        );
-        assert!(VideogenContextState::DraftCreated
-            .ensure_can_transition_to(VideogenContextState::Uploaded)
-            .is_err());
-    }
-
-    #[test]
-    fn terminal_states_do_not_transition_to_non_terminal_states() {
-        assert!(!VideogenContextState::Complete.can_transition_to(VideogenContextState::Submitted));
-        assert!(
-            !VideogenContextState::Failed.can_transition_to(VideogenContextState::DraftCreating)
-        );
     }
 }

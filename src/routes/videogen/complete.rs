@@ -4,7 +4,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use candid::Principal;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -344,7 +343,7 @@ fn verify_hmac<D: CompletionDeps>(
         "POST",
         path,
         timestamp,
-        &body_hash,
+        body_hash,
         sig_hex,
         now,
         deps.hmac_skew_secs(),

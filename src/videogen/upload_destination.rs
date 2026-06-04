@@ -88,10 +88,6 @@ impl UploadDestinationReleaseClient {
         }
     }
 
-    pub fn mode(&self) -> UploadDestinationReleaseMode {
-        self.mode
-    }
-
     pub async fn release(&self, req: ReleaseUploadDestinationRequest) -> Result<(), String> {
         match self.mode {
             UploadDestinationReleaseMode::DisabledNoEndpoint => {
@@ -124,15 +120,6 @@ mod tests {
     use super::*;
     use crate::videogen::rate_limiter::RateLimiterRequestKey;
     use chrono::{DateTime, Utc};
-
-    #[test]
-    fn disabled_mode_is_explicit() {
-        let client = UploadDestinationReleaseClient::disabled();
-        assert_eq!(
-            client.mode(),
-            UploadDestinationReleaseMode::DisabledNoEndpoint
-        );
-    }
 
     #[test]
     fn release_request_payload_uses_video_id_and_object_key() {

@@ -53,33 +53,6 @@ pub enum VastSubmitError {
     RequestFailed(String),
 }
 
-#[async_trait::async_trait]
-pub trait VastClient: Send + Sync {
-    async fn submit(
-        &self,
-        request: VastSubmitRequest,
-    ) -> Result<VastSubmitAccepted, VastSubmitError>;
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MockAcceptedVastClient;
-
-#[async_trait::async_trait]
-impl VastClient for MockAcceptedVastClient {
-    async fn submit(
-        &self,
-        request: VastSubmitRequest,
-    ) -> Result<VastSubmitAccepted, VastSubmitError> {
-        Ok(VastSubmitAccepted {
-            request_id: request.request_id,
-            status: "submitted".to_string(),
-            accepted_at: DateTime::parse_from_rfc3339("2026-05-27T11:00:00Z")
-                .expect("static Vast accepted timestamp is valid")
-                .with_timezone(&Utc),
-        })
-    }
-}
-
 #[derive(Clone)]
 pub struct VastHttpClient {
     endpoint: String,
@@ -121,9 +94,7 @@ impl VastHttpClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MockAcceptedVastClient, VastClient, VastHttpClient, VastSubmitAccepted, VastSubmitRequest,
-    };
+    use super::{VastHttpClient, VastSubmitRequest};
     use crate::videogen::rate_limiter::RateLimiterRequestKey;
     use crate::videogen::upload_destination::UploadDestination;
     use chrono::{DateTime, Utc};
@@ -155,24 +126,6 @@ mod tests {
                 expires_at: "2026-05-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
             },
         }
-    }
-
-    #[tokio::test]
-    async fn accepted_response_echoes_exact_request_id() {
-        let request = request();
-        let expected_request_id = request.request_id.clone();
-        let client = MockAcceptedVastClient;
-
-        let accepted = client.submit(request).await.unwrap();
-
-        assert_eq!(
-            accepted,
-            VastSubmitAccepted {
-                request_id: expected_request_id,
-                status: "submitted".to_string(),
-                accepted_at: "2026-05-27T11:00:00Z".parse::<DateTime<Utc>>().unwrap(),
-            }
-        );
     }
 
     #[test]
