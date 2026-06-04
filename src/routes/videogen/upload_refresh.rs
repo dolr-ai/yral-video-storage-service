@@ -32,7 +32,7 @@ pub struct UploadRefreshRequest {
     pub object_key: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct RefreshRequestKey {
     pub principal: String,
     pub counter: u64,
