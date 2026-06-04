@@ -518,7 +518,7 @@ impl CompletionDeps for RuntimeCompletionDeps {
     }
 
     async fn create_draft(&self, request: DraftCreationRequest) -> Result<(), DraftServiceError> {
-        use crate::videogen::draft::LoggingDraftServiceClient;
+        use crate::videogen::draft::{DraftServiceClient, LoggingDraftServiceClient};
         LoggingDraftServiceClient.create_draft(request).await
     }
 }
