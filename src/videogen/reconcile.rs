@@ -209,7 +209,6 @@ async fn handle_stale_failed_row<D: ReconcileDeps>(deps: &D, row: &StaleRow, fro
     // Step 5 — atomically terminalize the Postgres row.
     match deps.mark_stale_failed(key, &[from_state]).await {
         Ok(true) => {
-            metrics::counter!(crate::videogen::metrics::RECONCILIATION_ACTIONS_TOTAL).increment(1);
             tracing::info!(
                 principal = %key.principal,
                 counter = key.counter,
@@ -291,7 +290,6 @@ async fn reconcile_uploaded<D: ReconcileDeps>(deps: &D, config: &ReconcileConfig
                 .record_reconciliation_error(key, &error.to_string())
                 .await;
         } else {
-            metrics::counter!(crate::videogen::metrics::RECONCILIATION_ACTIONS_TOTAL).increment(1);
             tracing::info!(
                 principal = %key.principal,
                 counter = key.counter,
@@ -337,9 +335,6 @@ async fn reconcile_draft_creating<D: ReconcileDeps>(deps: &D, config: &Reconcile
                     error = %error,
                     "reconcile: mark_draft_failed failed"
                 );
-            } else {
-                metrics::counter!(crate::videogen::metrics::RECONCILIATION_ACTIONS_TOTAL)
-                    .increment(1);
             }
         } else {
             // Retry draft creation.
@@ -351,9 +346,6 @@ async fn reconcile_draft_creating<D: ReconcileDeps>(deps: &D, config: &Reconcile
                     "reconcile: create_draft_for_upload failed"
                 );
                 let _ = deps.record_reconciliation_error(key, &error).await;
-            } else {
-                metrics::counter!(crate::videogen::metrics::RECONCILIATION_ACTIONS_TOTAL)
-                    .increment(1);
             }
             if let Err(error) = deps.increment_draft_attempts(key).await {
                 tracing::warn!(
@@ -413,7 +405,6 @@ async fn reconcile_draft_created<D: ReconcileDeps>(deps: &D, config: &ReconcileC
                 "reconcile: mark_complete_with_bucket_url failed"
             );
         } else {
-            metrics::counter!(crate::videogen::metrics::RECONCILIATION_ACTIONS_TOTAL).increment(1);
             tracing::info!(
                 principal = %key.principal,
                 counter = key.counter,
@@ -430,11 +421,7 @@ async fn reconcile_draft_created<D: ReconcileDeps>(deps: &D, config: &ReconcileC
 pub async fn run_reconciliation_cycle<D: ReconcileDeps>(deps: &D, config: &ReconcileConfig) {
     if let Ok(counts) = deps.count_contexts_by_state().await {
         for (state, count) in counts {
-            metrics::gauge!(
-                crate::videogen::metrics::CONTEXTS_BY_STATE,
-                "state" => state
-            )
-            .set(count as f64);
+            tracing::debug!(state = %state, count = count, "videogen contexts by state");
         }
     }
     reconcile_context_created(deps, config).await;

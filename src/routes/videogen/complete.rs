@@ -174,13 +174,8 @@ pub async fn complete_with_dependencies<D: CompletionDeps>(
     raw_body: &[u8],
     path: &str,
 ) -> Result<StatusCode, (StatusCode, Json<CompletionError>)> {
-    metrics::counter!(crate::videogen::metrics::COMPLETION_CALLBACKS_TOTAL).increment(1);
-
     // Step 1: verify HMAC before any JSON parse or state mutation
-    verify_hmac(deps, headers, raw_body, path).map_err(|e| {
-        metrics::counter!(crate::videogen::metrics::COMPLETION_HMAC_FAILURES_TOTAL).increment(1);
-        e
-    })?;
+    verify_hmac(deps, headers, raw_body, path)?;
 
     // Step 2: parse body
     let req: CompleteVideoRequest = serde_json::from_slice(raw_body).map_err(|e| {

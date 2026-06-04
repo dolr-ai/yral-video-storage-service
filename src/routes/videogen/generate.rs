@@ -543,27 +543,11 @@ pub async fn generate_with_dependencies<D: GenerateDeps>(
         .map_err(GenerateHttpError::from)
 }
 
-struct DurationGuard {
-    start: std::time::Instant,
-}
-
-impl Drop for DurationGuard {
-    fn drop(&mut self) {
-        metrics::histogram!(crate::videogen::metrics::GENERATE_DURATION_MS)
-            .record(self.start.elapsed().as_millis() as f64);
-    }
-}
-
 async fn generate_inner<D: GenerateDeps>(
     request: GenerateRequest,
     deps: &D,
     config: GenerateConfig,
 ) -> Result<GenerateResponse, GenerateError> {
-    let _duration_guard = DurationGuard {
-        start: std::time::Instant::now(),
-    };
-    metrics::counter!(crate::videogen::metrics::GENERATE_REQUESTS_TOTAL).increment(1);
-
     let claimed_principal = Principal::from_str(&request.user_id)
         .map_err(|error| GenerateError::InvalidInput(format!("Invalid user_id: {error}")))?;
     if request.identity_principal != claimed_principal.to_string() {
@@ -599,7 +583,6 @@ async fn generate_inner<D: GenerateDeps>(
         .image
         .as_ref()
         .and_then(image_reference_for_moderation);
-    metrics::counter!(crate::videogen::metrics::MODERATION_REQUESTS_TOTAL).increment(1);
     let moderation_decision = deps
         .moderate(ModerationInput {
             request_id: fingerprint.request_fingerprint.clone(),
@@ -723,7 +706,6 @@ async fn generate_inner<D: GenerateDeps>(
         upload_destination: upload_destination.clone(),
     };
 
-    metrics::counter!(crate::videogen::metrics::VAST_SUBMIT_TOTAL).increment(1);
     let accepted = match deps.submit_vast(vast_request).await {
         Ok(accepted)
             if accepted.request_id == request_id && is_accepted_status(&accepted.status) =>
@@ -1307,11 +1289,6 @@ impl GenerateDeps for RuntimeGenerateDeps {
         &self,
         request: VastSubmitRequest,
     ) -> Result<VastSubmitAccepted, VastSubmitError> {
-        metrics::counter!(
-            crate::videogen::metrics::SUBMIT_TRANSPORT_TOTAL,
-            "transport" => "http"
-        )
-        .increment(1);
         let endpoint = std::env::var(VAST_GENERATE_URL_ENV).map_err(|_| {
             VastSubmitError::RequestFailed(format!("{VAST_GENERATE_URL_ENV} is required"))
         })?;
@@ -1354,11 +1331,6 @@ impl GenerateDeps for RuntimeGenerateDeps {
         request: VastSubmitRequest,
     ) -> Result<VastSubmitAccepted, VastSubmitError> {
         use crate::videogen::rabbitmq::{RabbitMqPublishConfig, RabbitMqPublisher};
-        metrics::counter!(
-            crate::videogen::metrics::SUBMIT_TRANSPORT_TOTAL,
-            "transport" => "rabbitmq"
-        )
-        .increment(1);
         let config = RabbitMqPublishConfig {
             amqps_urls: self.config.rabbitmq_amqps_urls.clone(),
             exchange: self.config.rabbitmq_exchange.clone(),

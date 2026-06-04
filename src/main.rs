@@ -1,10 +1,9 @@
 use anyhow::Context;
 use axum::{
-    body::Body,
     extract::{DefaultBodyLimit, Request},
     http::{HeaderMap, Method},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::{get, post},
     Router,
 };
@@ -208,12 +207,6 @@ async fn run_server() -> anyhow::Result<()> {
     let _ = &*consts::MIRROR_ACCESS_GRANT;
     let videogen_config =
         videogen::config::VideogenConfig::from_env().context("Failed to load videogen config")?;
-
-    // Install Prometheus metrics recorder and register metric descriptions
-    let metrics_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
-        .install_recorder()
-        .expect("failed to install Prometheus metrics recorder");
-    videogen::metrics::init_metrics();
 
     // Initialize S3 client
     let s3_client = s3_client::S3Client::new().await;
@@ -433,18 +426,6 @@ async fn run_server() -> anyhow::Result<()> {
         .route(
             "/api/v2/videogen/providers-all",
             get(routes::videogen::get_providers_all),
-        )
-        .route(
-            "/metrics",
-            get({
-                let handle = metrics_handle.clone();
-                move || async move {
-                    Response::builder()
-                        .header("content-type", "text/plain; version=0.0.4")
-                        .body(Body::from(handle.render()))
-                        .unwrap()
-                }
-            }),
         )
         .route("/health", get(health))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
