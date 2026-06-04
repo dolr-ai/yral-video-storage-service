@@ -53,6 +53,7 @@ pub struct UploadRefreshResponse {
     pub object_key: String,
     pub upload_url: String,
     #[serde(serialize_with = "serialize_datetime_utc")]
+    #[schema(value_type = String, format = DateTime)]
     pub expires_at: DateTime<Utc>,
 }
 

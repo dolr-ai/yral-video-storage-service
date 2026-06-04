@@ -1041,7 +1041,9 @@ impl GenerateDeps for RuntimeGenerateDeps {
             VastSubmitTransport::RabbitMq => self.submit_vast_rabbitmq(request).await,
         }
     }
+}
 
+impl RuntimeGenerateDeps {
     async fn submit_vast_http(
         &self,
         request: VastSubmitRequest,
