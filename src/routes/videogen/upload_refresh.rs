@@ -9,10 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    consts, db,
+    consts,
     videogen::{
         config::VideogenConfig,
-        context::{ContextStoreError, PostgresVideogenContextStore},
         hmac::{body_sha256_hex, verify_completion_signature, HmacError, HmacKeyRegistry},
         rate_limiter::RateLimiterRequestKey,
         upload_destination::{serialize_datetime_utc, UploadDestination},
@@ -91,11 +90,6 @@ pub trait UploadRefreshDeps: Send + Sync {
     fn hmac_registry(&self) -> Result<HmacKeyRegistry, String>;
     fn hmac_skew_secs(&self) -> i64;
 
-    async fn get_context_state(
-        &self,
-        request_key: &RateLimiterRequestKey,
-    ) -> Result<Option<crate::videogen::context::ContextStateRow>, ContextStoreError>;
-
     async fn generate_fresh_upload_url(
         &self,
         request_key: &RateLimiterRequestKey,
@@ -137,78 +131,7 @@ pub async fn refresh_with_dependencies<D: UploadRefreshDeps>(
         ));
     }
 
-    // Step 4: look up context and validate
-    let state_row = deps.get_context_state(&request_key).await.map_err(|e| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(RefreshError::internal(e.to_string())),
-        )
-    })?;
-
-    let Some(row) = state_row else {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(RefreshError::conflict("context not found")),
-        ));
-    };
-
-    // Validate request_id
-    if let Some(stored_id) = &row.request_id {
-        if stored_id != &req.request_id {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(RefreshError::conflict(
-                    "request_id does not match stored context",
-                )),
-            ));
-        }
-    } else {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(RefreshError::conflict("no request_id in stored context")),
-        ));
-    }
-
-    // Validate object_key
-    if let Some(stored_key) = &row.object_key {
-        if stored_key != &req.object_key {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(RefreshError::conflict(
-                    "object_key does not match stored context",
-                )),
-            ));
-        }
-    } else {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(RefreshError::conflict("no object_key in stored context")),
-        ));
-    }
-
-    // Only allow refresh while the upload is still in progress
-    match row.state.as_str() {
-        "submitted" | "context_created" => {} // refresh allowed
-        "uploaded" | "draft_creating" | "draft_created" | "complete" => {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(RefreshError::conflict(
-                    "upload is already complete; refresh not allowed",
-                )),
-            ));
-        }
-        _ => {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(RefreshError::conflict(format!(
-                    "context state {} does not allow refresh",
-                    row.state
-                ))),
-            ));
-        }
-    }
-
-    // Step 5: generate fresh URL
+    // Step 4: generate fresh URL
     let destination = deps
         .generate_fresh_upload_url(&request_key, &req.video_id, &req.object_key)
         .await
@@ -360,25 +283,16 @@ pub async fn refresh_upload_url(
 // ─── Runtime implementation ───────────────────────────────────────────────────
 
 struct RuntimeUploadRefreshDeps {
-    db_url: String,
     config: VideogenConfig,
     http: reqwest::Client,
 }
 
 impl RuntimeUploadRefreshDeps {
-    fn new(state: AppState, config: VideogenConfig) -> Self {
+    fn new(_state: AppState, config: VideogenConfig) -> Self {
         Self {
-            db_url: state.db_url,
             config,
             http: reqwest::Client::new(),
         }
-    }
-
-    async fn context_store(&self) -> Result<PostgresVideogenContextStore, ContextStoreError> {
-        let client = db::connect(&self.db_url)
-            .await
-            .map_err(|e| ContextStoreError::Unavailable(e.to_string()))?;
-        Ok(PostgresVideogenContextStore::new(client))
     }
 }
 
@@ -392,16 +306,6 @@ impl UploadRefreshDeps for RuntimeUploadRefreshDeps {
 
     fn hmac_skew_secs(&self) -> i64 {
         self.config.completion_hmac_skew_secs as i64
-    }
-
-    async fn get_context_state(
-        &self,
-        request_key: &RateLimiterRequestKey,
-    ) -> Result<Option<crate::videogen::context::ContextStateRow>, ContextStoreError> {
-        self.context_store()
-            .await?
-            .get_context_state(request_key)
-            .await
     }
 
     async fn generate_fresh_upload_url(
@@ -482,7 +386,6 @@ impl UploadRefreshDeps for RuntimeUploadRefreshDeps {
 mod tests {
     use super::*;
     use crate::videogen::{
-        context::ContextStateRow,
         hmac::{sign_completion, HmacKeyRegistry},
         rate_limiter::RateLimiterRequestKey,
     };
@@ -538,14 +441,12 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Call {
-        GetContextState,
         GenerateFreshUrl,
     }
 
     #[derive(Clone)]
     struct FakeRefreshDeps {
         calls: Arc<Mutex<Vec<Call>>>,
-        state_result: Option<Option<ContextStateRow>>,
         hmac_keys: Option<String>,
         fresh_url_error: Option<String>,
     }
@@ -554,21 +455,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 calls: Arc::new(Mutex::new(vec![])),
-                state_result: None,
                 hmac_keys: Some(TEST_KEY_SPEC.to_string()),
                 fresh_url_error: None,
-            }
-        }
-
-        fn with_submitted() -> Self {
-            Self {
-                state_result: Some(Some(ContextStateRow {
-                    state: "submitted".to_string(),
-                    request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
-                    principal: "aaaaa-aa".to_string(),
-                    object_key: Some("generated/video-17.mp4".to_string()),
-                })),
-                ..Self::new()
             }
         }
 
@@ -592,19 +480,6 @@ mod tests {
 
         fn hmac_skew_secs(&self) -> i64 {
             120
-        }
-
-        async fn get_context_state(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-        ) -> Result<Option<ContextStateRow>, ContextStoreError> {
-            self.push(Call::GetContextState);
-            Ok(self.state_result.clone().unwrap_or(Some(ContextStateRow {
-                state: "submitted".to_string(),
-                request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
-                principal: "aaaaa-aa".to_string(),
-                object_key: Some("generated/video-17.mp4".to_string()),
-            })))
         }
 
         async fn generate_fresh_upload_url(
@@ -675,7 +550,7 @@ mod tests {
 
     #[tokio::test]
     async fn valid_refresh_returns_fresh_url() {
-        let deps = FakeRefreshDeps::with_submitted();
+        let deps = FakeRefreshDeps::new();
         let body = refresh_body();
         let ts = now_ts();
         let headers = signed_headers(&body, ts);
@@ -686,66 +561,6 @@ mod tests {
         assert_eq!(resp.video_id, "video-17");
         assert_eq!(resp.object_key, "generated/video-17.mp4");
         assert_eq!(resp.upload_url, "https://upload.example.test/fresh-url");
-        assert_eq!(
-            deps.calls(),
-            vec![Call::GetContextState, Call::GenerateFreshUrl]
-        );
-    }
-
-    #[tokio::test]
-    async fn unknown_request_id_returns_409() {
-        let deps = FakeRefreshDeps {
-            state_result: Some(Some(ContextStateRow {
-                state: "submitted".to_string(),
-                request_id: Some("99999999-9999-9999-9999-999999999999".to_string()), // mismatch
-                principal: "aaaaa-aa".to_string(),
-                object_key: Some("generated/video-17.mp4".to_string()),
-            })),
-            ..FakeRefreshDeps::new()
-        };
-        let body = refresh_body();
-        let ts = now_ts();
-        let headers = signed_headers(&body, ts);
-
-        let result = refresh_with_dependencies(&deps, &headers, &body).await;
-
-        assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
-        assert!(!deps.calls().contains(&Call::GenerateFreshUrl));
-    }
-
-    #[tokio::test]
-    async fn context_not_found_returns_409() {
-        let deps = FakeRefreshDeps {
-            state_result: Some(None),
-            ..FakeRefreshDeps::new()
-        };
-        let body = refresh_body();
-        let ts = now_ts();
-        let headers = signed_headers(&body, ts);
-
-        let result = refresh_with_dependencies(&deps, &headers, &body).await;
-
-        assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
-    }
-
-    #[tokio::test]
-    async fn already_complete_returns_409() {
-        let deps = FakeRefreshDeps {
-            state_result: Some(Some(ContextStateRow {
-                state: "complete".to_string(),
-                request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
-                principal: "aaaaa-aa".to_string(),
-                object_key: Some("generated/video-17.mp4".to_string()),
-            })),
-            ..FakeRefreshDeps::new()
-        };
-        let body = refresh_body();
-        let ts = now_ts();
-        let headers = signed_headers(&body, ts);
-
-        let result = refresh_with_dependencies(&deps, &headers, &body).await;
-
-        assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
-        assert!(!deps.calls().contains(&Call::GenerateFreshUrl));
+        assert_eq!(deps.calls(), vec![Call::GenerateFreshUrl]);
     }
 }

@@ -18,14 +18,9 @@ use yral_types::delegated_identity::DelegatedIdentityWire;
 
 use crate::{
     consts::RATE_LIMITS_CANISTER_ID,
-    db,
     videogen::{
         config::{ModerationMode, VideogenConfig},
-        context::{ContextStoreError, PendingVideogenContext, PostgresVideogenContextStore},
         fingerprint::{compute_request_fingerprint, ImageIdentityInput, RequestFingerprintInput},
-        identity_crypto::{
-            encrypt_delegated_identity, EncryptedDelegatedIdentity, IdentityEncryptionKeyRegistry,
-        },
         moderation::{ModerationDecision, ModerationError, ModerationInput},
         rate_limiter::{
             prepare_create_request_options, to_canister_request_key, RateLimiterCreateOptions,
@@ -39,8 +34,6 @@ use crate::{
 
 const VIDEOGEN_PROPERTY: &str = "VIDEOGEN";
 const LTX_PROVIDER: &str = "Ltx2";
-const IDENTITY_KEYS_ENV: &str = "VIDEOGEN_IDENTITY_ENCRYPTION_KEYS";
-const IDENTITY_ACTIVE_KEY_ENV: &str = "VIDEOGEN_IDENTITY_ACTIVE_KEY_ID";
 const PUBLIC_BASE_URL_ENV: &str = "PRAKASH_PUBLIC_BASE_URL";
 const UPLOAD_URL_REFRESH_ENABLED_ENV: &str = "VIDEOGEN_UPLOAD_URL_REFRESH_ENABLED";
 const MODERATION_SERVICE_URL_ENV: &str = crate::consts::MODERATION_SERVICE_URL;
@@ -195,7 +188,6 @@ pub struct GenerateHttpError {
 pub struct GenerateRequest {
     pub user_id: String,
     pub identity_principal: String,
-    pub delegated_identity_bytes: Vec<u8>,
     pub upload_handling: VideoUploadHandling,
     pub prompt: String,
     pub model_id: String,
@@ -215,7 +207,6 @@ impl fmt::Debug for GenerateRequest {
         f.debug_struct("GenerateRequest")
             .field("user_id", &self.user_id)
             .field("identity_principal", &self.identity_principal)
-            .field("delegated_identity_bytes", &"<redacted>")
             .field("upload_handling", &self.upload_handling)
             .field("prompt", &"<redacted>")
             .field("model_id", &self.model_id)
@@ -236,7 +227,6 @@ impl fmt::Debug for GenerateRequest {
 
 #[derive(Debug, Clone)]
 pub struct GenerateConfig {
-    pub dedupe_window_secs: u64,
     pub vast_image_stage_timeout_secs: u64,
     pub ltx_generation_timeout_secs: u64,
     pub callback_url: String,
@@ -276,11 +266,6 @@ pub enum WorkflowError {
 
 #[async_trait::async_trait]
 pub trait GenerateDeps: Send + Sync {
-    async fn find_dedupe(
-        &self,
-        principal: &str,
-        fingerprint: &str,
-    ) -> Result<Option<GenerateResponse>, GenerateError>;
     async fn moderate(&self, input: ModerationInput)
         -> Result<ModerationDecision, ModerationError>;
     async fn create_rate_limit(
@@ -298,41 +283,10 @@ pub trait GenerateDeps: Send + Sync {
         request_key: &RateLimiterRequestKey,
         property: &str,
     ) -> Result<(), RateLimiterError>;
-    async fn create_context(
-        &self,
-        context: PendingVideogenContext,
-    ) -> Result<(), ContextStoreError>;
-    async fn store_request_id(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        request_id: &str,
-    ) -> Result<(), ContextStoreError>;
-    async fn mark_context_submitted(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        request_id: &str,
-        accepted_at: DateTime<Utc>,
-    ) -> Result<(), ContextStoreError>;
-    async fn mark_submit_failed(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        reason: &str,
-    ) -> Result<(), ContextStoreError>;
-    async fn redact_identity(
-        &self,
-        request_key: &RateLimiterRequestKey,
-    ) -> Result<(), ContextStoreError>;
     async fn reserve_upload_destination(
         &self,
         request: UploadDestinationRequest,
     ) -> Result<UploadDestination, UploadDestinationError>;
-    async fn save_upload_destination(
-        &self,
-        _request_key: &RateLimiterRequestKey,
-        _destination: &UploadDestination,
-    ) -> Result<(), ContextStoreError> {
-        Ok(())
-    }
     async fn release_upload_destination(
         &self,
         request_key: &RateLimiterRequestKey,
@@ -364,8 +318,6 @@ pub enum GenerateError {
     Moderation(#[from] ModerationError),
     #[error("rate limiter failed: {0}")]
     RateLimiter(#[from] RateLimiterError),
-    #[error("context store failed: {0}")]
-    Context(#[from] ContextStoreError),
     #[error("upload destination failed: {0}")]
     UploadDestination(#[from] UploadDestinationError),
     #[error("image staging failed: {0}")]
@@ -374,8 +326,6 @@ pub enum GenerateError {
     Workflow(#[from] WorkflowError),
     #[error("vast submit failed: {0}")]
     Vast(#[from] VastSubmitError),
-    #[error("identity encryption failed: {0}")]
-    IdentityEncryption(String),
 }
 
 impl From<GenerateError> for GenerateHttpError {
@@ -409,10 +359,6 @@ impl From<GenerateError> for GenerateHttpError {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 error: VideoGenError::NetworkError(error.to_string()),
             },
-            GenerateError::Context(error) => Self {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                error: VideoGenError::NetworkError(error.to_string()),
-            },
             GenerateError::UploadDestination(error) => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 error: VideoGenError::NetworkError(error.to_string()),
@@ -422,10 +368,6 @@ impl From<GenerateError> for GenerateHttpError {
                 error: VideoGenError::UnsupportedModel(model),
             },
             GenerateError::Workflow(WorkflowError::Unavailable(message)) => Self {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                error: VideoGenError::ProviderError(message),
-            },
-            GenerateError::IdentityEncryption(message) => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 error: VideoGenError::ProviderError(message),
             },
@@ -480,20 +422,16 @@ impl GenerateVideoRequest {
     fn try_into_generate_request(self) -> Result<GenerateRequest, GenerateError> {
         let identity: DelegatedIdentity = self
             .delegated_identity
-            .clone()
             .try_into()
             .map_err(|_error: k256::elliptic_curve::Error| GenerateError::IdentityMismatch)?;
         let identity_principal = identity
             .sender()
             .map_err(|_| GenerateError::IdentityMismatch)?
             .to_string();
-        let delegated_identity_bytes = serde_json::to_vec(&self.delegated_identity)
-            .map_err(|error| GenerateError::IdentityEncryption(error.to_string()))?;
 
         Ok(GenerateRequest {
             user_id: self.request.user_id,
             identity_principal,
-            delegated_identity_bytes,
             upload_handling: self.upload_handling.ok_or_else(|| {
                 GenerateError::InvalidInput("upload_handling must be ServerDraft".to_string())
             })?,
@@ -523,7 +461,6 @@ impl GenerateConfig {
             .unwrap_or(false);
 
         Self {
-            dedupe_window_secs: config.generate_dedupe_window_secs,
             vast_image_stage_timeout_secs: config.vast_image_stage_timeout_secs,
             ltx_generation_timeout_secs: config.ltx_generation_timeout_secs,
             callback_url: format!("{public_base_url}/api/v2/videogen/complete"),
@@ -572,12 +509,6 @@ async fn generate_inner<D: GenerateDeps>(
 
     let fingerprint = compute_request_fingerprint(&fingerprint_input(&request)?)
         .map_err(|error| GenerateError::InvalidInput(error.to_string()))?;
-    if let Some(existing) = deps
-        .find_dedupe(&request.user_id, &fingerprint.request_fingerprint)
-        .await?
-    {
-        return Ok(existing);
-    }
 
     let image_reference = request
         .image
@@ -606,32 +537,6 @@ async fn generate_inner<D: GenerateDeps>(
     );
     let request_key = deps.create_rate_limit(&request, rate_limit_options).await?;
     let operation_id = operation_id(&request_key);
-    let encrypted_identity = match encrypt_identity(&request.delegated_identity_bytes) {
-        Ok(identity) => identity,
-        Err(error) => {
-            fail_after_rate_limit(deps, &request_key, None, "identity encryption failed").await;
-            return Err(error);
-        }
-    };
-
-    let context = PendingVideogenContext {
-        request_key: request_key.clone(),
-        operation_id: operation_id.clone(),
-        request_fingerprint: fingerprint.request_fingerprint,
-        request_fingerprint_version: fingerprint.version as i32,
-        provider: LTX_PROVIDER.to_string(),
-        model_id: request.model_id.clone(),
-        prompt: request.prompt.clone(),
-        upload_handling: "ServerDraft".to_string(),
-        encrypted_identity,
-        dedupe_expires_at: Utc::now() + Duration::seconds(config.dedupe_window_secs as i64),
-        generation_expires_at: Utc::now()
-            + Duration::seconds(config.ltx_generation_timeout_secs as i64),
-    };
-    if let Err(error) = deps.create_context(context).await {
-        fail_after_rate_limit(deps, &request_key, None, "context create failed").await;
-        return Err(error.into());
-    }
 
     let staged_image_url = match deps
         .stage_image(request.image.clone(), config.vast_image_stage_timeout_secs)
@@ -669,31 +574,8 @@ async fn generate_inner<D: GenerateDeps>(
             return Err(error.into());
         }
     };
-    if let Err(error) = deps
-        .save_upload_destination(&request_key, &upload_destination)
-        .await
-    {
-        fail_after_rate_limit(
-            deps,
-            &request_key,
-            Some(&upload_destination),
-            "upload destination persist failed",
-        )
-        .await;
-        return Err(error.into());
-    }
 
     let request_id = Uuid::new_v4().to_string();
-    if let Err(error) = deps.store_request_id(&request_key, &request_id).await {
-        fail_after_rate_limit(
-            deps,
-            &request_key,
-            Some(&upload_destination),
-            "request_id persist failed",
-        )
-        .await;
-        return Err(error.into());
-    }
     let vast_request = VastSubmitRequest {
         request_id: request_id.clone(),
         request_key: request_key.clone(),
@@ -706,11 +588,11 @@ async fn generate_inner<D: GenerateDeps>(
         upload_destination: upload_destination.clone(),
     };
 
-    let accepted = match deps.submit_vast(vast_request).await {
+    match deps.submit_vast(vast_request).await {
         Ok(accepted)
             if accepted.request_id == request_id && is_accepted_status(&accepted.status) =>
         {
-            accepted
+            // submitted successfully
         }
         Ok(accepted) => {
             let reason = format!(
@@ -731,10 +613,7 @@ async fn generate_inner<D: GenerateDeps>(
             .await;
             return Err(error.into());
         }
-    };
-
-    deps.mark_context_submitted(&request_key, &request_id, accepted.accepted_at)
-        .await?;
+    }
 
     Ok(GenerateResponse {
         operation_id,
@@ -749,7 +628,6 @@ async fn fail_after_rate_limit<D: GenerateDeps>(
     upload_destination: Option<&UploadDestination>,
     reason: &str,
 ) {
-    let _ = deps.mark_submit_failed(request_key, reason).await;
     let _ = deps.mark_rate_limit_failed(request_key, reason).await;
     let _ = deps
         .decrement_rate_limit(request_key, VIDEOGEN_PROPERTY)
@@ -759,7 +637,6 @@ async fn fail_after_rate_limit<D: GenerateDeps>(
             .release_upload_destination(request_key, destination)
             .await;
     }
-    let _ = deps.redact_identity(request_key).await;
 }
 
 fn fingerprint_input(request: &GenerateRequest) -> Result<RequestFingerprintInput, GenerateError> {
@@ -837,31 +714,8 @@ fn is_accepted_status(status: &str) -> bool {
     matches!(status, "submitted" | "queued")
 }
 
-fn encrypt_identity(bytes: &[u8]) -> Result<EncryptedDelegatedIdentity, GenerateError> {
-    #[cfg(test)]
-    if std::env::var(IDENTITY_KEYS_ENV).is_err() {
-        return Ok(EncryptedDelegatedIdentity {
-            encryption_key_id: "test-key".to_string(),
-            nonce: vec![0; 12],
-            ciphertext: bytes.to_vec(),
-        });
-    }
-
-    let keys = std::env::var(IDENTITY_KEYS_ENV).map_err(|_| {
-        GenerateError::IdentityEncryption(format!("{IDENTITY_KEYS_ENV} is required"))
-    })?;
-    let active_key_id = std::env::var(IDENTITY_ACTIVE_KEY_ENV).map_err(|_| {
-        GenerateError::IdentityEncryption(format!("{IDENTITY_ACTIVE_KEY_ENV} is required"))
-    })?;
-    let registry = IdentityEncryptionKeyRegistry::parse(&keys)
-        .map_err(|error| GenerateError::IdentityEncryption(error.to_string()))?;
-    encrypt_delegated_identity(bytes, &registry, &active_key_id)
-        .map_err(|error| GenerateError::IdentityEncryption(error.to_string()))
-}
-
 #[derive(Clone)]
 struct RuntimeGenerateDeps {
-    db_url: String,
     ic_agent: Agent,
     config: VideogenConfig,
     http: reqwest::Client,
@@ -870,46 +724,15 @@ struct RuntimeGenerateDeps {
 impl RuntimeGenerateDeps {
     fn new(state: AppState, config: VideogenConfig) -> Self {
         Self {
-            db_url: state.db_url,
             ic_agent: state.ic_agent,
             config,
             http: reqwest::Client::new(),
         }
     }
-
-    async fn context_store(&self) -> Result<PostgresVideogenContextStore, ContextStoreError> {
-        let client = db::connect(&self.db_url)
-            .await
-            .map_err(|error| ContextStoreError::Unavailable(error.to_string()))?;
-        Ok(PostgresVideogenContextStore::new(client))
-    }
 }
 
 #[async_trait::async_trait]
 impl GenerateDeps for RuntimeGenerateDeps {
-    async fn find_dedupe(
-        &self,
-        principal: &str,
-        fingerprint: &str,
-    ) -> Result<Option<GenerateResponse>, GenerateError> {
-        self.context_store()
-            .await?
-            .find_dedupe(
-                principal,
-                fingerprint,
-                self.config.generate_dedupe_window_secs,
-            )
-            .await
-            .map(|hit| {
-                hit.map(|hit| GenerateResponse {
-                    operation_id: hit.operation_id,
-                    provider: hit.provider,
-                    request_key: hit.request_key,
-                })
-            })
-            .map_err(GenerateError::from)
-    }
-
     async fn moderate(
         &self,
         input: ModerationInput,
@@ -1051,57 +874,6 @@ impl GenerateDeps for RuntimeGenerateDeps {
         }
     }
 
-    async fn create_context(
-        &self,
-        context: PendingVideogenContext,
-    ) -> Result<(), ContextStoreError> {
-        self.context_store().await?.create_context(context).await
-    }
-
-    async fn mark_context_submitted(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        request_id: &str,
-        accepted_at: DateTime<Utc>,
-    ) -> Result<(), ContextStoreError> {
-        self.context_store()
-            .await?
-            .mark_submitted(request_key, request_id, accepted_at)
-            .await
-    }
-
-    async fn store_request_id(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        request_id: &str,
-    ) -> Result<(), ContextStoreError> {
-        self.context_store()
-            .await?
-            .store_request_id(request_key, request_id)
-            .await
-    }
-
-    async fn mark_submit_failed(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        reason: &str,
-    ) -> Result<(), ContextStoreError> {
-        self.context_store()
-            .await?
-            .mark_submit_failed(request_key, reason)
-            .await
-    }
-
-    async fn redact_identity(
-        &self,
-        request_key: &RateLimiterRequestKey,
-    ) -> Result<(), ContextStoreError> {
-        self.context_store()
-            .await?
-            .redact_identity(request_key)
-            .await
-    }
-
     async fn reserve_upload_destination(
         &self,
         request: UploadDestinationRequest,
@@ -1186,17 +958,6 @@ impl GenerateDeps for RuntimeGenerateDeps {
             })
             .await
             .map_err(UploadDestinationError::Unavailable)
-    }
-
-    async fn save_upload_destination(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        destination: &UploadDestination,
-    ) -> Result<(), ContextStoreError> {
-        self.context_store()
-            .await?
-            .set_upload_destination(request_key, destination)
-            .await
     }
 
     async fn stage_image(
@@ -1403,22 +1164,15 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Call {
-        DedupeLookup,
         Moderate,
         RateLimiterCreate,
-        ContextCreate,
         ReserveUpload,
         StageImage,
         WorkflowJson,
         VastSubmit,
-        SaveUpload,
-        RequestIdStored,
-        ContextSubmitted,
-        ContextSubmitFailed,
         RateLimiterFailed,
         RateLimiterDecrement,
         ReleaseUpload,
-        RedactIdentity,
     }
 
     #[derive(Default)]
@@ -1446,15 +1200,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl GenerateDeps for FakeDeps {
-        async fn find_dedupe(
-            &self,
-            _principal: &str,
-            _fingerprint: &str,
-        ) -> Result<Option<GenerateResponse>, GenerateError> {
-            self.push(Call::DedupeLookup);
-            Ok(None)
-        }
-
         async fn moderate(
             &self,
             input: ModerationInput,
@@ -1491,52 +1236,6 @@ mod tests {
             Ok(())
         }
 
-        async fn create_context(
-            &self,
-            context: PendingVideogenContext,
-        ) -> Result<(), ContextStoreError> {
-            assert_eq!(context.encrypted_identity.encryption_key_id, "test-key");
-            self.push(Call::ContextCreate);
-            Ok(())
-        }
-
-        async fn mark_context_submitted(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-            _request_id: &str,
-            _accepted_at: DateTime<Utc>,
-        ) -> Result<(), ContextStoreError> {
-            self.push(Call::ContextSubmitted);
-            Ok(())
-        }
-
-        async fn store_request_id(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-            request_id: &str,
-        ) -> Result<(), ContextStoreError> {
-            assert_eq!(request_id.len(), 36);
-            self.push(Call::RequestIdStored);
-            Ok(())
-        }
-
-        async fn mark_submit_failed(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-            _reason: &str,
-        ) -> Result<(), ContextStoreError> {
-            self.push(Call::ContextSubmitFailed);
-            Ok(())
-        }
-
-        async fn redact_identity(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-        ) -> Result<(), ContextStoreError> {
-            self.push(Call::RedactIdentity);
-            Ok(())
-        }
-
         async fn reserve_upload_destination(
             &self,
             _request: UploadDestinationRequest,
@@ -1551,15 +1250,6 @@ mod tests {
             _destination: &UploadDestination,
         ) -> Result<(), UploadDestinationError> {
             self.push(Call::ReleaseUpload);
-            Ok(())
-        }
-
-        async fn save_upload_destination(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-            _destination: &UploadDestination,
-        ) -> Result<(), ContextStoreError> {
-            self.push(Call::SaveUpload);
             Ok(())
         }
 
@@ -1623,7 +1313,6 @@ mod tests {
         GenerateRequest {
             user_id: "aaaaa-aa".to_string(),
             identity_principal: "aaaaa-aa".to_string(),
-            delegated_identity_bytes: b"delegated identity".to_vec(),
             upload_handling: VideoUploadHandling::ServerDraft,
             prompt: "make a sunrise over mountains".to_string(),
             model_id: "ltx2".to_string(),
@@ -1643,7 +1332,6 @@ mod tests {
 
     fn config() -> GenerateConfig {
         GenerateConfig {
-            dedupe_window_secs: 120,
             vast_image_stage_timeout_secs: 30,
             ltx_generation_timeout_secs: 1800,
             callback_url: "https://prakash.example.test/api/v2/videogen/complete".to_string(),
@@ -1732,7 +1420,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
         assert!(matches!(err.error, VideoGenError::InvalidInput(_)));
-        assert_eq!(deps.calls(), vec![Call::DedupeLookup, Call::Moderate]);
+        assert_eq!(deps.calls(), vec![Call::Moderate]);
     }
 
     #[tokio::test]
@@ -1750,7 +1438,7 @@ mod tests {
         );
         assert_eq!(
             deps.calls(),
-            vec![Call::DedupeLookup, Call::Moderate, Call::RateLimiterCreate]
+            vec![Call::Moderate, Call::RateLimiterCreate]
         );
     }
 
@@ -1770,15 +1458,11 @@ mod tests {
         assert_eq!(
             deps.calls(),
             vec![
-                Call::DedupeLookup,
                 Call::Moderate,
                 Call::RateLimiterCreate,
-                Call::ContextCreate,
                 Call::StageImage,
-                Call::ContextSubmitFailed,
                 Call::RateLimiterFailed,
                 Call::RateLimiterDecrement,
-                Call::RedactIdentity,
             ]
         );
     }
@@ -1789,14 +1473,6 @@ mod tests {
 
         #[async_trait::async_trait]
         impl GenerateDeps for WorkflowFailingDeps {
-            async fn find_dedupe(
-                &self,
-                principal: &str,
-                fingerprint: &str,
-            ) -> Result<Option<GenerateResponse>, GenerateError> {
-                self.0.find_dedupe(principal, fingerprint).await
-            }
-
             async fn moderate(
                 &self,
                 input: ModerationInput,
@@ -1828,47 +1504,6 @@ mod tests {
                 self.0.decrement_rate_limit(request_key, property).await
             }
 
-            async fn create_context(
-                &self,
-                context: PendingVideogenContext,
-            ) -> Result<(), ContextStoreError> {
-                self.0.create_context(context).await
-            }
-
-            async fn store_request_id(
-                &self,
-                request_key: &RateLimiterRequestKey,
-                request_id: &str,
-            ) -> Result<(), ContextStoreError> {
-                self.0.store_request_id(request_key, request_id).await
-            }
-
-            async fn mark_context_submitted(
-                &self,
-                request_key: &RateLimiterRequestKey,
-                request_id: &str,
-                accepted_at: DateTime<Utc>,
-            ) -> Result<(), ContextStoreError> {
-                self.0
-                    .mark_context_submitted(request_key, request_id, accepted_at)
-                    .await
-            }
-
-            async fn mark_submit_failed(
-                &self,
-                request_key: &RateLimiterRequestKey,
-                reason: &str,
-            ) -> Result<(), ContextStoreError> {
-                self.0.mark_submit_failed(request_key, reason).await
-            }
-
-            async fn redact_identity(
-                &self,
-                request_key: &RateLimiterRequestKey,
-            ) -> Result<(), ContextStoreError> {
-                self.0.redact_identity(request_key).await
-            }
-
             async fn reserve_upload_destination(
                 &self,
                 request: UploadDestinationRequest,
@@ -1883,16 +1518,6 @@ mod tests {
             ) -> Result<(), UploadDestinationError> {
                 self.0
                     .release_upload_destination(request_key, destination)
-                    .await
-            }
-
-            async fn save_upload_destination(
-                &self,
-                request_key: &RateLimiterRequestKey,
-                destination: &UploadDestination,
-            ) -> Result<(), ContextStoreError> {
-                self.0
-                    .save_upload_destination(request_key, destination)
                     .await
             }
 
@@ -1932,22 +1557,18 @@ mod tests {
         assert_eq!(
             deps.0.calls(),
             vec![
-                Call::DedupeLookup,
                 Call::Moderate,
                 Call::RateLimiterCreate,
-                Call::ContextCreate,
                 Call::StageImage,
                 Call::WorkflowJson,
-                Call::ContextSubmitFailed,
                 Call::RateLimiterFailed,
                 Call::RateLimiterDecrement,
-                Call::RedactIdentity,
             ]
         );
     }
 
     #[tokio::test]
-    async fn safe_path_persists_context_and_submits_to_vast() {
+    async fn safe_path_submits_to_vast_and_returns_operation_id() {
         let deps = FakeDeps::with_calls();
 
         let response = generate_with_dependencies(request(), &deps, config())
@@ -1960,23 +1581,18 @@ mod tests {
         assert_eq!(
             deps.calls(),
             vec![
-                Call::DedupeLookup,
                 Call::Moderate,
                 Call::RateLimiterCreate,
-                Call::ContextCreate,
                 Call::StageImage,
                 Call::WorkflowJson,
                 Call::ReserveUpload,
-                Call::SaveUpload,
-                Call::RequestIdStored,
                 Call::VastSubmit,
-                Call::ContextSubmitted,
             ]
         );
     }
 
     #[tokio::test]
-    async fn rabbitmq_submit_success_marks_context_submitted_and_returns_operation_id() {
+    async fn rabbitmq_submit_success_returns_operation_id() {
         let deps = FakeDeps::with_calls();
 
         let response = generate_with_dependencies(request(), &deps, config())
@@ -1985,11 +1601,10 @@ mod tests {
 
         assert_eq!(response.operation_id, "aaaaa-aa_17");
         assert!(deps.calls().contains(&Call::VastSubmit));
-        assert!(deps.calls().contains(&Call::ContextSubmitted));
     }
 
     #[tokio::test]
-    async fn rabbitmq_submit_failure_rolls_back_rate_limiter_and_redacts_identity() {
+    async fn rabbitmq_submit_failure_rolls_back_rate_limiter() {
         let deps = FakeDeps {
             vast: Some(Err("RabbitMQ publish timed out".to_string())),
             ..FakeDeps::with_calls()
@@ -2003,21 +1618,15 @@ mod tests {
         assert_eq!(
             deps.calls(),
             vec![
-                Call::DedupeLookup,
                 Call::Moderate,
                 Call::RateLimiterCreate,
-                Call::ContextCreate,
                 Call::StageImage,
                 Call::WorkflowJson,
                 Call::ReserveUpload,
-                Call::SaveUpload,
-                Call::RequestIdStored,
                 Call::VastSubmit,
-                Call::ContextSubmitFailed,
                 Call::RateLimiterFailed,
                 Call::RateLimiterDecrement,
                 Call::ReleaseUpload,
-                Call::RedactIdentity,
             ]
         );
     }

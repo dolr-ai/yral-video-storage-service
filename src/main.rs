@@ -16,10 +16,7 @@ use ic_agent::Agent;
 use once_cell::sync::Lazy;
 use reqwest::{header::AUTHORIZATION, StatusCode};
 use sentry_tower::{NewSentryLayer, SentryHttpLayer};
-use std::{
-    sync::{atomic::AtomicBool, Arc, Mutex},
-    time::Duration,
-};
+use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use tokio::{signal, sync::Notify};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
@@ -205,8 +202,6 @@ async fn run_server() -> anyhow::Result<()> {
     let _ = &*consts::STORJ_EU1_GATEWAY_ACCESS_KEY;
     let _ = &*consts::STORJ_EU1_GATEWAY_SECRET_KEY;
     let _ = &*consts::MIRROR_ACCESS_GRANT;
-    let videogen_config =
-        videogen::config::VideogenConfig::from_env().context("Failed to load videogen config")?;
 
     // Initialize S3 client
     let s3_client = s3_client::S3Client::new().await;
@@ -243,31 +238,6 @@ async fn run_server() -> anyhow::Result<()> {
         job_pipeline_running: Arc::new(AtomicBool::new(false)),
         ic_agent,
     };
-
-    // Start videogen reconciliation background task
-    {
-        let reconcile_config =
-            videogen::reconcile::ReconcileConfig::from_videogen_config(&videogen_config);
-        let reconcile_deps = videogen::reconcile::RuntimeReconcileDeps::new(
-            consts::DATABASE_URL.clone(),
-            app_state.ic_agent.clone(),
-        );
-        let interval = Duration::from_secs(videogen_config.reconciliation_interval_secs);
-        let reconcile_cancel = cancel.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = reconcile_cancel.cancelled() => {
-                        tracing::info!("videogen reconciler shutting down");
-                        break;
-                    }
-                    _ = tokio::time::sleep(interval) => {}
-                }
-                videogen::reconcile::run_reconciliation_cycle(&reconcile_deps, &reconcile_config)
-                    .await;
-            }
-        });
-    }
 
     // Configure CORS to allow cross-origin requests
     let cors = CorsLayer::new()

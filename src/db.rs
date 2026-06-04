@@ -60,52 +60,6 @@ CREATE TRIGGER mirror_jobs_updated_at
     BEFORE UPDATE ON mirror_jobs
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
-CREATE TABLE IF NOT EXISTS videogen_completion_contexts (
-    principal TEXT NOT NULL,
-    counter BIGINT NOT NULL,
-    operation_id TEXT NOT NULL UNIQUE,
-    request_fingerprint TEXT NOT NULL,
-    request_fingerprint_version INTEGER NOT NULL DEFAULT 1,
-    provider TEXT NOT NULL,
-    model_id TEXT NOT NULL,
-    prompt TEXT NOT NULL,
-    upload_handling TEXT NOT NULL,
-    encrypted_delegated_identity BYTEA,
-    identity_nonce BYTEA,
-    encryption_key_id TEXT,
-    upload_destination JSONB,
-    draft_video_id TEXT,
-    object_key TEXT,
-    bucket_url TEXT,
-    request_id TEXT,
-    state TEXT NOT NULL CHECK (state IN (
-        'context_created','submitted','uploaded','draft_creating','draft_created',
-        'complete','submit_failed','stale_failed','draft_failed','failed'
-    )),
-    vast_submit_attempts INTEGER NOT NULL DEFAULT 0,
-    completion_attempts INTEGER NOT NULL DEFAULT 0,
-    draft_attempts INTEGER NOT NULL DEFAULT 0,
-    reconciliation_attempts INTEGER NOT NULL DEFAULT 0,
-    dedupe_expires_at TIMESTAMPTZ NOT NULL,
-    generation_expires_at TIMESTAMPTZ NOT NULL,
-    upload_destination_expires_at TIMESTAMPTZ,
-    last_error TEXT,
-    last_reconciliation_error TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (principal, counter)
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_videogen_context_draft_video_id
-    ON videogen_completion_contexts (draft_video_id)
-    WHERE draft_video_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_videogen_context_dedupe
-    ON videogen_completion_contexts (principal, request_fingerprint, created_at);
-CREATE INDEX IF NOT EXISTS idx_videogen_context_state_updated
-    ON videogen_completion_contexts (state, updated_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_videogen_context_request_id
-    ON videogen_completion_contexts (request_id)
-    WHERE request_id IS NOT NULL;
 ";
 
 pub struct VideoRow {

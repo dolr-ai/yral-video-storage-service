@@ -4,15 +4,14 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use candid::Principal;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     consts::{self, RATE_LIMITS_CANISTER_ID},
-    db,
     videogen::{
         config::VideogenConfig,
-        context::{ContextStateRow, ContextStoreError, PostgresVideogenContextStore},
         draft::{DraftCreationRequest, DraftServiceError},
         hmac::{body_sha256_hex, verify_completion_signature, HmacError, HmacKeyRegistry},
         rate_limiter::{to_canister_request_key, RateLimiterRequestKey},
@@ -101,51 +100,12 @@ pub trait CompletionDeps: Send + Sync {
     /// Allowed timestamp skew in seconds.
     fn hmac_skew_secs(&self) -> i64;
 
-    /// Atomically transition submitted → uploaded. Returns None if already claimed.
-    async fn claim_for_completion(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        request_id: &str,
-    ) -> Result<Option<crate::videogen::context::CompletionContextRow>, ContextStoreError>;
-
-    /// Read current state for idempotency / conflict checking.
-    async fn get_context_state(
-        &self,
-        request_key: &RateLimiterRequestKey,
-    ) -> Result<Option<ContextStateRow>, ContextStoreError>;
-
-    /// uploaded → draft_creating
-    async fn mark_draft_creating(
-        &self,
-        request_key: &RateLimiterRequestKey,
-    ) -> Result<(), ContextStoreError>;
-
-    /// draft_creating → draft_created
-    async fn mark_draft_created(
-        &self,
-        request_key: &RateLimiterRequestKey,
-    ) -> Result<(), ContextStoreError>;
-
     /// Notify the rate limiter that generation completed successfully (best-effort).
     async fn mark_rate_limit_complete(
         &self,
         request_key: &RateLimiterRequestKey,
         bucket_url: &str,
     ) -> Result<(), String>;
-
-    /// draft_created → complete (also stores bucket_url and redacts identity)
-    async fn mark_complete(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        bucket_url: &str,
-    ) -> Result<(), ContextStoreError>;
-
-    /// submitted → failed (redacts identity)
-    async fn mark_generation_failed(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        reason: &str,
-    ) -> Result<(), ContextStoreError>;
 
     async fn mark_rate_limit_failed(
         &self,
@@ -239,43 +199,7 @@ async fn handle_success_completion<D: CompletionDeps>(
         )
     })?;
 
-    // Step 4: atomic claim (submitted → uploaded)
-    let claimed = deps
-        .claim_for_completion(request_key, &req.request_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(CompletionError::internal(e.to_string())),
-            )
-        })?;
-
-    let Some(row) = claimed else {
-        // Row was already claimed — check current state for idempotency
-        return check_idempotent_success(deps, request_key, &req.request_id, object_key).await;
-    };
-
-    // Validate object_key matches stored destination
-    if let Some(stored_key) = &row.object_key {
-        if stored_key != object_key {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(CompletionError::conflict(
-                    "object_key does not match stored upload destination",
-                )),
-            ));
-        }
-    }
-
-    // Step 5: uploaded → draft_creating
-    deps.mark_draft_creating(request_key).await.map_err(|e| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(CompletionError::internal(e.to_string())),
-        )
-    })?;
-
-    // Step 6: call draft service
+    // Call draft service
     let draft_req = DraftCreationRequest {
         request_id: req.request_id.clone(),
         request_key: request_key.clone(),
@@ -290,28 +214,10 @@ async fn handle_success_completion<D: CompletionDeps>(
         )
     })?;
 
-    // Step 7: draft_creating → draft_created
-    deps.mark_draft_created(request_key).await.map_err(|e| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(CompletionError::internal(e.to_string())),
-        )
-    })?;
-
-    // Step 7b: notify rate limiter of success (best-effort)
+    // Notify rate limiter of success (best-effort)
     if let Err(e) = deps.mark_rate_limit_complete(request_key, bucket_url).await {
         tracing::warn!("mark_rate_limit_complete failed (best-effort): {e}");
     }
-
-    // Step 8: draft_created → complete (stores bucket_url, redacts identity)
-    deps.mark_complete(request_key, bucket_url)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(CompletionError::internal(e.to_string())),
-            )
-        })?;
 
     tracing::info!(
         principal = %request_key.principal,
@@ -333,65 +239,6 @@ async fn handle_failure_completion<D: CompletionDeps>(
         .as_deref()
         .unwrap_or("unknown failure reason");
 
-    // For failure: first check if state is terminal (already failed) — return 409
-    let state_row = deps.get_context_state(request_key).await.map_err(|e| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(CompletionError::internal(e.to_string())),
-        )
-    })?;
-
-    match state_row.as_ref().map(|r| r.state.as_str()) {
-        Some("failed") | Some("stale_failed") | Some("submit_failed") | Some("draft_failed") => {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(CompletionError::conflict(
-                    "already in terminal failed state",
-                )),
-            ));
-        }
-        Some("complete") | Some("draft_created") | Some("draft_creating") | Some("uploaded") => {
-            // Already past submitted — treat as 409 for failure callback
-            return Err((
-                StatusCode::CONFLICT,
-                Json(CompletionError::conflict(
-                    "cannot process failure callback: context is past submitted state",
-                )),
-            ));
-        }
-        None => {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(CompletionError::conflict("context not found")),
-            ));
-        }
-        _ => {} // submitted or context_created — proceed
-    }
-
-    // Validate request_id matches
-    if let Some(row) = &state_row {
-        if let Some(stored_id) = &row.request_id {
-            if stored_id != &req.request_id {
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(CompletionError::conflict(
-                        "request_id does not match stored context",
-                    )),
-                ));
-            }
-        }
-    }
-
-    // Transition submitted → failed (atomic, redacts identity)
-    deps.mark_generation_failed(request_key, reason)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(CompletionError::internal(e.to_string())),
-            )
-        })?;
-
     // Best-effort side effects
     if let Err(e) = deps.mark_rate_limit_failed(request_key, reason).await {
         tracing::warn!("mark_rate_limit_failed failed: {e}");
@@ -399,8 +246,8 @@ async fn handle_failure_completion<D: CompletionDeps>(
     if let Err(e) = deps.decrement_rate_limit(request_key).await {
         tracing::warn!("decrement_rate_limit failed: {e}");
     }
-    let vid = state_row.as_ref().and_then(|r| r.video_id.as_deref());
-    let key = state_row.as_ref().and_then(|r| r.object_key.as_deref());
+    let vid = req.video_id.as_deref();
+    let key = req.object_key.as_deref();
     if let Err(e) = deps
         .release_upload_destination(request_key, vid, key)
         .await
@@ -416,75 +263,6 @@ async fn handle_failure_completion<D: CompletionDeps>(
     );
 
     Ok(StatusCode::OK)
-}
-
-async fn check_idempotent_success<D: CompletionDeps>(
-    deps: &D,
-    request_key: &RateLimiterRequestKey,
-    request_id: &str,
-    object_key: &str,
-) -> Result<StatusCode, (StatusCode, Json<CompletionError>)> {
-    let state_row = deps.get_context_state(request_key).await.map_err(|e| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(CompletionError::internal(e.to_string())),
-        )
-    })?;
-
-    let Some(row) = state_row else {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(CompletionError::conflict("context not found")),
-        ));
-    };
-
-    // Validate request_id and object_key still match
-    if let Some(stored_id) = &row.request_id {
-        if stored_id != request_id {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(CompletionError::conflict(
-                    "request_id does not match stored context",
-                )),
-            ));
-        }
-    }
-    if let Some(stored_key) = &row.object_key {
-        if stored_key != object_key {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(CompletionError::conflict(
-                    "object_key does not match stored context",
-                )),
-            ));
-        }
-    }
-
-    match row.state.as_str() {
-        "complete" | "draft_created" | "draft_creating" | "uploaded" => {
-            // Another handler already claimed and is progressing — return 202
-            Ok(StatusCode::ACCEPTED)
-        }
-        "failed" | "stale_failed" | "draft_failed" | "submit_failed" => {
-            // Terminal failure state for a success callback — conflict
-            Err((
-                StatusCode::CONFLICT,
-                Json(CompletionError::conflict(
-                    "context is in terminal failure state",
-                )),
-            ))
-        }
-        _ => {
-            // Unexpected state
-            Err((
-                StatusCode::CONFLICT,
-                Json(CompletionError::conflict(format!(
-                    "unexpected state: {}",
-                    row.state
-                ))),
-            ))
-        }
-    }
 }
 
 fn verify_hmac<D: CompletionDeps>(
@@ -629,7 +407,6 @@ pub async fn complete_video(
 // ─── Runtime implementation ──────────────────────────────────────────────────
 
 struct RuntimeCompletionDeps {
-    db_url: String,
     config: VideogenConfig,
     ic_agent: ic_agent::Agent,
 }
@@ -637,17 +414,9 @@ struct RuntimeCompletionDeps {
 impl RuntimeCompletionDeps {
     fn new(state: AppState, config: VideogenConfig) -> Self {
         Self {
-            db_url: state.db_url,
             config,
             ic_agent: state.ic_agent,
         }
-    }
-
-    async fn context_store(&self) -> Result<PostgresVideogenContextStore, ContextStoreError> {
-        let client = db::connect(&self.db_url)
-            .await
-            .map_err(|e| ContextStoreError::Unavailable(e.to_string()))?;
-        Ok(PostgresVideogenContextStore::new(client))
     }
 }
 
@@ -661,69 +430,6 @@ impl CompletionDeps for RuntimeCompletionDeps {
 
     fn hmac_skew_secs(&self) -> i64 {
         self.config.completion_hmac_skew_secs as i64
-    }
-
-    async fn claim_for_completion(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        request_id: &str,
-    ) -> Result<Option<crate::videogen::context::CompletionContextRow>, ContextStoreError> {
-        self.context_store()
-            .await?
-            .claim_for_completion(request_key, request_id)
-            .await
-    }
-
-    async fn get_context_state(
-        &self,
-        request_key: &RateLimiterRequestKey,
-    ) -> Result<Option<ContextStateRow>, ContextStoreError> {
-        self.context_store()
-            .await?
-            .get_context_state(request_key)
-            .await
-    }
-
-    async fn mark_draft_creating(
-        &self,
-        request_key: &RateLimiterRequestKey,
-    ) -> Result<(), ContextStoreError> {
-        self.context_store()
-            .await?
-            .mark_draft_creating(request_key)
-            .await
-    }
-
-    async fn mark_draft_created(
-        &self,
-        request_key: &RateLimiterRequestKey,
-    ) -> Result<(), ContextStoreError> {
-        self.context_store()
-            .await?
-            .mark_draft_created(request_key)
-            .await
-    }
-
-    async fn mark_complete(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        bucket_url: &str,
-    ) -> Result<(), ContextStoreError> {
-        self.context_store()
-            .await?
-            .mark_complete(request_key, bucket_url)
-            .await
-    }
-
-    async fn mark_generation_failed(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        reason: &str,
-    ) -> Result<(), ContextStoreError> {
-        self.context_store()
-            .await?
-            .mark_generation_failed(request_key, reason)
-            .await
     }
 
     async fn mark_rate_limit_complete(
@@ -819,7 +525,6 @@ impl CompletionDeps for RuntimeCompletionDeps {
 mod tests {
     use super::*;
     use crate::videogen::{
-        context::{CompletionContextRow, ContextStateRow},
         draft::{DraftCreationRequest, DraftServiceError},
         hmac::{sign_completion, HmacKeyRegistry},
         rate_limiter::RateLimiterRequestKey,
@@ -892,13 +597,7 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Call {
-        ClaimForCompletion,
-        GetContextState,
-        MarkDraftCreating,
-        MarkDraftCreated,
         MarkRateLimitComplete,
-        MarkComplete,
-        MarkGenerationFailed,
         MarkRateLimitFailed,
         DecrementRateLimit,
         ReleaseUploadDestination,
@@ -908,8 +607,6 @@ mod tests {
     #[derive(Clone)]
     struct FakeCompletionDeps {
         calls: Arc<Mutex<Vec<Call>>>,
-        claim_result: Option<Option<CompletionContextRow>>,
-        state_result: Option<Option<ContextStateRow>>,
         draft_result: Option<Result<(), DraftServiceError>>,
         hmac_keys: Option<String>,
     }
@@ -918,48 +615,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 calls: Arc::new(Mutex::new(vec![])),
-                claim_result: None,
-                state_result: None,
                 draft_result: None,
                 hmac_keys: Some(TEST_KEY_SPEC.to_string()),
-            }
-        }
-
-        fn with_submitted() -> Self {
-            let row = CompletionContextRow {
-                request_key: RateLimiterRequestKey {
-                    principal: "aaaaa-aa".to_string(),
-                    counter: 17,
-                },
-                request_id: "11111111-1111-1111-1111-111111111111".to_string(),
-                state: "submitted".to_string(),
-                object_key: Some("generated/video-17.mp4".to_string()),
-                video_id: Some("video-17".to_string()),
-            };
-            Self {
-                claim_result: Some(Some(row)),
-                state_result: Some(Some(ContextStateRow {
-                    state: "submitted".to_string(),
-                    request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
-                    principal: "aaaaa-aa".to_string(),
-                    object_key: Some("generated/video-17.mp4".to_string()),
-                    video_id: Some("video-17".to_string()),
-                })),
-                ..Self::new()
-            }
-        }
-
-        fn with_already_claimed(state: &str) -> Self {
-            Self {
-                claim_result: Some(None), // already claimed
-                state_result: Some(Some(ContextStateRow {
-                    state: state.to_string(),
-                    request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
-                    principal: "aaaaa-aa".to_string(),
-                    object_key: Some("generated/video-17.mp4".to_string()),
-                    video_id: None,
-                })),
-                ..Self::new()
             }
         }
 
@@ -992,81 +649,12 @@ mod tests {
             120
         }
 
-        async fn claim_for_completion(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-            _request_id: &str,
-        ) -> Result<Option<CompletionContextRow>, ContextStoreError> {
-            self.push(Call::ClaimForCompletion);
-            Ok(self
-                .claim_result
-                .clone()
-                .unwrap_or(Some(CompletionContextRow {
-                    request_key: RateLimiterRequestKey {
-                        principal: "aaaaa-aa".to_string(),
-                        counter: 17,
-                    },
-                    request_id: "11111111-1111-1111-1111-111111111111".to_string(),
-                    state: "uploaded".to_string(),
-                    object_key: Some("generated/video-17.mp4".to_string()),
-                    video_id: Some("video-17".to_string()),
-                })))
-        }
-
-        async fn get_context_state(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-        ) -> Result<Option<ContextStateRow>, ContextStoreError> {
-            self.push(Call::GetContextState);
-            Ok(self.state_result.clone().unwrap_or(Some(ContextStateRow {
-                state: "submitted".to_string(),
-                request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
-                principal: "aaaaa-aa".to_string(),
-                object_key: Some("generated/video-17.mp4".to_string()),
-                video_id: None,
-            })))
-        }
-
-        async fn mark_draft_creating(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-        ) -> Result<(), ContextStoreError> {
-            self.push(Call::MarkDraftCreating);
-            Ok(())
-        }
-
-        async fn mark_draft_created(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-        ) -> Result<(), ContextStoreError> {
-            self.push(Call::MarkDraftCreated);
-            Ok(())
-        }
-
         async fn mark_rate_limit_complete(
             &self,
             _request_key: &RateLimiterRequestKey,
             _bucket_url: &str,
         ) -> Result<(), String> {
             self.push(Call::MarkRateLimitComplete);
-            Ok(())
-        }
-
-        async fn mark_complete(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-            _bucket_url: &str,
-        ) -> Result<(), ContextStoreError> {
-            self.push(Call::MarkComplete);
-            Ok(())
-        }
-
-        async fn mark_generation_failed(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-            _reason: &str,
-        ) -> Result<(), ContextStoreError> {
-            self.push(Call::MarkGenerationFailed);
             Ok(())
         }
 
@@ -1178,7 +766,7 @@ mod tests {
             "v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=,v2:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
         let deps = FakeCompletionDeps {
             hmac_keys: Some(two_key_spec.to_string()),
-            ..FakeCompletionDeps::with_submitted()
+            ..FakeCompletionDeps::new()
         };
         let body = success_body();
         let ts = now_ts();
@@ -1219,11 +807,11 @@ mod tests {
         assert_eq!(deps.calls(), vec![]); // no state mutation
     }
 
-    // ── Idempotency / concurrency tests ──
+    // ── Success completion tests ──
 
     #[tokio::test]
-    async fn success_callback_from_submitted_transitions_to_complete() {
-        let deps = FakeCompletionDeps::with_submitted();
+    async fn success_callback_creates_draft_and_marks_rate_limit_complete() {
+        let deps = FakeCompletionDeps::new();
         let body = success_body();
         let ts = now_ts();
         let headers = signed_headers(&body, COMPLETE_PATH, ts);
@@ -1233,113 +821,15 @@ mod tests {
         assert_eq!(result.unwrap(), StatusCode::OK);
         assert_eq!(
             deps.calls(),
-            vec![
-                Call::ClaimForCompletion,
-                Call::MarkDraftCreating,
-                Call::CreateDraft,
-                Call::MarkDraftCreated,
-                Call::MarkRateLimitComplete,
-                Call::MarkComplete,
-            ]
+            vec![Call::CreateDraft, Call::MarkRateLimitComplete,]
         );
     }
 
-    #[tokio::test]
-    async fn duplicate_success_after_complete_returns_202() {
-        // claim returns None (already claimed), state is 'complete'
-        let deps = FakeCompletionDeps::with_already_claimed("complete");
-        let body = success_body();
-        let ts = now_ts();
-        let headers = signed_headers(&body, COMPLETE_PATH, ts);
-
-        let result = complete_with_dependencies(&deps, &headers, &body, COMPLETE_PATH).await;
-
-        assert_eq!(result.unwrap(), StatusCode::ACCEPTED);
-        // No state mutation after the get_context_state call
-        assert!(deps.calls().contains(&Call::ClaimForCompletion));
-        assert!(!deps.calls().contains(&Call::MarkDraftCreating));
-    }
+    // ── Failure completion tests ──
 
     #[tokio::test]
-    async fn duplicate_success_while_draft_creating_returns_202() {
-        let deps = FakeCompletionDeps::with_already_claimed("draft_creating");
-        let body = success_body();
-        let ts = now_ts();
-        let headers = signed_headers(&body, COMPLETE_PATH, ts);
-
-        let result = complete_with_dependencies(&deps, &headers, &body, COMPLETE_PATH).await;
-
-        assert_eq!(result.unwrap(), StatusCode::ACCEPTED);
-    }
-
-    #[tokio::test]
-    async fn success_callback_when_already_failed_returns_409() {
-        let deps = FakeCompletionDeps::with_already_claimed("failed");
-        let body = success_body();
-        let ts = now_ts();
-        let headers = signed_headers(&body, COMPLETE_PATH, ts);
-
-        let result = complete_with_dependencies(&deps, &headers, &body, COMPLETE_PATH).await;
-
-        assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
-    }
-
-    #[tokio::test]
-    async fn failure_callback_when_already_terminal_returns_409() {
-        let deps = FakeCompletionDeps {
-            state_result: Some(Some(ContextStateRow {
-                state: "stale_failed".to_string(),
-                request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
-                principal: "aaaaa-aa".to_string(),
-                object_key: Some("generated/video-17.mp4".to_string()),
-                video_id: None,
-            })),
-            ..FakeCompletionDeps::new()
-        };
-        let body = failure_body();
-        let ts = now_ts();
-        let headers = signed_headers(&body, COMPLETE_PATH, ts);
-
-        let result = complete_with_dependencies(&deps, &headers, &body, COMPLETE_PATH).await;
-
-        assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
-        assert!(!deps.calls().contains(&Call::MarkGenerationFailed));
-    }
-
-    #[tokio::test]
-    async fn mismatched_request_id_in_failure_callback_returns_409() {
-        let deps = FakeCompletionDeps {
-            state_result: Some(Some(ContextStateRow {
-                state: "submitted".to_string(),
-                request_id: Some("99999999-9999-9999-9999-999999999999".to_string()), // different
-                principal: "aaaaa-aa".to_string(),
-                object_key: Some("generated/video-17.mp4".to_string()),
-                video_id: None,
-            })),
-            ..FakeCompletionDeps::new()
-        };
-        let body = failure_body();
-        let ts = now_ts();
-        let headers = signed_headers(&body, COMPLETE_PATH, ts);
-
-        let result = complete_with_dependencies(&deps, &headers, &body, COMPLETE_PATH).await;
-
-        assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
-        assert!(!deps.calls().contains(&Call::MarkGenerationFailed));
-    }
-
-    #[tokio::test]
-    async fn success_failure_callback_marks_rate_limiter_and_releases_upload() {
-        let deps = FakeCompletionDeps {
-            state_result: Some(Some(ContextStateRow {
-                state: "submitted".to_string(),
-                request_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
-                principal: "aaaaa-aa".to_string(),
-                object_key: Some("generated/video-17.mp4".to_string()),
-                video_id: Some("video-17".to_string()),
-            })),
-            ..FakeCompletionDeps::new()
-        };
+    async fn failure_callback_marks_rate_limiter_and_releases_upload() {
+        let deps = FakeCompletionDeps::new();
         let body = failure_body();
         let ts = now_ts();
         let headers = signed_headers(&body, COMPLETE_PATH, ts);
@@ -1348,9 +838,9 @@ mod tests {
 
         assert_eq!(result.unwrap(), StatusCode::OK);
         let calls = deps.calls();
-        assert!(calls.contains(&Call::MarkGenerationFailed));
         assert!(calls.contains(&Call::MarkRateLimitFailed));
         assert!(calls.contains(&Call::DecrementRateLimit));
-        assert!(calls.contains(&Call::ReleaseUploadDestination));
+        // failure_body has no video_id/object_key so release is skipped
+        assert!(!calls.contains(&Call::ReleaseUploadDestination));
     }
 }
