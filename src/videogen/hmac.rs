@@ -1,7 +1,6 @@
 use std::{collections::BTreeMap, fmt};
 
 use ::hmac::{Hmac, Mac};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -9,7 +8,7 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Clone, PartialEq, Eq)]
 pub struct HmacKey {
     id: String,
-    bytes: [u8; 32],
+    bytes: Vec<u8>,
 }
 
 impl HmacKey {
@@ -49,10 +48,8 @@ pub enum HmacError {
     InvalidKeyEntry,
     #[error("hmac key id is empty")]
     EmptyKeyId,
-    #[error("hmac key is invalid base64")]
-    InvalidBase64Key,
-    #[error("hmac key must decode to 32 bytes")]
-    InvalidKeyLength,
+    #[error("hmac key must not be empty")]
+    EmptyKey,
     #[error("duplicate hmac key id: {0}")]
     DuplicateKeyId(String),
     #[error("unknown hmac key id")]
@@ -81,12 +78,10 @@ impl HmacKeyRegistry {
                 return Err(HmacError::DuplicateKeyId(id.to_string()));
             }
 
-            let key_bytes = STANDARD
-                .decode(encoded_key.trim())
-                .map_err(|_| HmacError::InvalidBase64Key)?;
-            let bytes: [u8; 32] = key_bytes
-                .try_into()
-                .map_err(|_| HmacError::InvalidKeyLength)?;
+            let bytes: Vec<u8> = encoded_key.trim().as_bytes().to_vec();
+            if bytes.is_empty() {
+                return Err(HmacError::EmptyKey);
+            }
 
             keys.insert(
                 id.to_string(),
@@ -120,7 +115,7 @@ pub fn sign_completion(
     body_hash_hex: &str,
     key: &HmacKey,
 ) -> String {
-    let mut mac = HmacSha256::new_from_slice(&key.bytes).expect("HMAC accepts 32-byte keys");
+    let mut mac = HmacSha256::new_from_slice(&key.bytes).expect("HMAC accepts any non-empty key");
     mac.update(signature_message(method, path, timestamp, body_hash_hex).as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
@@ -143,7 +138,7 @@ pub fn verify_completion_signature(
     }
 
     let signature = hex::decode(signature_hex).map_err(|_| HmacError::InvalidSignature)?;
-    let mut mac = HmacSha256::new_from_slice(&key.bytes).expect("HMAC accepts 32-byte keys");
+    let mut mac = HmacSha256::new_from_slice(&key.bytes).expect("HMAC accepts any non-empty key");
     mac.update(signature_message(method, path, timestamp, body_hash_hex).as_bytes());
     mac.verify_slice(&signature)
         .map_err(|_| HmacError::InvalidSignature)
@@ -170,7 +165,7 @@ mod tests {
     #[test]
     fn completion_signature_round_trips() {
         let registry =
-            HmacKeyRegistry::parse("v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+            HmacKeyRegistry::parse("v1:test-auth-token-secret").unwrap();
         let body_hash = sha256_hex(br#"{"status":"success"}"#);
         let sig = sign_completion(
             "POST",
@@ -196,7 +191,7 @@ mod tests {
     #[test]
     fn unknown_key_id_fails_without_fallback() {
         let registry =
-            HmacKeyRegistry::parse("v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+            HmacKeyRegistry::parse("v1:test-auth-token-secret").unwrap();
         assert!(matches!(
             verify_completion_signature(
                 &registry,
@@ -216,7 +211,7 @@ mod tests {
     #[test]
     fn stale_timestamp_is_rejected() {
         let registry =
-            HmacKeyRegistry::parse("v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+            HmacKeyRegistry::parse("v1:test-auth-token-secret").unwrap();
         let body_hash = sha256_hex(br#"{"status":"success"}"#);
         let sig = sign_completion(
             "POST",
@@ -246,7 +241,7 @@ mod tests {
     fn duplicate_key_ids_are_rejected() {
         assert!(matches!(
             HmacKeyRegistry::parse(
-                "v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=,v1:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+                "v1:test-auth-token-secret,v1:other-auth-token-secret"
             ),
             Err(HmacError::DuplicateKeyId(id)) if id == "v1"
         ));
@@ -255,11 +250,11 @@ mod tests {
     #[test]
     fn key_registry_debug_redacts_key_material() {
         let registry =
-            HmacKeyRegistry::parse("v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+            HmacKeyRegistry::parse("v1:test-auth-token-secret").unwrap();
         let debug = format!("{registry:?}");
 
         assert!(debug.contains("v1"));
         assert!(!debug.contains("bytes: ["));
-        assert!(!debug.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="));
+        assert!(!debug.contains("test-auth-token-secret"));
     }
 }
