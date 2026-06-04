@@ -102,6 +102,20 @@ impl HmacKeyRegistry {
     pub fn get(&self, key_id: &str) -> Option<&HmacKey> {
         self.keys.get(key_id)
     }
+
+    /// Build a registry from a single plain-text token (e.g. AUTH_TOKEN).
+    /// The token bytes are used directly as the HMAC key with a fixed key_id "v1".
+    pub fn from_service_token(token: &str) -> Result<Self, HmacError> {
+        if token.is_empty() {
+            return Err(HmacError::EmptyKey);
+        }
+        let mut keys = BTreeMap::new();
+        keys.insert(
+            "v1".to_string(),
+            HmacKey { id: "v1".to_string(), bytes: token.as_bytes().to_vec() },
+        );
+        Ok(Self { keys })
+    }
 }
 
 pub fn body_sha256_hex(raw_body: &[u8]) -> String {

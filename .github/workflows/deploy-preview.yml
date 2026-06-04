@@ -246,7 +246,7 @@ jobs:
           ENVIRONMENT: staging
           VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD: ${{ secrets.VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD }}
           VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64: ${{ secrets.VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64 }}
-          VIDEOGEN_COMPLETION_HMAC_KEYS: ${{ secrets.VIDEOGEN_COMPLETION_HMAC_KEYS }}
+          VIDEOGEN_SERVICE_AUTH_TOKEN: ${{ secrets.VIDEOGEN_SERVICE_AUTH_TOKEN }}
           VIDEOGEN_UPLOAD_SERVICE_URL: ${{ secrets.VIDEOGEN_UPLOAD_SERVICE_URL }}
           MODERATION_SERVICE_URL: ${{ secrets.MODERATION_SERVICE_URL }}
           VIDEOGEN_IDENTITY_ENCRYPTION_KEYS: ${{ secrets.VIDEOGEN_IDENTITY_ENCRYPTION_KEYS }}
@@ -274,7 +274,7 @@ jobs:
             --arg prakash_public_base_url "$PREVIEW_URL" \
             --arg videogen_rabbitmq_publisher_password "$VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD" \
             --arg videogen_rabbitmq_tls_ca_cert_pem_b64 "$VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64" \
-            --arg videogen_completion_hmac_keys "$VIDEOGEN_COMPLETION_HMAC_KEYS" \
+            --arg videogen_service_auth_token "$VIDEOGEN_SERVICE_AUTH_TOKEN" \
             --arg videogen_upload_service_url "$VIDEOGEN_UPLOAD_SERVICE_URL" \
             --arg moderation_service_url "$MODERATION_SERVICE_URL" \
             --arg videogen_identity_encryption_keys "$VIDEOGEN_IDENTITY_ENCRYPTION_KEYS" \
@@ -301,7 +301,7 @@ jobs:
                 {"key": "MODERATION_MODE", "value": "remote", "is_literal": true},
                 {"key": "VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD", "value": $videogen_rabbitmq_publisher_password, "is_literal": true},
                 {"key": "VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64", "value": $videogen_rabbitmq_tls_ca_cert_pem_b64, "is_literal": true},
-                {"key": "VIDEOGEN_COMPLETION_HMAC_KEYS", "value": $videogen_completion_hmac_keys, "is_literal": true},
+                {"key": "VIDEOGEN_SERVICE_AUTH_TOKEN", "value": $videogen_service_auth_token, "is_literal": true},
                 {"key": "VIDEOGEN_UPLOAD_SERVICE_URL", "value": $videogen_upload_service_url, "is_literal": true},
                 {"key": "MODERATION_SERVICE_URL", "value": $moderation_service_url, "is_literal": true},
                 {"key": "VIDEOGEN_IDENTITY_ENCRYPTION_KEYS", "value": $videogen_identity_encryption_keys, "is_literal": true},

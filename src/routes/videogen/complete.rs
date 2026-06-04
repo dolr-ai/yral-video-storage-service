@@ -423,8 +423,11 @@ impl RuntimeCompletionDeps {
 #[async_trait::async_trait]
 impl CompletionDeps for RuntimeCompletionDeps {
     fn hmac_registry(&self) -> Result<HmacKeyRegistry, String> {
+        if let Ok(token) = std::env::var(consts::VIDEOGEN_SERVICE_AUTH_TOKEN) {
+            return HmacKeyRegistry::from_service_token(&token).map_err(|e| e.to_string());
+        }
         let keys = std::env::var(consts::VIDEOGEN_COMPLETION_HMAC_KEYS)
-            .map_err(|_| format!("{} is required", consts::VIDEOGEN_COMPLETION_HMAC_KEYS))?;
+            .map_err(|_| format!("{} or {} is required", consts::VIDEOGEN_SERVICE_AUTH_TOKEN, consts::VIDEOGEN_COMPLETION_HMAC_KEYS))?;
         HmacKeyRegistry::parse(&keys).map_err(|e| e.to_string())
     }
 
