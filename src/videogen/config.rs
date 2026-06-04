@@ -205,6 +205,7 @@ fn read_u64(name: &'static str, default: u64) -> Result<u64, VideogenConfigError
     }
 }
 
+#[allow(dead_code)]
 fn read_u32(name: &'static str, default: u32) -> Result<u32, VideogenConfigError> {
     match std::env::var(name) {
         Ok(value) => value

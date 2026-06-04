@@ -137,6 +137,7 @@ pub fn sign_completion(
     hex::encode(mac.finalize().into_bytes())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn verify_completion_signature(
     registry: &HmacKeyRegistry,
     key_id: &str,
