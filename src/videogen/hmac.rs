@@ -112,7 +112,10 @@ impl HmacKeyRegistry {
         let mut keys = BTreeMap::new();
         keys.insert(
             "v1".to_string(),
-            HmacKey { id: "v1".to_string(), bytes: token.as_bytes().to_vec() },
+            HmacKey {
+                id: "v1".to_string(),
+                bytes: token.as_bytes().to_vec(),
+            },
         );
         Ok(Self { keys })
     }
@@ -178,8 +181,7 @@ mod tests {
 
     #[test]
     fn completion_signature_round_trips() {
-        let registry =
-            HmacKeyRegistry::parse("v1:test-auth-token-secret").unwrap();
+        let registry = HmacKeyRegistry::parse("v1:test-auth-token-secret").unwrap();
         let body_hash = sha256_hex(br#"{"status":"success"}"#);
         let sig = sign_completion(
             "POST",
@@ -204,8 +206,7 @@ mod tests {
 
     #[test]
     fn unknown_key_id_fails_without_fallback() {
-        let registry =
-            HmacKeyRegistry::parse("v1:test-auth-token-secret").unwrap();
+        let registry = HmacKeyRegistry::parse("v1:test-auth-token-secret").unwrap();
         assert!(matches!(
             verify_completion_signature(
                 &registry,
@@ -224,8 +225,7 @@ mod tests {
 
     #[test]
     fn stale_timestamp_is_rejected() {
-        let registry =
-            HmacKeyRegistry::parse("v1:test-auth-token-secret").unwrap();
+        let registry = HmacKeyRegistry::parse("v1:test-auth-token-secret").unwrap();
         let body_hash = sha256_hex(br#"{"status":"success"}"#);
         let sig = sign_completion(
             "POST",
@@ -263,8 +263,7 @@ mod tests {
 
     #[test]
     fn key_registry_debug_redacts_key_material() {
-        let registry =
-            HmacKeyRegistry::parse("v1:test-auth-token-secret").unwrap();
+        let registry = HmacKeyRegistry::parse("v1:test-auth-token-secret").unwrap();
         let debug = format!("{registry:?}");
 
         assert!(debug.contains("v1"));

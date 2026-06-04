@@ -74,7 +74,9 @@ pub enum VideogenConfigError {
     MockModerationInProduction,
     #[error("VIDEOGEN_VAST_SUBMIT_TRANSPORT must be http, rabbitmq, or amqp: {0}")]
     InvalidVastSubmitTransport(String),
-    #[error("VIDEOGEN_RABBITMQ_AMQPS_URLS is required when VIDEOGEN_VAST_SUBMIT_TRANSPORT=rabbitmq")]
+    #[error(
+        "VIDEOGEN_RABBITMQ_AMQPS_URLS is required when VIDEOGEN_VAST_SUBMIT_TRANSPORT=rabbitmq"
+    )]
     RabbitMqUrlsRequired,
 }
 
@@ -110,8 +112,8 @@ impl VideogenConfig {
                     .unwrap_or_else(|_| "http".to_string()),
             )?,
             rabbitmq_amqps_urls: {
-                let password = std::env::var(consts::VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD)
-                    .unwrap_or_default();
+                let password =
+                    std::env::var(consts::VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD).unwrap_or_default();
                 if !password.is_empty() {
                     vec![
                         format!("amqps://prakash_videogen_publisher:{password}@94.130.13.115:5671/%2Fvideogen"),
@@ -138,9 +140,7 @@ impl VideogenConfig {
                 10,
             )?,
             rabbitmq_connection_name: std::env::var(consts::VIDEOGEN_RABBITMQ_CONNECTION_NAME)
-                .unwrap_or_else(|_| {
-                    "yral-video-storage-service-videogen-publisher".to_string()
-                }),
+                .unwrap_or_else(|_| "yral-video-storage-service-videogen-publisher".to_string()),
             rabbitmq_tls_ca_cert_pem_b64: std::env::var(
                 consts::VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64,
             )
@@ -240,7 +240,10 @@ mod tests {
     #[test]
     fn rabbitmq_publish_confirm_timeout_defaults_to_submit_timeout() {
         let cfg = VideogenConfig::test_defaults();
-        assert_eq!(cfg.rabbitmq_publish_timeout_secs, cfg.vast_submit_timeout_secs);
+        assert_eq!(
+            cfg.rabbitmq_publish_timeout_secs,
+            cfg.vast_submit_timeout_secs
+        );
     }
 
     #[test]

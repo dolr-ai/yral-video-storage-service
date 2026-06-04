@@ -1432,10 +1432,7 @@ mod tests {
             result.unwrap_err().status,
             axum::http::StatusCode::TOO_MANY_REQUESTS
         );
-        assert_eq!(
-            deps.calls(),
-            vec![Call::Moderate, Call::RateLimiterCreate]
-        );
+        assert_eq!(deps.calls(), vec![Call::Moderate, Call::RateLimiterCreate]);
     }
 
     #[tokio::test]

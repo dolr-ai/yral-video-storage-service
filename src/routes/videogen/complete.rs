@@ -18,7 +18,9 @@ use crate::{
     },
     AppState,
 };
-use yral_canisters_client::rate_limits::{RateLimits, Result1 as CanisterResult, VideoGenRequestStatus};
+use yral_canisters_client::rate_limits::{
+    RateLimits, Result1 as CanisterResult, VideoGenRequestStatus,
+};
 
 // ─── Request / response types ────────────────────────────────────────────────
 
@@ -248,10 +250,7 @@ async fn handle_failure_completion<D: CompletionDeps>(
     }
     let vid = req.video_id.as_deref();
     let key = req.object_key.as_deref();
-    if let Err(e) = deps
-        .release_upload_destination(request_key, vid, key)
-        .await
-    {
+    if let Err(e) = deps.release_upload_destination(request_key, vid, key).await {
         tracing::warn!("release_upload_destination failed: {e}");
     }
 
@@ -426,8 +425,13 @@ impl CompletionDeps for RuntimeCompletionDeps {
         if let Ok(token) = std::env::var(consts::VIDEOGEN_SERVICE_AUTH_TOKEN) {
             return HmacKeyRegistry::from_service_token(&token).map_err(|e| e.to_string());
         }
-        let keys = std::env::var(consts::VIDEOGEN_COMPLETION_HMAC_KEYS)
-            .map_err(|_| format!("{} or {} is required", consts::VIDEOGEN_SERVICE_AUTH_TOKEN, consts::VIDEOGEN_COMPLETION_HMAC_KEYS))?;
+        let keys = std::env::var(consts::VIDEOGEN_COMPLETION_HMAC_KEYS).map_err(|_| {
+            format!(
+                "{} or {} is required",
+                consts::VIDEOGEN_SERVICE_AUTH_TOKEN,
+                consts::VIDEOGEN_COMPLETION_HMAC_KEYS
+            )
+        })?;
         HmacKeyRegistry::parse(&keys).map_err(|e| e.to_string())
     }
 
@@ -463,10 +467,7 @@ impl CompletionDeps for RuntimeCompletionDeps {
         let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
         let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
         match rate_limits
-            .update_video_generation_status(
-                key,
-                VideoGenRequestStatus::Failed(reason.to_string()),
-            )
+            .update_video_generation_status(key, VideoGenRequestStatus::Failed(reason.to_string()))
             .await
             .map_err(|e| e.to_string())?
         {

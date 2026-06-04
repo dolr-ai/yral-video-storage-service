@@ -128,7 +128,10 @@ mod tests {
     #[test]
     fn disabled_mode_is_explicit() {
         let client = UploadDestinationReleaseClient::disabled();
-        assert_eq!(client.mode(), UploadDestinationReleaseMode::DisabledNoEndpoint);
+        assert_eq!(
+            client.mode(),
+            UploadDestinationReleaseMode::DisabledNoEndpoint
+        );
     }
 
     #[test]

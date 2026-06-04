@@ -1,9 +1,9 @@
 use crate::videogen::vast::{VastSubmitAccepted, VastSubmitRequest};
 use chrono::Utc;
 use lapin::{
-    BasicProperties, Connection, ConnectionProperties,
     options::{BasicPublishOptions, ConfirmSelectOptions},
     tcp::OwnedTLSConfig,
+    BasicProperties, Connection, ConnectionProperties,
 };
 use std::fmt;
 
@@ -89,8 +89,9 @@ impl RabbitMqPublisher {
                 Err(e) => last_error = Some(e),
             }
         }
-        Err(last_error
-            .unwrap_or_else(|| RabbitMqPublishError::Connect("no AMQPS URLs configured".to_string())))
+        Err(last_error.unwrap_or_else(|| {
+            RabbitMqPublishError::Connect("no AMQPS URLs configured".to_string())
+        }))
     }
 
     async fn try_publish_to_url(
@@ -116,8 +117,8 @@ impl RabbitMqPublisher {
         let tls_config = self.build_tls_config()?;
 
         let connection_name = self.config.connection_name.clone();
-        let properties = ConnectionProperties::default()
-            .with_connection_name(connection_name.into());
+        let properties =
+            ConnectionProperties::default().with_connection_name(connection_name.into());
 
         let runtime = lapin::runtime::default_runtime()
             .map_err(|e| RabbitMqPublishError::Connect(e.to_string()))?;
@@ -136,18 +137,9 @@ impl RabbitMqPublisher {
             .await
             .map_err(|e| RabbitMqPublishError::Channel(e.to_string()))?;
 
-        let message_id = envelope
-            .message_id
-            .clone()
-            .unwrap_or_default();
-        let correlation_id = envelope
-            .correlation_id
-            .clone()
-            .unwrap_or_default();
-        let content_type = envelope
-            .content_type
-            .clone()
-            .unwrap_or_default();
+        let message_id = envelope.message_id.clone().unwrap_or_default();
+        let correlation_id = envelope.correlation_id.clone().unwrap_or_default();
+        let content_type = envelope.content_type.clone().unwrap_or_default();
 
         let confirm = channel
             .basic_publish(
@@ -192,13 +184,14 @@ impl RabbitMqPublisher {
         match &self.config.tls_ca_cert_pem_b64 {
             None => Ok(OwnedTLSConfig::default()),
             Some(b64) => {
-                let pem_bytes = base64::Engine::decode(
-                    &base64::engine::general_purpose::STANDARD,
-                    b64,
-                )
-                .map_err(|e| RabbitMqPublishError::Connect(format!("invalid CA cert base64: {e}")))?;
-                let pem_str = String::from_utf8(pem_bytes)
-                    .map_err(|e| RabbitMqPublishError::Connect(format!("CA cert is not valid UTF-8: {e}")))?;
+                let pem_bytes =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+                        .map_err(|e| {
+                            RabbitMqPublishError::Connect(format!("invalid CA cert base64: {e}"))
+                        })?;
+                let pem_str = String::from_utf8(pem_bytes).map_err(|e| {
+                    RabbitMqPublishError::Connect(format!("CA cert is not valid UTF-8: {e}"))
+                })?;
                 Ok(OwnedTLSConfig {
                     identity: None,
                     cert_chain: Some(pem_str),
@@ -246,8 +239,14 @@ mod tests {
         let request = sample_vast_submit_request();
         let envelope = RabbitMqPublishEnvelope::from_request(&request).unwrap();
 
-        assert_eq!(envelope.message_id.as_deref(), Some(request.request_id.as_str()));
-        assert_eq!(envelope.correlation_id.as_deref(), Some(request.request_id.as_str()));
+        assert_eq!(
+            envelope.message_id.as_deref(),
+            Some(request.request_id.as_str())
+        );
+        assert_eq!(
+            envelope.correlation_id.as_deref(),
+            Some(request.request_id.as_str())
+        );
         assert_eq!(envelope.content_type.as_deref(), Some("application/json"));
         assert!(envelope.persistent);
     }
@@ -259,7 +258,13 @@ mod tests {
         let decoded: serde_json::Value = serde_json::from_slice(&envelope.body).unwrap();
 
         assert_eq!(decoded["request_id"], request.request_id);
-        assert_eq!(decoded["request_key"]["principal"], request.request_key.principal);
-        assert_eq!(decoded["upload_destination"]["video_id"], request.upload_destination.video_id);
+        assert_eq!(
+            decoded["request_key"]["principal"],
+            request.request_key.principal
+        );
+        assert_eq!(
+            decoded["upload_destination"]["video_id"],
+            request.upload_destination.video_id
+        );
     }
 }
