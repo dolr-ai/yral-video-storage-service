@@ -1005,6 +1005,12 @@ git -C /Users/prk-jr/Desktop/work/dolr/yral-video-storage-service commit -m "fea
 
 ## Vast LTX Tasks
 
+The dedicated RabbitMQ worker plan supersedes the Vast tasks below for the migrated production path:
+
+`/Users/prk-jr/Desktop/work/dolr/videogen/docs/superpowers/plans/2026-06-03-vast-rabbitmq-consumer.md`
+
+Use the dedicated plan for RabbitMQ consumption, local SQLite job/outbox state, HMAC env naming on Vast, bucket upload protocol, staged input cleanup, and RabbitMQ ack/recovery policy. The older Tasks 9-12 below are retained as historical context for the original direct Prakash-to-Vast HTTP design and should not be implemented where they conflict with the dedicated RabbitMQ plan. In particular, the RabbitMQ plan selects multipart upload field `file` unless the upload-service owner changes the contract and both plans are updated together.
+
 ### Task 9: Add Vast Submission Contract And Auth
 
 **Files:**
@@ -1121,7 +1127,7 @@ Expected: failures because upload helpers do not exist.
 
 - [ ] **Step 3: Implement upload helpers**
 
-Implement scoped upload via `reqwest::put(upload_url).body(file_bytes)` or streaming file body if available. Store refreshed `expires_at` in the job/outbox metadata.
+For the RabbitMQ migration, use the dedicated Vast RabbitMQ consumer plan's selected upload protocol: `multipart/form-data` with field name `file`, unless the upload-service owner explicitly changes the contract and both plans are updated together. Store refreshed `expires_at` in the job/outbox metadata.
 
 Do not delete the local MP4 on upload failure.
 
@@ -1180,7 +1186,9 @@ Expected: failures because signer/outbox do not exist.
 
 - [ ] **Step 3: Implement completion module**
 
-Use config:
+Historical direct-HTTP config names from this task are superseded by the dedicated RabbitMQ consumer plan for production. In the RabbitMQ plan, Vast uses `PRAKASH_COMPLETION_HMAC_KEY_ID` plus `PRAKASH_COMPLETION_HMAC_SECRET_B64`, while Prakash owns the validating `VIDEOGEN_COMPLETION_HMAC_KEYS` registry.
+
+Original direct-HTTP config:
 
 - `VIDEOGEN_COMPLETION_HMAC_KEYS`
 - `VIDEOGEN_COMPLETION_HMAC_ACTIVE_KEY_ID`
