@@ -327,16 +327,10 @@ impl UploadRefreshDeps for RuntimeUploadRefreshDeps {
         use reqwest::header::CONTENT_TYPE;
         use serde_json::json;
 
-        let base_url = std::env::var(crate::consts::VIDEOGEN_UPLOAD_SERVICE_URL_ENV)
-            .or_else(|_| std::env::var(crate::consts::VIDEOGEN_LEGACY_UPLOAD_SERVICE_URL_ENV))
-            .map_err(|_| {
-                format!(
-                    "{} or {} is required",
-                    crate::consts::VIDEOGEN_UPLOAD_SERVICE_URL_ENV,
-                    crate::consts::VIDEOGEN_LEGACY_UPLOAD_SERVICE_URL_ENV
-                )
-            })?;
-        let url = format!("{}/get-upload-url", base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/get-upload-url",
+            crate::consts::VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL
+        );
 
         let body =
             serde_json::to_vec(&json!({ "video_id": video_id })).map_err(|e| e.to_string())?;

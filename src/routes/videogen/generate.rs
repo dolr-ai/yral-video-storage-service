@@ -37,8 +37,6 @@ const LTX_PROVIDER: &str = "Ltx2";
 const PUBLIC_BASE_URL_ENV: &str = "PRAKASH_PUBLIC_BASE_URL";
 const UPLOAD_URL_REFRESH_ENABLED_ENV: &str = "VIDEOGEN_UPLOAD_URL_REFRESH_ENABLED";
 const MODERATION_SERVICE_URL_ENV: &str = crate::consts::MODERATION_SERVICE_URL;
-const UPLOAD_SERVICE_URL_ENV: &str = crate::consts::VIDEOGEN_UPLOAD_SERVICE_URL_ENV;
-const LEGACY_UPLOAD_SERVICE_URL_ENV: &str = crate::consts::VIDEOGEN_LEGACY_UPLOAD_SERVICE_URL_ENV;
 const VAST_GENERATE_URL_ENV: &str = "VIDEOGEN_VAST_GENERATE_URL";
 const VAST_API_KEY_ENV: &str = "VAST_API_KEY";
 const VAST_IMAGE_UPLOAD_URL_ENV: &str = "VIDEOGEN_VAST_IMAGE_UPLOAD_URL";
@@ -873,10 +871,10 @@ impl GenerateDeps for RuntimeGenerateDeps {
         &self,
         request: UploadDestinationRequest,
     ) -> Result<UploadDestination, UploadDestinationError> {
-        let base_url = std::env::var(UPLOAD_SERVICE_URL_ENV)
-            .or_else(|_| std::env::var(LEGACY_UPLOAD_SERVICE_URL_ENV))
-            .unwrap_or_else(|_| crate::consts::VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL.to_string());
-        let url = format!("{}/get-upload-url", base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/get-upload-url",
+            crate::consts::VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL
+        );
         let body = serde_json::to_vec(&json!({
             "publisher_user_id": request.user_principal,
         }))
