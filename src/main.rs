@@ -12,7 +12,7 @@ use consts::{
     HETZNER_S3_ENDPOINT, HETZNER_S3_REGION, HETZNER_S3_SECRET_KEY, SERVICE_SECRET_TOKEN,
     YRAL_VIDEOS,
 };
-use ic_agent::Agent;
+use ic_agent::{identity::Secp256k1Identity, Agent};
 use once_cell::sync::Lazy;
 use reqwest::{header::AUTHORIZATION, StatusCode};
 use sentry_tower::{NewSentryLayer, SentryHttpLayer};
@@ -216,10 +216,16 @@ async fn run_server() -> anyhow::Result<()> {
     drop(db_client); // jobs create their own connections
 
     let storj_client = storj_s3_client::StorjS3Client::new().await;
-    let ic_agent = Agent::builder()
-        .with_url(consts::IC_URL.as_str())
-        .build()
-        .context("Failed to build IC agent")?;
+    let ic_agent = {
+        let mut builder = Agent::builder().with_url(consts::IC_URL.as_str());
+        if let Ok(pem) = std::env::var("BACKEND_ADMIN_IDENTITY") {
+            let identity =
+                Secp256k1Identity::from_pem(stringreader::StringReader::new(pem.as_str()))
+                    .context("Failed to parse BACKEND_ADMIN_IDENTITY")?;
+            builder = builder.with_identity(identity);
+        }
+        builder.build().context("Failed to build IC agent")?
+    };
     let cancel = CancellationToken::new();
     let job_cancel = CancellationToken::new();
 
