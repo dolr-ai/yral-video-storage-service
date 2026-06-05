@@ -130,7 +130,7 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY_PRAKASH }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H 138.201.129.173 >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H 138.201.129.173 94.130.13.115 88.99.151.102 >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Provision Preview Postgres
         env:
@@ -169,6 +169,22 @@ jobs:
             fi
           "
           echo "$REMOTE_SCRIPT" | ssh deploy@138.201.129.173 bash
+
+      - name: Open RabbitMQ firewall for Coolify server
+        run: |
+          COOLIFY_IP=$(curl -s "https://coolify.yral.com/api/v1/servers/${COOLIFY_SERVER_UUID}" \
+            -H "Authorization: Bearer ${COOLIFY_TOKEN}" | jq -r '.ip // empty')
+          if [ -z "$COOLIFY_IP" ]; then
+            echo "ERROR: could not determine Coolify server IP"
+            exit 1
+          fi
+          echo "Opening RabbitMQ port 5671 for Coolify IP: ${COOLIFY_IP}"
+          for NODE in 94.130.13.115 88.99.151.102 138.201.129.173; do
+            ssh deploy@${NODE} \
+              "sudo iptables -C RABBITMQ-FILTER -p tcp --dport 5671 -s ${COOLIFY_IP} -j ACCEPT 2>/dev/null \
+               || sudo iptables -I RABBITMQ-FILTER 1 -p tcp --dport 5671 -s ${COOLIFY_IP} -j ACCEPT \
+               && echo 'rule ok on ${NODE}'"
+          done
 
       - name: Create Coolify Application
         id: coolify_app
@@ -249,7 +265,6 @@ jobs:
           VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64: ${{ secrets.VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64 }}
           VIDEOGEN_SERVICE_AUTH_TOKEN: ${{ secrets.VIDEOGEN_SERVICE_AUTH_TOKEN }}
           BACKEND_ADMIN_IDENTITY: ${{ env.BACKEND_ADMIN_IDENTITY }}
-          VIDEOGEN_UPLOAD_SERVICE_URL: ${{ secrets.VIDEOGEN_UPLOAD_SERVICE_URL }}
           VIDEOGEN_IDENTITY_ENCRYPTION_KEYS: ${{ secrets.VIDEOGEN_IDENTITY_ENCRYPTION_KEYS }}
           VIDEOGEN_IDENTITY_ACTIVE_KEY_ID: ${{ secrets.VIDEOGEN_IDENTITY_ACTIVE_KEY_ID }}
         run: |
@@ -277,7 +292,6 @@ jobs:
             --arg videogen_rabbitmq_tls_ca_cert_pem_b64 "$VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64" \
             --arg videogen_service_auth_token "$VIDEOGEN_SERVICE_AUTH_TOKEN" \
             --arg backend_admin_identity "$BACKEND_ADMIN_IDENTITY" \
-            --arg videogen_upload_service_url "$VIDEOGEN_UPLOAD_SERVICE_URL" \
             --arg videogen_identity_encryption_keys "$VIDEOGEN_IDENTITY_ENCRYPTION_KEYS" \
             --arg videogen_identity_active_key_id "$VIDEOGEN_IDENTITY_ACTIVE_KEY_ID" \
             '{
@@ -305,7 +319,6 @@ jobs:
                 {"key": "VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64", "value": $videogen_rabbitmq_tls_ca_cert_pem_b64, "is_literal": true},
                 {"key": "VIDEOGEN_SERVICE_AUTH_TOKEN", "value": $videogen_service_auth_token, "is_literal": true},
                 {"key": "BACKEND_ADMIN_IDENTITY", "value": $backend_admin_identity, "is_multiline": true},
-                {"key": "VIDEOGEN_UPLOAD_SERVICE_URL", "value": $videogen_upload_service_url, "is_literal": true},
                 {"key": "VIDEOGEN_IDENTITY_ENCRYPTION_KEYS", "value": $videogen_identity_encryption_keys, "is_literal": true},
                 {"key": "VIDEOGEN_IDENTITY_ACTIVE_KEY_ID", "value": $videogen_identity_active_key_id, "is_literal": true}
               ]

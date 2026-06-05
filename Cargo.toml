@@ -68,3 +68,4 @@ yral-canisters-client = { git = "https://github.com/dolr-ai/yral-common.git", br
 yral-types = { git = "https://github.com/dolr-ai/yral-common", branch = "master" }
 stringreader = "0.1.1"
 lapin = { version = "4.2.1", default-features = false, features = ["rustls", "tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

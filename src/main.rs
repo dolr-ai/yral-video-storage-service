@@ -134,6 +134,10 @@ pub(crate) struct AppState {
 struct ApiDoc;
 
 fn main() {
+    // rustls 0.23 requires an explicit process-level CryptoProvider before any TLS usage.
+    // lapin's TLS I/O loop panics without this.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Initialize Sentry
     let _guard = sentry::init((
         "https://9c27a9c734fcc4481e858a089f2c8fee@sentry.prakash.yral.com/7",

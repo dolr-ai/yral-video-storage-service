@@ -411,7 +411,10 @@ pub async fn generate_video(
     generate_with_dependencies(request, &deps, config)
         .await
         .map(Json)
-        .map_err(|error| (error.status, Json(error.error)))
+        .map_err(|error| {
+            tracing::error!(status = %error.status, error = ?error.error, "generate_video failed");
+            (error.status, Json(error.error))
+        })
 }
 
 impl GenerateVideoRequest {
@@ -894,24 +897,28 @@ impl GenerateDeps for RuntimeGenerateDeps {
                 tracing::error!(cause = %error, is_builder = error.is_builder(), is_connect = error.is_connect(), "upload service send failed");
                 UploadDestinationError::Unavailable(error.to_string())
             })?;
-        if !response.status().is_success() {
-            return Err(UploadDestinationError::Unavailable(format!(
-                "upload service returned {}",
-                response.status()
-            )));
-        }
+        let status = response.status();
         let body = response
             .text()
             .await
             .map_err(|error| UploadDestinationError::Unavailable(error.to_string()))?;
+        if !status.is_success() {
+            tracing::error!(status = %status, body = %body, "upload service non-success");
+            return Err(UploadDestinationError::Unavailable(format!(
+                "upload service returned {status}: {body}"
+            )));
+        }
         let response: UploadServiceResponse<UploadServiceData> = serde_json::from_str(&body)
-            .map_err(|error| UploadDestinationError::Unavailable(error.to_string()))?;
+            .map_err(|error| {
+                tracing::error!(body = %body, cause = %error, "upload service response parse failed");
+                UploadDestinationError::Unavailable(error.to_string())
+            })?;
         if !response.success {
-            return Err(UploadDestinationError::Unavailable(
-                response
-                    .error_message
-                    .unwrap_or_else(|| "upload service did not return success".to_string()),
-            ));
+            let msg = response
+                .error_message
+                .unwrap_or_else(|| "upload service did not return success".to_string());
+            tracing::error!(body = %msg, "upload service returned success=false");
+            return Err(UploadDestinationError::Unavailable(msg));
         }
         let data = response.data.ok_or_else(|| {
             UploadDestinationError::Unavailable("upload service response missing data".to_string())
@@ -1093,7 +1100,10 @@ impl RuntimeGenerateDeps {
         RabbitMqPublisher::new(config)
             .publish(request)
             .await
-            .map_err(|e| VastSubmitError::RequestFailed(e.to_string()))
+            .map_err(|e| {
+                tracing::error!(cause = %e, "rabbitmq publish failed");
+                VastSubmitError::RequestFailed(e.to_string())
+            })
     }
 }
 
