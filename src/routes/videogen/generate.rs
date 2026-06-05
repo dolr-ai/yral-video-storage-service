@@ -42,7 +42,6 @@ const LEGACY_UPLOAD_SERVICE_URL_ENV: &str = crate::consts::VIDEOGEN_LEGACY_UPLOA
 const VAST_GENERATE_URL_ENV: &str = "VIDEOGEN_VAST_GENERATE_URL";
 const VAST_API_KEY_ENV: &str = "VAST_API_KEY";
 const VAST_IMAGE_UPLOAD_URL_ENV: &str = "VIDEOGEN_VAST_IMAGE_UPLOAD_URL";
-const LTX_WORKFLOW_JSON_ENV: &str = "VIDEOGEN_LTX_WORKFLOW_JSON";
 
 #[derive(Deserialize, ToSchema)]
 pub struct GenerateVideoRequest {
@@ -255,6 +254,7 @@ pub enum ImageStageError {
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum WorkflowError {
     #[error("unsupported workflow: {0}")]
     Unsupported(String),
