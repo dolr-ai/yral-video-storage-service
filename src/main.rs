@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 use anyhow::Context;
 use axum::{
     extract::{DefaultBodyLimit, Request},
