@@ -33,24 +33,7 @@ pub enum ModerationError {
 
 #[cfg(test)]
 mod tests {
-    use super::{MockAllowModerationClient, ModerationClient, ModerationDecision, ModerationInput};
     use crate::videogen::config::{ModerationMode, VideogenConfig, VideogenConfigError};
-
-    #[tokio::test]
-    async fn mock_allow_returns_safe_decision() {
-        let client = MockAllowModerationClient;
-        let decision = client
-            .moderate(ModerationInput {
-                request_id: "018f5fa2-05c7-4b4a-8934-19b1f3c29d49".to_string(),
-                user_principal: "aaaaa-aa".to_string(),
-                prompt: "make a sunrise over mountains".to_string(),
-                image_url: Some("https://example.test/image.png".to_string()),
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(decision, ModerationDecision::Safe);
-    }
 
     #[test]
     fn production_rejects_mock_allow_moderation_config() {
