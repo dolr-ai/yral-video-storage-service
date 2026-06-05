@@ -299,6 +299,7 @@ jobs:
                 {"key": "ENVIRONMENT", "value": $environment, "is_literal": true},
                 {"key": "PRAKASH_PUBLIC_BASE_URL", "value": $prakash_public_base_url, "is_literal": true},
                 {"key": "VIDEOGEN_VAST_SUBMIT_TRANSPORT", "value": "rabbitmq", "is_literal": true},
+                {"key": "VIDEOGEN_UPLOAD_SERVICE_URL", "value": "https://upload.yral.com", "is_literal": true},
                 {"key": "MODERATION_MODE", "value": "mock_allow", "is_literal": true},
                 {"key": "VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD", "value": $videogen_rabbitmq_publisher_password, "is_literal": true},
                 {"key": "VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64", "value": $videogen_rabbitmq_tls_ca_cert_pem_b64, "is_literal": true},

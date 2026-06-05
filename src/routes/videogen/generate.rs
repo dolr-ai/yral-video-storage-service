@@ -881,6 +881,7 @@ impl GenerateDeps for RuntimeGenerateDeps {
             "publisher_user_id": request.user_principal,
         }))
         .map_err(|error| UploadDestinationError::Unavailable(error.to_string()))?;
+        tracing::info!(url = %url, user = %request.user_principal, "calling upload service");
         let response = self
             .http
             .post(url)
@@ -891,7 +892,10 @@ impl GenerateDeps for RuntimeGenerateDeps {
             .body(body)
             .send()
             .await
-            .map_err(|error| UploadDestinationError::Unavailable(error.to_string()))?;
+            .map_err(|error| {
+                tracing::error!(cause = %error, is_builder = error.is_builder(), is_connect = error.is_connect(), "upload service send failed");
+                UploadDestinationError::Unavailable(error.to_string())
+            })?;
         if !response.status().is_success() {
             return Err(UploadDestinationError::Unavailable(format!(
                 "upload service returned {}",
