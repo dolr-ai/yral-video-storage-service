@@ -111,7 +111,7 @@ jobs:
           echo "preview_url=${PREVIEW_URL}" >> "$GITHUB_OUTPUT"
           echo "service_name=${SERVICE_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Import Coolify Secrets from Vault
+      - name: Import Secrets from Vault
         uses: hashicorp/vault-action@v3
         with:
           url: https://vault.yral.com
@@ -119,10 +119,10 @@ jobs:
           role: yral-video-storage-service-role
           jwtGithubAudience: "https://github.com/dolr-ai"
           secrets: |
-            secret/data/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
-            secret/data/COOLIFY_PROJECT_UUID value | COOLIFY_PROJECT_UUID ;
-            secret/data/COOLIFY_SERVER_UUID value | COOLIFY_SERVER_UUID ;
-            secret/data/COOLIFY_ENV_UUID value | COOLIFY_ENV_UUID ;
+            secret/data/yral-video-storage-service/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
+            secret/data/yral-video-storage-service/COOLIFY_PROJECT_UUID value | COOLIFY_PROJECT_UUID ;
+            secret/data/yral-video-storage-service/COOLIFY_SERVER_UUID value | COOLIFY_SERVER_UUID ;
+            secret/data/yral-video-storage-service/COOLIFY_ENV_UUID value | COOLIFY_ENV_UUID ;
             secret/data/yral-video-storage-service/BACKEND_ADMIN_IDENTITY value | BACKEND_ADMIN_IDENTITY ;
 
       - name: Setup SSH
@@ -413,7 +413,7 @@ jobs:
           role: yral-video-storage-service-role
           jwtGithubAudience: "https://github.com/dolr-ai"
           secrets: |
-            secret/data/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
+            secret/data/yral-video-storage-service/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
 
       - name: Find and Delete Coolify Application
         run: |
