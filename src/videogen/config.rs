@@ -17,6 +17,7 @@ impl ModerationMode {
         }
     }
 
+    #[cfg(test)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Remote => "remote",
@@ -155,6 +156,7 @@ impl VideogenConfig {
         Ok(cfg)
     }
 
+    #[cfg(test)]
     pub fn test_defaults() -> Self {
         Self {
             moderation_timeout_ms: 3000,

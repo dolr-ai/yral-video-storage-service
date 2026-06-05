@@ -31,25 +31,6 @@ pub enum ModerationError {
     RequestFailed(String),
 }
 
-#[async_trait::async_trait]
-pub trait ModerationClient: Send + Sync {
-    async fn moderate(&self, input: ModerationInput)
-        -> Result<ModerationDecision, ModerationError>;
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MockAllowModerationClient;
-
-#[async_trait::async_trait]
-impl ModerationClient for MockAllowModerationClient {
-    async fn moderate(
-        &self,
-        _input: ModerationInput,
-    ) -> Result<ModerationDecision, ModerationError> {
-        Ok(ModerationDecision::Safe)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{MockAllowModerationClient, ModerationClient, ModerationDecision, ModerationInput};

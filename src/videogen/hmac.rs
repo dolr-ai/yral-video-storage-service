@@ -11,12 +11,6 @@ pub struct HmacKey {
     bytes: Vec<u8>,
 }
 
-impl HmacKey {
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-}
-
 impl fmt::Debug for HmacKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HmacKey")
@@ -125,6 +119,7 @@ pub fn body_sha256_hex(raw_body: &[u8]) -> String {
     sha256_hex(raw_body)
 }
 
+#[cfg(test)]
 pub fn sign_completion(
     method: &str,
     path: &str,

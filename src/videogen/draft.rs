@@ -10,6 +10,7 @@ pub struct DraftCreationRequest {
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DraftServiceError {
     #[error("draft service unavailable: {0}")]
     Unavailable(String),

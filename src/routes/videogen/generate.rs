@@ -168,6 +168,7 @@ pub struct GenerateResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum VideoGenError {
     ProviderError(String),
     InvalidInput(String),
@@ -228,7 +229,6 @@ impl fmt::Debug for GenerateRequest {
 #[derive(Debug, Clone)]
 pub struct GenerateConfig {
     pub vast_image_stage_timeout_secs: u64,
-    pub ltx_generation_timeout_secs: u64,
     pub callback_url: String,
     pub upload_url_refresh_url: Option<String>,
 }
@@ -236,8 +236,6 @@ pub struct GenerateConfig {
 #[derive(Debug, Clone)]
 pub struct UploadDestinationRequest {
     pub user_principal: String,
-    pub request_key: RateLimiterRequestKey,
-    pub model_id: String,
 }
 
 pub use crate::videogen::rate_limiter::RateLimiterError;
@@ -462,7 +460,6 @@ impl GenerateConfig {
 
         Self {
             vast_image_stage_timeout_secs: config.vast_image_stage_timeout_secs,
-            ltx_generation_timeout_secs: config.ltx_generation_timeout_secs,
             callback_url: format!("{public_base_url}/api/v2/videogen/complete"),
             upload_url_refresh_url: refresh_enabled
                 .then(|| format!("{public_base_url}/api/v2/videogen/upload-url/refresh")),
@@ -563,8 +560,6 @@ async fn generate_inner<D: GenerateDeps>(
     let upload_destination = match deps
         .reserve_upload_destination(UploadDestinationRequest {
             user_principal: request.user_id.clone(),
-            request_key: request_key.clone(),
-            model_id: request.model_id.clone(),
         })
         .await
     {
@@ -1331,7 +1326,6 @@ mod tests {
     fn config() -> GenerateConfig {
         GenerateConfig {
             vast_image_stage_timeout_secs: 30,
-            ltx_generation_timeout_secs: 1800,
             callback_url: "https://prakash.example.test/api/v2/videogen/complete".to_string(),
             upload_url_refresh_url: Some(
                 "https://prakash.example.test/api/v2/videogen/upload-url/refresh".to_string(),
