@@ -31,7 +31,7 @@ pub const VIDEOGEN_UPLOAD_DESTINATION_RELEASE_URL: &str = "VIDEOGEN_UPLOAD_DESTI
 // Videogen upload service URL env var names
 pub const VIDEOGEN_UPLOAD_SERVICE_URL_ENV: &str = "VIDEOGEN_UPLOAD_SERVICE_URL";
 pub const VIDEOGEN_LEGACY_UPLOAD_SERVICE_URL_ENV: &str = "YRAL_UPLOAD_SERVICE";
-pub const VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL: &str = "https://upload.yral.app";
+pub const VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL: &str = "https://upload.yral.com";
 
 // Storj configuration
 pub static YRAL_VIDEOS: Lazy<String> = Lazy::new(|| {
