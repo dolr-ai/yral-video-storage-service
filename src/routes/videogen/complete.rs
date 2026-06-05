@@ -681,10 +681,12 @@ mod tests {
         async fn release_upload_destination(
             &self,
             _request_key: &RateLimiterRequestKey,
-            _video_id: Option<&str>,
-            _object_key: Option<&str>,
+            video_id: Option<&str>,
+            object_key: Option<&str>,
         ) -> Result<(), String> {
-            self.push(Call::ReleaseUploadDestination);
+            if video_id.is_some() && object_key.is_some() {
+                self.push(Call::ReleaseUploadDestination);
+            }
             Ok(())
         }
 
