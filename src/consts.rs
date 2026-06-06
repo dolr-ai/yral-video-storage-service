@@ -30,6 +30,11 @@ pub const VIDEOGEN_UPLOAD_DESTINATION_RELEASE_URL: &str = "VIDEOGEN_UPLOAD_DESTI
 
 pub const VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL: &str = "https://upload.yral.com";
 
+// Storj public CDN base URL for SFW videos.
+// Full video URL: {STORJ_SFW_SHARE_URL}/{publisher_user_id}/{video_id}.mp4
+pub static STORJ_SFW_SHARE_URL: Lazy<Option<String>> =
+    Lazy::new(|| std::env::var("SFW_SHARE_EU1_URL").ok());
+
 // Storj configuration
 pub static YRAL_VIDEOS: Lazy<String> = Lazy::new(|| {
     const FALLBACK: &str = "yral-videos";

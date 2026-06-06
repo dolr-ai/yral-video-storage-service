@@ -12,6 +12,8 @@ pub struct UploadDestination {
     pub upload_url: String,
     #[serde(serialize_with = "serialize_datetime_utc")]
     pub expires_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bucket_url: Option<String>,
 }
 
 impl fmt::Debug for UploadDestination {
@@ -21,6 +23,7 @@ impl fmt::Debug for UploadDestination {
             .field("object_key", &self.object_key)
             .field("upload_url", &"<redacted>")
             .field("expires_at", &self.expires_at)
+            .field("bucket_url", &self.bucket_url)
             .finish()
     }
 }
@@ -143,6 +146,7 @@ mod tests {
             object_key: "videos/video-1.mp4".to_string(),
             upload_url: "https://upload.example.test/secret-token".to_string(),
             expires_at: "2026-05-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            bucket_url: None,
         };
 
         let debug = format!("{destination:?}");

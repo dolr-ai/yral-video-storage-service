@@ -67,5 +67,9 @@ k256 = { version = "0.13.3", features = ["jwk"] }
 yral-canisters-client = { git = "https://github.com/dolr-ai/yral-common.git", branch = "master", features = ["full"] }
 yral-types = { git = "https://github.com/dolr-ai/yral-common", branch = "master" }
 stringreader = "0.1.1"
-lapin = { version = "4.2.1", default-features = false, features = ["rustls", "tokio"] }
+lapin = { version = "4", default-features = false, features = ["rustls--ring", "tokio"] }
+# Activate tcp-stream's async TLS path (rustls-futures) which lapin's rustls--ring feature omits.
+# Without this, lapin's AMQPS connect falls through to a plain TCP stream and the broker
+# responds to the bare AMQP header with a TLS alert (7 bytes) that parses as Nom(MapOpt).
+tcp-stream = { version = "0.34", default-features = false, features = ["rustls-futures", "rustls--ring", "tokio"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

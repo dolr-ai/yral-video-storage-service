@@ -934,11 +934,15 @@ impl GenerateDeps for RuntimeGenerateDeps {
             )
         })?;
 
+        let bucket_url = crate::consts::STORJ_SFW_SHARE_URL.as_ref().map(|base| {
+            format!("{}/{}/{}.mp4", base, request.user_principal, video_id)
+        });
         Ok(UploadDestination {
             object_key: format!("{video_id}.mp4"),
             upload_url,
             video_id,
             expires_at: Utc::now() + Duration::seconds(self.config.upload_url_ttl_secs as i64),
+            bucket_url,
         })
     }
 
@@ -1416,6 +1420,7 @@ mod tests {
             object_key: "generated/video-17.mp4".to_string(),
             upload_url: "https://upload.example.test/video-17".to_string(),
             expires_at: "2026-05-27T12:00:00Z".parse().unwrap(),
+            bucket_url: Some("https://bucket.example.test/video-17.mp4".to_string()),
         }
     }
 

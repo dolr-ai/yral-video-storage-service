@@ -260,6 +260,7 @@ jobs:
           STORJ_EU1_GATEWAY_ACCESS_KEY: ${{ secrets.STORJ_EU1_GATEWAY_ACCESS_KEY }}
           STORJ_EU1_GATEWAY_SECRET_KEY: ${{ secrets.STORJ_EU1_GATEWAY_SECRET_KEY }}
           STORJ_MIRROR_ACCESS_GRANT: ${{ secrets.STORJ_MIRROR_ACCESS_GRANT }}
+          SFW_SHARE_EU1_URL: ${{ secrets.SFW_SHARE_EU1_URL }}
           ENVIRONMENT: staging
           VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD: ${{ secrets.VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD }}
           VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64: ${{ secrets.VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64 }}
@@ -286,6 +287,7 @@ jobs:
             --arg storj_eu1_gateway_access_key "$STORJ_EU1_GATEWAY_ACCESS_KEY" \
             --arg storj_eu1_gateway_secret_key "$STORJ_EU1_GATEWAY_SECRET_KEY" \
             --arg storj_mirror_access_grant "$STORJ_MIRROR_ACCESS_GRANT" \
+            --arg sfw_share_eu1_url "$SFW_SHARE_EU1_URL" \
             --arg environment "$ENVIRONMENT" \
             --arg prakash_public_base_url "$PREVIEW_URL" \
             --arg videogen_rabbitmq_publisher_password "$VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD" \
@@ -310,6 +312,7 @@ jobs:
                 {"key": "STORJ_EU1_GATEWAY_ACCESS_KEY", "value": $storj_eu1_gateway_access_key, "is_literal": true},
                 {"key": "STORJ_EU1_GATEWAY_SECRET_KEY", "value": $storj_eu1_gateway_secret_key, "is_literal": true},
                 {"key": "STORJ_MIRROR_ACCESS_GRANT", "value": $storj_mirror_access_grant, "is_literal": true},
+                {"key": "SFW_SHARE_EU1_URL", "value": $sfw_share_eu1_url, "is_literal": true},
                 {"key": "ENVIRONMENT", "value": $environment, "is_literal": true},
                 {"key": "PRAKASH_PUBLIC_BASE_URL", "value": $prakash_public_base_url, "is_literal": true},
                 {"key": "VIDEOGEN_VAST_SUBMIT_TRANSPORT", "value": "rabbitmq", "is_literal": true},

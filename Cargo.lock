@@ -57,9 +57,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "amq-protocol"
-version = "10.0.1"
+version = "10.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8032525e9bb1bb8aa556476de729106e972b9fb811e5db21ce462a4f0f057d03"
+checksum = "2eab68e8836c5812a01b34c5364d28db50bf686b442e902d9d93e4472318d86e"
 dependencies = [
  "amq-protocol-tcp",
  "amq-protocol-types",
@@ -71,9 +71,9 @@ dependencies = [
 
 [[package]]
 name = "amq-protocol-tcp"
-version = "10.0.1"
+version = "10.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22f50ebc589843a42a1428b3e1b149164645bfe8c22a7ed0f128ad0af4aaad84"
+checksum = "8689f976dbd9864922f4f53e01ad2b43700ed3eb1bb5667b260522f291434dae"
 dependencies = [
  "amq-protocol-uri",
  "async-rs",
@@ -84,9 +84,9 @@ dependencies = [
 
 [[package]]
 name = "amq-protocol-types"
-version = "10.0.1"
+version = "10.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12ffea0c942eb17ea55262e4cc57b223d8d6f896269b1313153f9215784dc2b8"
+checksum = "27894e9e57d07f701251aeee3d2ab3d7d114bc830bf722d6626027eb55f3b222"
 dependencies = [
  "cookie-factory",
  "nom 8.0.0",
@@ -96,9 +96,9 @@ dependencies = [
 
 [[package]]
 name = "amq-protocol-uri"
-version = "10.0.1"
+version = "10.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa9f65c896cb658503e5547e262132ac356c26bc477afedfd8d3f324f4c5006"
+checksum = "64fd5ca63f1b8cba2309aaec8595483c36f3a671225d5ab9fe8265adb9213514"
 dependencies = [
  "amq-protocol-types",
  "percent-encoding",
@@ -3260,15 +3260,16 @@ dependencies = [
 
 [[package]]
 name = "lapin"
-version = "4.4.0"
+version = "4.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39338badb3f992d800f6964501b056b575bdf142eb288202f973d218fe253b90"
+checksum = "0fd20e01fd92597ca352ca7ceed3c589851ebad279dfcada48aa4d24fd3a7caa"
 dependencies = [
  "amq-protocol",
  "async-rs",
  "async-trait",
  "backon",
  "cfg-if",
+ "event-listener 5.4.1",
  "flume",
  "futures-core",
  "futures-io",
@@ -4800,15 +4801,14 @@ dependencies = [
 
 [[package]]
 name = "rustls-connector"
-version = "0.22.2"
+version = "0.23.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5901d9ade07b5b13f9c03a50988c5e44031d7e1abd812cf17e58ab1f7425222a"
+checksum = "b35fa32523bbf1a739061af1dc422e4c2e77ac78a9937331f9ce15246c5ca2d8"
 dependencies = [
  "futures-io",
  "futures-rustls",
  "log",
  "rustls 0.23.25",
- "rustls-native-certs 0.8.1",
  "rustls-pki-types",
  "rustls-webpki 0.103.0",
 ]
@@ -4834,7 +4834,7 @@ dependencies = [
  "openssl-probe",
  "rustls-pki-types",
  "schannel",
- "security-framework 3.4.0",
+ "security-framework 3.6.0",
 ]
 
 [[package]]
@@ -4918,11 +4918,11 @@ dependencies = [
 
 [[package]]
 name = "schannel"
-version = "0.1.27"
+version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f29ebaa345f945cec9fbbc532eb307f0fdad8161f281b6369539c8d84876b3d"
+checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4996,9 +4996,9 @@ dependencies = [
 
 [[package]]
 name = "security-framework"
-version = "3.4.0"
+version = "3.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60b369d18893388b345804dc0007963c99b7d665ae71d275812d828c6f089640"
+checksum = "d17b898a6d6948c3a8ee4372c17cb384f90d2e6e912ef00895b14fd7ab54ec38"
 dependencies = [
  "bitflags",
  "core-foundation 0.10.1",
@@ -5009,9 +5009,9 @@ dependencies = [
 
 [[package]]
 name = "security-framework-sys"
-version = "2.15.0"
+version = "2.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc1f0cbffaac4852523ce30d8bd3c5cdc873501d96ff467ca09b6767bb8cd5c0"
+checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
 dependencies = [
  "core-foundation-sys",
  "libc",
@@ -5507,6 +5507,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "stringreader",
+ "tcp-stream",
  "tempfile",
  "thiserror 2.0.12",
  "tokio",
@@ -5648,9 +5649,9 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "tcp-stream"
-version = "0.34.3"
+version = "0.34.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff68da304b44cbdfcb3c084ef27d8ddb8bdfba1dab36b1469513c6fe1e1c2b58"
+checksum = "300d0735de48a565461c2ea14cc75b80ee5b6be3b4f5aeabe3553e4c2df8d23d"
 dependencies = [
  "async-rs",
  "cfg-if",

@@ -124,6 +124,7 @@ mod tests {
                 object_key: "videos/video-1.mp4".to_string(),
                 upload_url: "https://upload.example.test/video-1".to_string(),
                 expires_at: "2026-05-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+                bucket_url: Some("https://link.storjshare.io/raw/example/yral-sfw/aaaaa-aa/video-1.mp4".to_string()),
             },
         }
     }
