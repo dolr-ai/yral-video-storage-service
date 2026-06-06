@@ -934,9 +934,9 @@ impl GenerateDeps for RuntimeGenerateDeps {
             )
         })?;
 
-        let bucket_url = crate::consts::STORJ_SFW_SHARE_URL.as_ref().map(|base| {
-            format!("{}/{}/{}.mp4", base, request.user_principal, video_id)
-        });
+        let bucket_url = crate::consts::STORJ_SFW_SHARE_URL
+            .as_ref()
+            .map(|base| format!("{}/{}/{}.mp4", base, request.user_principal, video_id));
         Ok(UploadDestination {
             object_key: format!("{video_id}.mp4"),
             upload_url,

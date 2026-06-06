@@ -25,7 +25,10 @@ fn sample_vast_submit_request() -> VastSubmitRequest {
             object_key: "generated/smoke-test-video-1.mp4".to_string(),
             upload_url: "https://upload.example.test/smoke-test".to_string(),
             expires_at: "2026-05-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
-            bucket_url: Some("https://link.storjshare.io/raw/example/yral-sfw/aaaaa-aa/smoke-test-video-1.mp4".to_string()),
+            bucket_url: Some(
+                "https://link.storjshare.io/raw/example/yral-sfw/aaaaa-aa/smoke-test-video-1.mp4"
+                    .to_string(),
+            ),
         },
     }
 }
