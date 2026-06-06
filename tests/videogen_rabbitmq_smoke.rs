@@ -29,6 +29,7 @@ fn sample_vast_submit_request() -> VastSubmitRequest {
                 "https://link.storjshare.io/raw/example/yral-sfw/aaaaa-aa/smoke-test-video-1.mp4"
                     .to_string(),
             ),
+            encrypted_identity: None,
         },
     }
 }
