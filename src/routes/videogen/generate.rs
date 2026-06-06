@@ -187,6 +187,7 @@ pub struct GenerateRequest {
     pub user_id: String,
     pub identity_principal: String,
     pub upload_handling: VideoUploadHandling,
+    pub delegated_identity_wire: DelegatedIdentityWire,
     pub prompt: String,
     pub model_id: String,
     pub token_type: Option<GenerateTokenType>,
@@ -419,6 +420,7 @@ pub async fn generate_video(
 
 impl GenerateVideoRequest {
     fn try_into_generate_request(self) -> Result<GenerateRequest, GenerateError> {
+        let delegated_identity_wire = self.delegated_identity.clone();
         let identity: DelegatedIdentity = self
             .delegated_identity
             .try_into()
@@ -434,6 +436,7 @@ impl GenerateVideoRequest {
             upload_handling: self.upload_handling.ok_or_else(|| {
                 GenerateError::InvalidInput("upload_handling must be ServerDraft".to_string())
             })?,
+            delegated_identity_wire,
             prompt: self.request.prompt,
             model_id: self.request.model_id,
             token_type: self.request.token_type,
@@ -558,7 +561,7 @@ async fn generate_inner<D: GenerateDeps>(
         }
     };
 
-    let upload_destination = match deps
+    let mut upload_destination = match deps
         .reserve_upload_destination(UploadDestinationRequest {
             user_principal: request.user_id.clone(),
         })
@@ -570,6 +573,21 @@ async fn generate_inner<D: GenerateDeps>(
             return Err(error.into());
         }
     };
+
+    upload_destination.encrypted_identity =
+        match crate::videogen::identity_crypto::IdentityCrypto::from_env() {
+            Ok(crypto) => match crypto.encrypt(&request.delegated_identity_wire) {
+                Ok(blob) => Some(blob),
+                Err(e) => {
+                    tracing::warn!("identity encryption failed: {e} — draft will be skipped");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!("identity crypto not configured: {e} — draft will be skipped");
+                None
+            }
+        };
 
     let request_id = Uuid::new_v4().to_string();
     let vast_request = VastSubmitRequest {
@@ -943,6 +961,7 @@ impl GenerateDeps for RuntimeGenerateDeps {
             video_id,
             expires_at: Utc::now() + Duration::seconds(self.config.upload_url_ttl_secs as i64),
             bucket_url,
+            encrypted_identity: None,
         })
     }
 
@@ -1376,11 +1395,16 @@ mod tests {
         }
     }
 
+    fn dummy_identity_wire() -> DelegatedIdentityWire {
+        serde_json::from_str(r#"{"from_key":[1,2,3],"to_secret":{"crv":"secp256k1","d":"AAECBAUGAAECBAUGAAECBAUGAAECBAUGAAECBAUGAAE=","kty":"EC","x":"AAECBAUGAAECBAUGAAECBAUGAAECBAUGAAECBAUGAAE=","y":"AAECBAUGAAECBAUGAAECBAUGAAECBAUGAAECBAUGAAE="},"delegation_chain":[]}"#).unwrap()
+    }
+
     fn request() -> GenerateRequest {
         GenerateRequest {
             user_id: "aaaaa-aa".to_string(),
             identity_principal: "aaaaa-aa".to_string(),
             upload_handling: VideoUploadHandling::ServerDraft,
+            delegated_identity_wire: dummy_identity_wire(),
             prompt: "make a sunrise over mountains".to_string(),
             model_id: "ltx2".to_string(),
             token_type: None,
@@ -1421,6 +1445,7 @@ mod tests {
             upload_url: "https://upload.example.test/video-17".to_string(),
             expires_at: "2026-05-27T12:00:00Z".parse().unwrap(),
             bucket_url: Some("https://bucket.example.test/video-17.mp4".to_string()),
+            encrypted_identity: None,
         }
     }
 

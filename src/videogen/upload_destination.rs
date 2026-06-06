@@ -14,6 +14,10 @@ pub struct UploadDestination {
     pub expires_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bucket_url: Option<String>,
+    /// AES-256-GCM encrypted `DelegatedIdentityWire` (format: `key_id:base64(nonce||ciphertext)`).
+    /// Absent when encryption is not configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_identity: Option<String>,
 }
 
 impl fmt::Debug for UploadDestination {
@@ -24,6 +28,10 @@ impl fmt::Debug for UploadDestination {
             .field("upload_url", &"<redacted>")
             .field("expires_at", &self.expires_at)
             .field("bucket_url", &self.bucket_url)
+            .field(
+                "encrypted_identity",
+                &self.encrypted_identity.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -147,6 +155,7 @@ mod tests {
             upload_url: "https://upload.example.test/secret-token".to_string(),
             expires_at: "2026-05-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
             bucket_url: None,
+            encrypted_identity: None,
         };
 
         let debug = format!("{destination:?}");

@@ -380,6 +380,7 @@ impl UploadRefreshDeps for RuntimeUploadRefreshDeps {
             upload_url,
             expires_at: Utc::now() + Duration::seconds(self.config.upload_url_ttl_secs as i64),
             bucket_url: None,
+            encrypted_identity: None,
         })
     }
 }
@@ -502,6 +503,7 @@ mod tests {
                 upload_url: "https://upload.example.test/fresh-url".to_string(),
                 expires_at: Utc::now() + chrono::Duration::seconds(3600),
                 bucket_url: None,
+                encrypted_identity: None,
             })
         }
     }

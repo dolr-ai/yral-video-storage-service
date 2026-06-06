@@ -55,6 +55,8 @@ pub struct CompleteVideoRequest {
     pub file_size: Option<u64>,
     pub content_type: Option<String>,
     pub checksum: Option<String>,
+    /// Encrypted delegated identity for draft registration via upload service.
+    pub encrypted_identity: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -207,6 +209,7 @@ async fn handle_success_completion<D: CompletionDeps>(
         user_principal: req.user_principal.clone(),
         video_id: video_id.to_string(),
         object_key: object_key.to_string(),
+        encrypted_identity: req.encrypted_identity.clone(),
     };
     deps.create_draft(draft_req).await.map_err(|e| {
         (
@@ -517,8 +520,8 @@ impl CompletionDeps for RuntimeCompletionDeps {
     }
 
     async fn create_draft(&self, request: DraftCreationRequest) -> Result<(), DraftServiceError> {
-        use crate::videogen::draft::{DraftServiceClient, LoggingDraftServiceClient};
-        LoggingDraftServiceClient.create_draft(request).await
+        use crate::videogen::draft::draft_client_from_env;
+        draft_client_from_env().create_draft(request).await
     }
 }
 

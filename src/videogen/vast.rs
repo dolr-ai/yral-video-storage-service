@@ -128,6 +128,7 @@ mod tests {
                     "https://link.storjshare.io/raw/example/yral-sfw/aaaaa-aa/video-1.mp4"
                         .to_string(),
                 ),
+                encrypted_identity: None,
             },
         }
     }
