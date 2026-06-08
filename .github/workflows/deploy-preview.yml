@@ -199,10 +199,14 @@ jobs:
           fi
           echo "Opening RabbitMQ port 5671 for Coolify IP: ${COOLIFY_IP}"
           for NODE in 94.130.13.115 88.99.151.102 138.201.129.173; do
-            ssh deploy@${NODE} \
-              "sudo iptables -C RABBITMQ-FILTER -p tcp --dport 5671 -s ${COOLIFY_IP} -j ACCEPT 2>/dev/null \
-               || sudo iptables -I RABBITMQ-FILTER 1 -p tcp --dport 5671 -s ${COOLIFY_IP} -j ACCEPT \
-               && echo 'rule ok on ${NODE}'"
+            ssh deploy@${NODE} "
+              sudo iptables -N RABBITMQ-FILTER 2>/dev/null || true
+              sudo iptables -C INPUT -p tcp --dport 5671 -j RABBITMQ-FILTER 2>/dev/null \
+                || sudo iptables -I INPUT 1 -p tcp --dport 5671 -j RABBITMQ-FILTER
+              sudo iptables -C RABBITMQ-FILTER -p tcp --dport 5671 -s ${COOLIFY_IP} -j ACCEPT 2>/dev/null \
+                || sudo iptables -I RABBITMQ-FILTER 1 -p tcp --dport 5671 -s ${COOLIFY_IP} -j ACCEPT
+              echo 'rule ok on ${NODE}'
+            "
           done
 
       - name: Create Coolify Application
