@@ -145,6 +145,15 @@ jobs:
             echo "ERROR: could not determine Coolify server IP — iptables rule will not be added"
             exit 1
           fi
+          # Resolve hostname to IP if the API returned a hostname instead of an IP
+          if ! echo "$COOLIFY_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Coolify API returned hostname '${COOLIFY_IP}', resolving to IP..."
+            COOLIFY_IP=$(getent hosts "$COOLIFY_IP" | awk '{print $1}' | head -n1)
+            if [ -z "$COOLIFY_IP" ]; then
+              echo "ERROR: could not resolve hostname to IP"
+              exit 1
+            fi
+          fi
           echo "Coolify server IP: ${COOLIFY_IP}"
 
           REMOTE_SCRIPT="
@@ -178,6 +187,15 @@ jobs:
           if [ -z "$COOLIFY_IP" ]; then
             echo "ERROR: could not determine Coolify server IP"
             exit 1
+          fi
+          # Resolve hostname to IP if the API returned a hostname instead of an IP
+          if ! echo "$COOLIFY_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Coolify API returned hostname '${COOLIFY_IP}', resolving to IP..."
+            COOLIFY_IP=$(getent hosts "$COOLIFY_IP" | awk '{print $1}' | head -n1)
+            if [ -z "$COOLIFY_IP" ]; then
+              echo "ERROR: could not resolve hostname to IP"
+              exit 1
+            fi
           fi
           echo "Opening RabbitMQ port 5671 for Coolify IP: ${COOLIFY_IP}"
           for NODE in 94.130.13.115 88.99.151.102 138.201.129.173; do
