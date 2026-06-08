@@ -124,6 +124,7 @@ jobs:
             secret/data/yral-video-storage-service/COOLIFY_SERVER_UUID value | COOLIFY_SERVER_UUID ;
             secret/data/yral-video-storage-service/COOLIFY_ENV_UUID value | COOLIFY_ENV_UUID ;
             secret/data/yral-video-storage-service/BACKEND_ADMIN_IDENTITY value | BACKEND_ADMIN_IDENTITY ;
+            secret/data/yral-video-storage-service/INTERNAL_ENCRYPTION_SECRET value | INTERNAL_ENCRYPTION_SECRET ;
 
       - name: Setup SSH
         run: |
@@ -266,8 +267,7 @@ jobs:
           VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64: ${{ secrets.VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64 }}
           VIDEOGEN_SERVICE_AUTH_TOKEN: ${{ secrets.VIDEOGEN_SERVICE_AUTH_TOKEN }}
           BACKEND_ADMIN_IDENTITY: ${{ env.BACKEND_ADMIN_IDENTITY }}
-          VIDEOGEN_IDENTITY_ENCRYPTION_KEYS: ${{ secrets.VIDEOGEN_IDENTITY_ENCRYPTION_KEYS }}
-          VIDEOGEN_IDENTITY_ACTIVE_KEY_ID: ${{ secrets.VIDEOGEN_IDENTITY_ACTIVE_KEY_ID }}
+          INTERNAL_ENCRYPTION_SECRET: ${{ env.INTERNAL_ENCRYPTION_SECRET }}
         run: |
           APP_UUID="${{ steps.coolify_app.outputs.app_uuid }}"
           PREVIEW_URL="${{ steps.meta.outputs.preview_url }}"
@@ -294,8 +294,7 @@ jobs:
             --arg videogen_rabbitmq_tls_ca_cert_pem_b64 "$VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64" \
             --arg videogen_service_auth_token "$VIDEOGEN_SERVICE_AUTH_TOKEN" \
             --arg backend_admin_identity "$BACKEND_ADMIN_IDENTITY" \
-            --arg videogen_identity_encryption_keys "$VIDEOGEN_IDENTITY_ENCRYPTION_KEYS" \
-            --arg videogen_identity_active_key_id "$VIDEOGEN_IDENTITY_ACTIVE_KEY_ID" \
+            --arg internal_encryption_secret "$INTERNAL_ENCRYPTION_SECRET" \
             '{
               "data": [
                 {"key": "DATABASE_URL", "value": $database_url, "is_literal": true},
@@ -322,8 +321,7 @@ jobs:
                 {"key": "VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64", "value": $videogen_rabbitmq_tls_ca_cert_pem_b64, "is_literal": true},
                 {"key": "VIDEOGEN_SERVICE_AUTH_TOKEN", "value": $videogen_service_auth_token, "is_literal": true},
                 {"key": "BACKEND_ADMIN_IDENTITY", "value": $backend_admin_identity, "is_multiline": true},
-                {"key": "VIDEOGEN_IDENTITY_ENCRYPTION_KEYS", "value": $videogen_identity_encryption_keys, "is_literal": true},
-                {"key": "VIDEOGEN_IDENTITY_ACTIVE_KEY_ID", "value": $videogen_identity_active_key_id, "is_literal": true}
+                {"key": "INTERNAL_ENCRYPTION_SECRET", "value": $internal_encryption_secret, "is_literal": true}
               ]
             }')
 
