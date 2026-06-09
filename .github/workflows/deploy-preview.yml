@@ -125,6 +125,7 @@ jobs:
             secret/data/yral-video-storage-service/COOLIFY_ENV_UUID value | COOLIFY_ENV_UUID ;
             secret/data/yral-video-storage-service/BACKEND_ADMIN_IDENTITY value | BACKEND_ADMIN_IDENTITY ;
             secret/data/yral-video-storage-service/INTERNAL_ENCRYPTION_SECRET value | INTERNAL_ENCRYPTION_SECRET ;
+            secret/data/yral-video-storage-service/MODERATION_HMAC_SECRET value | MODERATION_HMAC_SECRET ;
 
       - name: Setup SSH
         run: |
@@ -290,6 +291,7 @@ jobs:
           VIDEOGEN_SERVICE_AUTH_TOKEN: ${{ secrets.VIDEOGEN_SERVICE_AUTH_TOKEN }}
           BACKEND_ADMIN_IDENTITY: ${{ env.BACKEND_ADMIN_IDENTITY }}
           INTERNAL_ENCRYPTION_SECRET: ${{ env.INTERNAL_ENCRYPTION_SECRET }}
+          MODERATION_HMAC_SECRET: ${{ env.MODERATION_HMAC_SECRET }}
         run: |
           APP_UUID="${{ steps.coolify_app.outputs.app_uuid }}"
           PREVIEW_URL="${{ steps.meta.outputs.preview_url }}"
@@ -317,6 +319,7 @@ jobs:
             --arg videogen_service_auth_token "$VIDEOGEN_SERVICE_AUTH_TOKEN" \
             --arg backend_admin_identity "$BACKEND_ADMIN_IDENTITY" \
             --arg internal_encryption_secret "$INTERNAL_ENCRYPTION_SECRET" \
+            --arg moderation_hmac_secret "$MODERATION_HMAC_SECRET" \
             '{
               "data": [
                 {"key": "DATABASE_URL", "value": $database_url, "is_literal": true},
@@ -338,12 +341,13 @@ jobs:
                 {"key": "PRAKASH_PUBLIC_BASE_URL", "value": $prakash_public_base_url, "is_literal": true},
                 {"key": "VIDEOGEN_VAST_SUBMIT_TRANSPORT", "value": "rabbitmq", "is_literal": true},
                 {"key": "VIDEOGEN_UPLOAD_SERVICE_URL", "value": "https://upload.yral.com", "is_literal": true},
-                {"key": "MODERATION_MODE", "value": "mock_allow", "is_literal": true},
+                {"key": "MODERATION_MODE", "value": "remote", "is_literal": true},
                 {"key": "VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD", "value": $videogen_rabbitmq_publisher_password, "is_literal": true},
                 {"key": "VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64", "value": $videogen_rabbitmq_tls_ca_cert_pem_b64, "is_literal": true},
                 {"key": "VIDEOGEN_SERVICE_AUTH_TOKEN", "value": $videogen_service_auth_token, "is_literal": true},
                 {"key": "BACKEND_ADMIN_IDENTITY", "value": $backend_admin_identity, "is_multiline": true},
-                {"key": "INTERNAL_ENCRYPTION_SECRET", "value": $internal_encryption_secret, "is_literal": true}
+                {"key": "INTERNAL_ENCRYPTION_SECRET", "value": $internal_encryption_secret, "is_literal": true},
+                {"key": "MODERATION_HMAC_SECRET", "value": $moderation_hmac_secret, "is_literal": true}
               ]
             }')
 

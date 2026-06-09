@@ -754,58 +754,76 @@ impl GenerateDeps for RuntimeGenerateDeps {
         match self.config.moderation_mode {
             ModerationMode::MockAllow => Ok(ModerationDecision::Safe),
             ModerationMode::Remote => {
-                let url = std::env::var(MODERATION_SERVICE_URL_ENV).map_err(|_| {
+                let image_url = match input.image_url {
+                    Some(ref u) => u.clone(),
+                    None => return Ok(ModerationDecision::Safe),
+                };
+
+                let base_url = std::env::var(MODERATION_SERVICE_URL_ENV).map_err(|_| {
                     ModerationError::RequestFailed(format!(
                         "{MODERATION_SERVICE_URL_ENV} is required"
                     ))
                 })?;
+                let secret = std::env::var(crate::consts::MODERATION_HMAC_SECRET)
+                    .map_err(|_| {
+                        ModerationError::RequestFailed(format!(
+                            "{} is required",
+                            crate::consts::MODERATION_HMAC_SECRET
+                        ))
+                    })?;
+
+                const MODERATION_PATH: &str = "/v1/images/detect-url";
+                let request_body =
+                    serde_json::to_vec(&json!({
+                        "image_url": image_url,
+                        "prompt": input.prompt,
+                    }))
+                    .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
+
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let signature = crate::videogen::hmac::sign_moderation_request(
+                    secret.as_bytes(),
+                    "POST",
+                    MODERATION_PATH,
+                    timestamp,
+                    &request_body,
+                );
+
+                let url = format!("{}{}", base_url.trim_end_matches('/'), MODERATION_PATH);
                 let response = self
                     .http
                     .post(url)
                     .header(CONTENT_TYPE, "application/json")
+                    .header("X-Internal-Timestamp", timestamp.to_string())
+                    .header("X-Internal-Signature", signature)
                     .timeout(std::time::Duration::from_millis(
                         self.config.moderation_timeout_ms,
                     ))
-                    .body(
-                        serde_json::to_vec(&json!({
-                            "request_id": input.request_id,
-                            "user_principal": input.user_principal,
-                            "prompt": input.prompt,
-                            "image_url": input.image_url,
-                        }))
-                        .map_err(|error| ModerationError::RequestFailed(error.to_string()))?,
-                    )
+                    .body(request_body)
                     .send()
                     .await
-                    .map_err(|error| ModerationError::RequestFailed(error.to_string()))?;
+                    .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
+
                 if !response.status().is_success() {
                     return Err(ModerationError::RequestFailed(format!(
-                        "Moderation service returned {}",
+                        "moderation service returned {}",
                         response.status()
                     )));
                 }
-                let body = response
-                    .text()
+
+                let body: Value = response
+                    .json()
                     .await
-                    .map_err(|error| ModerationError::RequestFailed(error.to_string()))
-                    .and_then(|body| {
-                        serde_json::from_str::<Value>(&body)
-                            .map_err(|error| ModerationError::RequestFailed(error.to_string()))
-                    })?;
-                let unsafe_content = body
-                    .get("nsfw")
-                    .and_then(Value::as_bool)
-                    .or_else(|| body.get("unsafe").and_then(Value::as_bool))
-                    .unwrap_or(false);
-                let safe = body
-                    .get("safe")
-                    .and_then(Value::as_bool)
-                    .or_else(|| body.get("is_safe").and_then(Value::as_bool))
-                    .unwrap_or(!unsafe_content);
-                if safe && !unsafe_content {
-                    Ok(ModerationDecision::Safe)
-                } else {
+                    .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
+
+                let is_nsfw = body.get("is_nsfw").and_then(Value::as_bool).unwrap_or(false);
+                if is_nsfw {
                     Ok(ModerationDecision::Unsafe)
+                } else {
+                    Ok(ModerationDecision::Safe)
                 }
             }
         }

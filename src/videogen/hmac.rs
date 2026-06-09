@@ -165,6 +165,18 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// Sign an outgoing moderation request using a bare shared secret.
+///
+/// Message format (matches the receiving service spec):
+/// `{timestamp}\n{METHOD}\n{path}\n{sha256_hex(body)}`
+pub fn sign_moderation_request(secret: &[u8], method: &str, path: &str, timestamp: i64, body: &[u8]) -> String {
+    let body_hash = sha256_hex(body);
+    let message = format!("{timestamp}\n{method}\n{path}\n{body_hash}");
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any non-empty key");
+    mac.update(message.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +277,40 @@ mod tests {
         assert!(debug.contains("v1"));
         assert!(!debug.contains("bytes: ["));
         assert!(!debug.contains("test-auth-token-secret"));
+    }
+
+    #[test]
+    fn moderation_signature_is_deterministic() {
+        let body = br#"{"image_url":"https://cdn.example.test/img.jpg","prompt":"a cat"}"#;
+        let sig1 = sign_moderation_request(b"test-secret", "POST", "/v1/images/detect-url", 1_777_000_000, body);
+        let sig2 = sign_moderation_request(b"test-secret", "POST", "/v1/images/detect-url", 1_777_000_000, body);
+        assert_eq!(sig1, sig2);
+        assert_eq!(sig1.len(), 64); // 32-byte HMAC as hex
+    }
+
+    #[test]
+    fn moderation_signature_changes_with_timestamp() {
+        let body = br#"{"image_url":"https://cdn.example.test/img.jpg"}"#;
+        let sig1 = sign_moderation_request(b"test-secret", "POST", "/v1/images/detect-url", 1_000, body);
+        let sig2 = sign_moderation_request(b"test-secret", "POST", "/v1/images/detect-url", 1_001, body);
+        assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn moderation_signature_message_format_is_timestamp_first() {
+        // Verify the message is `{timestamp}\n{METHOD}\n{path}\n{body_hash}` by
+        // reproducing it manually and checking we get the same signature.
+        use sha2::{Digest, Sha256};
+        let body = b"{}";
+        let timestamp = 1_777_000_000_i64;
+        let body_hash = hex::encode(Sha256::digest(body));
+        let message = format!("{timestamp}\nPOST\n/v1/images/detect-url\n{body_hash}");
+
+        let mut mac = HmacSha256::new_from_slice(b"test-secret").unwrap();
+        mac.update(message.as_bytes());
+        let expected = hex::encode(mac.finalize().into_bytes());
+
+        let got = sign_moderation_request(b"test-secret", "POST", "/v1/images/detect-url", timestamp, body);
+        assert_eq!(got, expected);
     }
 }
