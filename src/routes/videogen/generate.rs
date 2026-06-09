@@ -36,7 +36,6 @@ const VIDEOGEN_PROPERTY: &str = "VIDEOGEN";
 const LTX_PROVIDER: &str = "Ltx2";
 const PUBLIC_BASE_URL_ENV: &str = "PRAKASH_PUBLIC_BASE_URL";
 const UPLOAD_URL_REFRESH_ENABLED_ENV: &str = "VIDEOGEN_UPLOAD_URL_REFRESH_ENABLED";
-const MODERATION_SERVICE_URL_ENV: &str = crate::consts::MODERATION_SERVICE_URL;
 const VAST_GENERATE_URL_ENV: &str = "VIDEOGEN_VAST_GENERATE_URL";
 const VAST_API_KEY_ENV: &str = "VAST_API_KEY";
 
@@ -766,11 +765,7 @@ impl GenerateDeps for RuntimeGenerateDeps {
                     None => return Ok(ModerationDecision::Safe),
                 };
 
-                let base_url = std::env::var(MODERATION_SERVICE_URL_ENV).map_err(|_| {
-                    ModerationError::RequestFailed(format!(
-                        "{MODERATION_SERVICE_URL_ENV} is required"
-                    ))
-                })?;
+                let base_url = crate::consts::MODERATION_SERVICE_URL;
                 let secret =
                     std::env::var(crate::consts::MODERATION_HMAC_SECRET).map_err(|_| {
                         ModerationError::RequestFailed(format!(
