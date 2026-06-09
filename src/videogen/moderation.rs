@@ -1,20 +1,31 @@
 use std::fmt;
 
-#[derive(Clone, PartialEq, Eq)]
+/// What content to moderate.
+/// Note: `detect-base64` endpoint is not yet functional on the service side.
+/// Base64 images must be staged to Storj first and passed as `ImageUrl`.
+pub enum ModerationSubject {
+    TextOnly,
+    ImageUrl(String),
+}
+
 pub struct ModerationInput {
     pub request_id: String,
     pub user_principal: String,
     pub prompt: String,
-    pub image_url: Option<String>,
+    pub subject: ModerationSubject,
 }
 
 impl fmt::Debug for ModerationInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let subject = match &self.subject {
+            ModerationSubject::TextOnly => "text_only",
+            ModerationSubject::ImageUrl(_) => "image_url:<redacted>",
+        };
         f.debug_struct("ModerationInput")
             .field("request_id", &self.request_id)
             .field("user_principal", &self.user_principal)
             .field("prompt", &"<redacted>")
-            .field("image_url", &self.image_url.as_ref().map(|_| "<redacted>"))
+            .field("subject", &subject)
             .finish()
     }
 }

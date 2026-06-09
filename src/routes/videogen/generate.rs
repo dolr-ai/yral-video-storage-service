@@ -21,7 +21,7 @@ use crate::{
     videogen::{
         config::{ModerationMode, VideogenConfig},
         fingerprint::{compute_request_fingerprint, ImageIdentityInput, RequestFingerprintInput},
-        moderation::{ModerationDecision, ModerationError, ModerationInput},
+        moderation::{ModerationDecision, ModerationError, ModerationInput, ModerationSubject},
         rate_limiter::{
             prepare_create_request_options, to_canister_request_key, RateLimiterCreateOptions,
             RateLimiterRequestKey, RateLimiterTokenType,
@@ -336,10 +336,13 @@ impl From<GenerateError> for GenerateHttpError {
                 status: StatusCode::BAD_REQUEST,
                 error: VideoGenError::InvalidInput(message),
             },
-            GenerateError::Moderation(_) => Self {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                error: VideoGenError::NetworkError("Moderation unavailable".to_string()),
-            },
+            GenerateError::Moderation(ref e) => {
+                tracing::error!(error = %e, "moderation check failed");
+                Self {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    error: VideoGenError::NetworkError("Moderation unavailable".to_string()),
+                }
+            }
             GenerateError::RateLimiter(RateLimiterError::Limited(message)) => Self {
                 status: StatusCode::TOO_MANY_REQUESTS,
                 error: VideoGenError::ProviderError(message),
@@ -511,19 +514,61 @@ async fn generate_inner<D: GenerateDeps>(
     let fingerprint = compute_request_fingerprint(&fingerprint_input(&request)?)
         .map_err(|error| GenerateError::InvalidInput(error.to_string()))?;
 
-    let image_reference = request
-        .image
-        .as_ref()
-        .and_then(image_reference_for_moderation);
+    // Base64 images must be staged to Storj before moderation because the
+    // moderation service only supports URL-based image checks (detect-base64
+    // returns 500 server-side). URL images and text-only are moderated directly.
+    let (pre_staged_url, pre_staged_key) = match request.image.as_ref() {
+        Some(ImageSource::Base64(_)) => match deps
+            .stage_image(
+                request.image.clone(),
+                &request.user_id,
+                config.vast_image_stage_timeout_secs,
+            )
+            .await
+        {
+            Ok(Some((url, key))) => (Some(url), key),
+            Ok(None) => (None, None),
+            Err(error) => return Err(error.into()),
+        },
+        _ => (None, None),
+    };
+
+    let moderation_subject = match request.image.as_ref() {
+        None => ModerationSubject::TextOnly,
+        Some(ImageSource::Url(url)) => ModerationSubject::ImageUrl(url.clone()),
+        Some(ImageSource::Base64(_)) => match pre_staged_url.clone() {
+            Some(url) => ModerationSubject::ImageUrl(url),
+            None => ModerationSubject::TextOnly,
+        },
+    };
     let moderation_decision = deps
         .moderate(ModerationInput {
             request_id: fingerprint.request_fingerprint.clone(),
             user_principal: request.user_id.clone(),
             prompt: request.prompt.clone(),
-            image_url: image_reference,
+            subject: moderation_subject,
         })
-        .await?;
+        .await
+        .map_err(|e| {
+            if let Some(key) = pre_staged_key.clone() {
+                let bucket = crate::consts::YRAL_VIDEOS.clone();
+                let access_grant = crate::consts::ACCESS_GRANT_SFW.clone();
+                tokio::spawn(async move {
+                    let _ = crate::jobs::uplink_rm(&format!("sj://{bucket}/{key}"), &access_grant)
+                        .await;
+                });
+            }
+            GenerateError::Moderation(e)
+        })?;
     if moderation_decision == ModerationDecision::Unsafe {
+        if let Some(key) = pre_staged_key {
+            let bucket = crate::consts::YRAL_VIDEOS.clone();
+            let access_grant = crate::consts::ACCESS_GRANT_SFW.clone();
+            tokio::spawn(async move {
+                let _ =
+                    crate::jobs::uplink_rm(&format!("sj://{bucket}/{key}"), &access_grant).await;
+            });
+        }
         return Err(GenerateError::InvalidInput(
             "Content violates safety guidelines".to_string(),
         ));
@@ -539,19 +584,24 @@ async fn generate_inner<D: GenerateDeps>(
     let request_key = deps.create_rate_limit(&request, rate_limit_options).await?;
     let operation_id = operation_id(&request_key);
 
-    let (staged_image_url, staged_image_key) = match deps
-        .stage_image(
-            request.image.clone(),
-            &request.user_id,
-            config.vast_image_stage_timeout_secs,
-        )
-        .await
-    {
-        Ok(Some((url, key))) => (Some(url), key),
-        Ok(None) => (None, None),
-        Err(error) => {
-            fail_after_rate_limit(deps, &request_key, None, "image staging failed").await;
-            return Err(error.into());
+    // For base64 images already staged above; for URL images, stage_image is a no-op passthrough.
+    let (staged_image_url, staged_image_key) = if pre_staged_url.is_some() {
+        (pre_staged_url, pre_staged_key.clone())
+    } else {
+        match deps
+            .stage_image(
+                request.image.clone(),
+                &request.user_id,
+                config.vast_image_stage_timeout_secs,
+            )
+            .await
+        {
+            Ok(Some((url, key))) => (Some(url), key),
+            Ok(None) => (None, None),
+            Err(error) => {
+                fail_after_rate_limit(deps, &request_key, None, "image staging failed").await;
+                return Err(error.into());
+            }
         }
     };
 
@@ -689,15 +739,6 @@ fn fingerprint_input(request: &GenerateRequest) -> Result<RequestFingerprintInpu
     })
 }
 
-fn image_reference_for_moderation(image: &ImageSource) -> Option<String> {
-    match image {
-        ImageSource::Url(url) => Some(url.clone()),
-        ImageSource::Base64(image) => {
-            Some(format!("data:{};base64,{}", image.mime_type, image.data))
-        }
-    }
-}
-
 fn rate_limiter_token_type(token_type: GenerateTokenType) -> RateLimiterTokenType {
     match token_type {
         GenerateTokenType::Free => RateLimiterTokenType::Free,
@@ -757,79 +798,87 @@ impl GenerateDeps for RuntimeGenerateDeps {
         &self,
         input: ModerationInput,
     ) -> Result<ModerationDecision, ModerationError> {
-        match self.config.moderation_mode {
-            ModerationMode::MockAllow => Ok(ModerationDecision::Safe),
-            ModerationMode::Remote => {
-                let image_url = match input.image_url {
-                    Some(ref u) => u.clone(),
-                    None => return Ok(ModerationDecision::Safe),
-                };
+        if self.config.moderation_mode == ModerationMode::MockAllow {
+            return Ok(ModerationDecision::Safe);
+        }
 
-                let base_url = crate::consts::MODERATION_SERVICE_URL;
-                let secret =
-                    std::env::var(crate::consts::MODERATION_HMAC_SECRET).map_err(|_| {
-                        ModerationError::RequestFailed(format!(
-                            "{} is required",
-                            crate::consts::MODERATION_HMAC_SECRET
-                        ))
-                    })?;
+        let secret = std::env::var(crate::consts::MODERATION_HMAC_SECRET).map_err(|_| {
+            ModerationError::RequestFailed(format!(
+                "{} is required",
+                crate::consts::MODERATION_HMAC_SECRET
+            ))
+        })?;
 
-                const MODERATION_PATH: &str = "/v1/images/detect-url";
-                let request_body = serde_json::to_vec(&json!({
-                    "image_url": image_url,
-                    "prompt": input.prompt,
-                }))
-                .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
+        let (path, request_body) = match &input.subject {
+            ModerationSubject::TextOnly => (
+                "/v1/text/detect",
+                serde_json::to_vec(&json!({ "text": input.prompt }))
+                    .map_err(|e| ModerationError::RequestFailed(e.to_string()))?,
+            ),
+            ModerationSubject::ImageUrl(url) => (
+                "/v1/images/detect-url",
+                serde_json::to_vec(&json!({ "image_url": url, "prompt": input.prompt }))
+                    .map_err(|e| ModerationError::RequestFailed(e.to_string()))?,
+            ),
+        };
 
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                let signature = crate::videogen::hmac::sign_moderation_request(
-                    secret.as_bytes(),
-                    "POST",
-                    MODERATION_PATH,
-                    timestamp,
-                    &request_body,
-                );
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let signature = crate::videogen::hmac::sign_moderation_request(
+            secret.as_bytes(),
+            "POST",
+            path,
+            timestamp,
+            &request_body,
+        );
 
-                let url = format!("{}{}", base_url.trim_end_matches('/'), MODERATION_PATH);
-                let response = self
-                    .http
-                    .post(url)
-                    .header(CONTENT_TYPE, "application/json")
-                    .header("X-Internal-Timestamp", timestamp.to_string())
-                    .header("X-Internal-Signature", signature)
-                    .timeout(std::time::Duration::from_millis(
-                        self.config.moderation_timeout_ms,
-                    ))
-                    .body(request_body)
-                    .send()
-                    .await
-                    .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
+        let url = format!(
+            "{}{}",
+            crate::consts::MODERATION_SERVICE_URL.trim_end_matches('/'),
+            path
+        );
+        tracing::debug!(path, "calling moderation service");
+        let response = self
+            .http
+            .post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .header("X-Internal-Timestamp", timestamp.to_string())
+            .header("X-Internal-Signature", signature)
+            .timeout(std::time::Duration::from_millis(
+                self.config.moderation_timeout_ms,
+            ))
+            .body(request_body)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::warn!(path, error = %e, "moderation request failed");
+                ModerationError::RequestFailed(e.to_string())
+            })?;
 
-                if !response.status().is_success() {
-                    return Err(ModerationError::RequestFailed(format!(
-                        "moderation service returned {}",
-                        response.status()
-                    )));
-                }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body_text = response.text().await.unwrap_or_default();
+            tracing::warn!(path, %status, body = %body_text, "moderation service error response");
+            return Err(ModerationError::RequestFailed(format!(
+                "moderation service returned {status}: {body_text}"
+            )));
+        }
 
-                let body: Value = response
-                    .json()
-                    .await
-                    .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
 
-                let is_nsfw = body
-                    .get("is_nsfw")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                if is_nsfw {
-                    Ok(ModerationDecision::Unsafe)
-                } else {
-                    Ok(ModerationDecision::Safe)
-                }
-            }
+        let is_nsfw = body
+            .get("is_nsfw")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if is_nsfw {
+            Ok(ModerationDecision::Unsafe)
+        } else {
+            Ok(ModerationDecision::Safe)
         }
     }
 
@@ -1237,7 +1286,7 @@ fn image_extension(mime_type: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::videogen::{
-        moderation::{ModerationDecision, ModerationError, ModerationInput},
+        moderation::{ModerationDecision, ModerationError, ModerationInput, ModerationSubject},
         rate_limiter::{RateLimiterCreateOptions, RateLimiterRequestKey},
         upload_destination::UploadDestination,
         vast::{VastSubmitAccepted, VastSubmitError, VastSubmitRequest},

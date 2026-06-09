@@ -84,7 +84,7 @@ pub enum VideogenConfigError {
 impl VideogenConfig {
     pub fn from_env() -> Result<Self, VideogenConfigError> {
         let cfg = Self {
-            moderation_timeout_ms: read_u64(consts::MODERATION_TIMEOUT_MS, 3000)?,
+            moderation_timeout_ms: read_u64(consts::MODERATION_TIMEOUT_MS, 10000)?,
             generate_dedupe_window_secs: read_u64(
                 consts::VIDEOGEN_GENERATE_DEDUPE_WINDOW_SECS,
                 120,
