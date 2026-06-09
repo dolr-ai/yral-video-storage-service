@@ -764,8 +764,8 @@ impl GenerateDeps for RuntimeGenerateDeps {
                         "{MODERATION_SERVICE_URL_ENV} is required"
                     ))
                 })?;
-                let secret = std::env::var(crate::consts::MODERATION_HMAC_SECRET)
-                    .map_err(|_| {
+                let secret =
+                    std::env::var(crate::consts::MODERATION_HMAC_SECRET).map_err(|_| {
                         ModerationError::RequestFailed(format!(
                             "{} is required",
                             crate::consts::MODERATION_HMAC_SECRET
@@ -773,12 +773,11 @@ impl GenerateDeps for RuntimeGenerateDeps {
                     })?;
 
                 const MODERATION_PATH: &str = "/v1/images/detect-url";
-                let request_body =
-                    serde_json::to_vec(&json!({
-                        "image_url": image_url,
-                        "prompt": input.prompt,
-                    }))
-                    .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
+                let request_body = serde_json::to_vec(&json!({
+                    "image_url": image_url,
+                    "prompt": input.prompt,
+                }))
+                .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
 
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -819,7 +818,10 @@ impl GenerateDeps for RuntimeGenerateDeps {
                     .await
                     .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
 
-                let is_nsfw = body.get("is_nsfw").and_then(Value::as_bool).unwrap_or(false);
+                let is_nsfw = body
+                    .get("is_nsfw")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 if is_nsfw {
                     Ok(ModerationDecision::Unsafe)
                 } else {

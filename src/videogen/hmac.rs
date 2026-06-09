@@ -169,7 +169,13 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 ///
 /// Message format (matches the receiving service spec):
 /// `{timestamp}\n{METHOD}\n{path}\n{sha256_hex(body)}`
-pub fn sign_moderation_request(secret: &[u8], method: &str, path: &str, timestamp: i64, body: &[u8]) -> String {
+pub fn sign_moderation_request(
+    secret: &[u8],
+    method: &str,
+    path: &str,
+    timestamp: i64,
+    body: &[u8],
+) -> String {
     let body_hash = sha256_hex(body);
     let message = format!("{timestamp}\n{method}\n{path}\n{body_hash}");
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any non-empty key");
@@ -282,8 +288,20 @@ mod tests {
     #[test]
     fn moderation_signature_is_deterministic() {
         let body = br#"{"image_url":"https://cdn.example.test/img.jpg","prompt":"a cat"}"#;
-        let sig1 = sign_moderation_request(b"test-secret", "POST", "/v1/images/detect-url", 1_777_000_000, body);
-        let sig2 = sign_moderation_request(b"test-secret", "POST", "/v1/images/detect-url", 1_777_000_000, body);
+        let sig1 = sign_moderation_request(
+            b"test-secret",
+            "POST",
+            "/v1/images/detect-url",
+            1_777_000_000,
+            body,
+        );
+        let sig2 = sign_moderation_request(
+            b"test-secret",
+            "POST",
+            "/v1/images/detect-url",
+            1_777_000_000,
+            body,
+        );
         assert_eq!(sig1, sig2);
         assert_eq!(sig1.len(), 64); // 32-byte HMAC as hex
     }
@@ -291,8 +309,10 @@ mod tests {
     #[test]
     fn moderation_signature_changes_with_timestamp() {
         let body = br#"{"image_url":"https://cdn.example.test/img.jpg"}"#;
-        let sig1 = sign_moderation_request(b"test-secret", "POST", "/v1/images/detect-url", 1_000, body);
-        let sig2 = sign_moderation_request(b"test-secret", "POST", "/v1/images/detect-url", 1_001, body);
+        let sig1 =
+            sign_moderation_request(b"test-secret", "POST", "/v1/images/detect-url", 1_000, body);
+        let sig2 =
+            sign_moderation_request(b"test-secret", "POST", "/v1/images/detect-url", 1_001, body);
         assert_ne!(sig1, sig2);
     }
 
@@ -310,7 +330,13 @@ mod tests {
         mac.update(message.as_bytes());
         let expected = hex::encode(mac.finalize().into_bytes());
 
-        let got = sign_moderation_request(b"test-secret", "POST", "/v1/images/detect-url", timestamp, body);
+        let got = sign_moderation_request(
+            b"test-secret",
+            "POST",
+            "/v1/images/detect-url",
+            timestamp,
+            body,
+        );
         assert_eq!(got, expected);
     }
 }
