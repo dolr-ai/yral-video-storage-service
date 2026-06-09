@@ -552,7 +552,7 @@ async fn generate_inner<D: GenerateDeps>(
         .map_err(|e| {
             if let Some(key) = pre_staged_key.clone() {
                 let bucket = crate::consts::YRAL_VIDEOS.clone();
-                let access_grant = crate::consts::ACCESS_GRANT_SFW.clone();
+                let access_grant = crate::consts::MIRROR_ACCESS_GRANT.clone();
                 tokio::spawn(async move {
                     let _ = crate::jobs::uplink_rm(&format!("sj://{bucket}/{key}"), &access_grant)
                         .await;
@@ -563,7 +563,7 @@ async fn generate_inner<D: GenerateDeps>(
     if moderation_decision == ModerationDecision::Unsafe {
         if let Some(key) = pre_staged_key {
             let bucket = crate::consts::YRAL_VIDEOS.clone();
-            let access_grant = crate::consts::ACCESS_GRANT_SFW.clone();
+            let access_grant = crate::consts::MIRROR_ACCESS_GRANT.clone();
             tokio::spawn(async move {
                 let _ =
                     crate::jobs::uplink_rm(&format!("sj://{bucket}/{key}"), &access_grant).await;
@@ -1079,7 +1079,7 @@ impl GenerateDeps for RuntimeGenerateDeps {
                     })?
                     .trim_end_matches('/');
                 let bucket = crate::consts::YRAL_VIDEOS.as_str();
-                let access_grant = crate::consts::ACCESS_GRANT_SFW.as_str();
+                let access_grant = crate::consts::MIRROR_ACCESS_GRANT.as_str();
 
                 let extension = image_extension(&image.mime_type);
                 let key = format!("_input/{}/{}.{}", user_principal, Uuid::new_v4(), extension);

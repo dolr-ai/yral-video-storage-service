@@ -172,7 +172,7 @@ pub async fn complete_with_dependencies<D: CompletionDeps>(
 
     if let Some(key) = req.staged_image_key {
         let bucket = crate::consts::YRAL_VIDEOS.clone();
-        let access_grant = crate::consts::ACCESS_GRANT_SFW.clone();
+        let access_grant = crate::consts::MIRROR_ACCESS_GRANT.clone();
         tokio::spawn(async move {
             let storj_url = format!("sj://{bucket}/{key}");
             if let Err(e) = crate::jobs::uplink_rm(&storj_url, &access_grant).await {
