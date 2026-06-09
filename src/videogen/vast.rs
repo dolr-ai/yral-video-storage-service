@@ -18,6 +18,11 @@ pub struct VastSubmitRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upload_url_refresh_url: Option<String>,
     pub upload_destination: UploadDestination,
+    /// Storj object key of the staged input image (`_input/{user}/{uuid}.ext`).
+    /// Present only for image-to-video requests; used by the completion handler
+    /// to delete the temporary file after the job finishes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staged_image_key: Option<String>,
 }
 
 impl fmt::Debug for VastSubmitRequest {
@@ -119,6 +124,7 @@ mod tests {
             upload_url_refresh_url: Some(
                 "https://prakash.example/api/v2/videogen/upload-url/refresh".to_string(),
             ),
+            staged_image_key: None,
             upload_destination: UploadDestination {
                 video_id: "video-1".to_string(),
                 object_key: "videos/video-1.mp4".to_string(),

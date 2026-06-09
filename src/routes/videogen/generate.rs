@@ -39,7 +39,6 @@ const UPLOAD_URL_REFRESH_ENABLED_ENV: &str = "VIDEOGEN_UPLOAD_URL_REFRESH_ENABLE
 const MODERATION_SERVICE_URL_ENV: &str = crate::consts::MODERATION_SERVICE_URL;
 const VAST_GENERATE_URL_ENV: &str = "VIDEOGEN_VAST_GENERATE_URL";
 const VAST_API_KEY_ENV: &str = "VAST_API_KEY";
-const VAST_IMAGE_UPLOAD_URL_ENV: &str = "VIDEOGEN_VAST_IMAGE_UPLOAD_URL";
 
 #[derive(Deserialize, ToSchema)]
 pub struct GenerateVideoRequest {
@@ -289,11 +288,13 @@ pub trait GenerateDeps: Send + Sync {
         request_key: &RateLimiterRequestKey,
         destination: &UploadDestination,
     ) -> Result<(), UploadDestinationError>;
+    /// Returns `(cdn_url, storj_key)` for base64 images, `(url, None)` for URL images.
     async fn stage_image(
         &self,
         image: Option<ImageSource>,
+        user_principal: &str,
         timeout_secs: u64,
-    ) -> Result<Option<String>, ImageStageError>;
+    ) -> Result<Option<(String, Option<String>)>, ImageStageError>;
     async fn workflow_json(
         &self,
         request: &GenerateRequest,
@@ -539,11 +540,16 @@ async fn generate_inner<D: GenerateDeps>(
     let request_key = deps.create_rate_limit(&request, rate_limit_options).await?;
     let operation_id = operation_id(&request_key);
 
-    let staged_image_url = match deps
-        .stage_image(request.image.clone(), config.vast_image_stage_timeout_secs)
+    let (staged_image_url, staged_image_key) = match deps
+        .stage_image(
+            request.image.clone(),
+            &request.user_id,
+            config.vast_image_stage_timeout_secs,
+        )
         .await
     {
-        Ok(url) => url,
+        Ok(Some((url, key))) => (Some(url), key),
+        Ok(None) => (None, None),
         Err(error) => {
             fail_after_rate_limit(deps, &request_key, None, "image staging failed").await;
             return Err(error.into());
@@ -600,6 +606,7 @@ async fn generate_inner<D: GenerateDeps>(
         callback_url: config.callback_url,
         upload_url_refresh_url: config.upload_url_refresh_url,
         upload_destination: upload_destination.clone(),
+        staged_image_key,
     };
 
     match deps.submit_vast(vast_request).await {
@@ -1006,58 +1013,47 @@ impl GenerateDeps for RuntimeGenerateDeps {
     async fn stage_image(
         &self,
         image: Option<ImageSource>,
+        user_principal: &str,
         timeout_secs: u64,
-    ) -> Result<Option<String>, ImageStageError> {
+    ) -> Result<Option<(String, Option<String>)>, ImageStageError> {
         match image {
             None => Ok(None),
-            Some(ImageSource::Url(url)) => Ok(Some(url)),
+            Some(ImageSource::Url(url)) => Ok(Some((url, None))),
             Some(ImageSource::Base64(image)) => {
                 let bytes = STANDARD
                     .decode(image.data.as_bytes())
                     .map_err(|error| ImageStageError::Failed(error.to_string()))?;
-                let upload_url = std::env::var(VAST_IMAGE_UPLOAD_URL_ENV).map_err(|_| {
-                    ImageStageError::Failed(format!("{VAST_IMAGE_UPLOAD_URL_ENV} is required"))
-                })?;
+
+                let cdn_base = crate::consts::STORJ_SFW_SHARE_URL
+                    .as_deref()
+                    .ok_or_else(|| {
+                        ImageStageError::Failed("SFW_SHARE_EU1_URL is required".to_string())
+                    })?
+                    .trim_end_matches('/');
+                let bucket = crate::consts::YRAL_VIDEOS.as_str();
+                let access_grant = crate::consts::ACCESS_GRANT_SFW.as_str();
+
                 let extension = image_extension(&image.mime_type);
-                let filename = format!("{}.{}", Uuid::new_v4(), extension);
-                let part = reqwest::multipart::Part::bytes(bytes)
-                    .file_name(filename)
-                    .mime_str(&image.mime_type)
-                    .map_err(|error| ImageStageError::Failed(error.to_string()))?;
-                let form = reqwest::multipart::Form::new()
-                    .part("image", part)
-                    .text("overwrite", "true");
-                let response = self
-                    .http
-                    .post(upload_url)
-                    .multipart(form)
-                    .timeout(std::time::Duration::from_secs(timeout_secs))
-                    .send()
+                let key = format!("_input/{}/{}.{}", user_principal, Uuid::new_v4(), extension);
+
+                let tmp = tempfile::Builder::new()
+                    .suffix(&format!(".{extension}"))
+                    .tempfile()
+                    .map_err(|e| ImageStageError::Failed(e.to_string()))?;
+                tokio::fs::write(tmp.path(), &bytes)
                     .await
-                    .map_err(|error| {
-                        if error.is_timeout() {
-                            ImageStageError::Timeout
-                        } else {
-                            ImageStageError::Failed(error.to_string())
-                        }
-                    })?;
-                if !response.status().is_success() {
-                    return Err(ImageStageError::Failed(format!(
-                        "Vast image upload returned {}",
-                        response.status()
-                    )));
-                }
-                let body = response
-                    .text()
-                    .await
-                    .map_err(|error| ImageStageError::Failed(error.to_string()))?;
-                let response: ImageStageResponse = serde_json::from_str(&body)
-                    .map_err(|error| ImageStageError::Failed(error.to_string()))?;
-                response.reference().map(Some).ok_or_else(|| {
-                    ImageStageError::Failed(
-                        "Vast image upload response missing image reference".to_string(),
-                    )
-                })
+                    .map_err(|e| ImageStageError::Failed(e.to_string()))?;
+
+                let dst = format!("sj://{bucket}/{key}");
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(timeout_secs),
+                    crate::jobs::uplink_cp(tmp.path(), &dst, access_grant),
+                )
+                .await
+                .map_err(|_| ImageStageError::Timeout)?
+                .map_err(|e| ImageStageError::Failed(e.to_string()))?;
+
+                Ok(Some((format!("{cdn_base}/{key}"), Some(key))))
             }
         }
     }
@@ -1170,19 +1166,6 @@ struct UploadServiceData {
     upload_url: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct ImageStageResponse {
-    name: Option<String>,
-    image_url: Option<String>,
-    url: Option<String>,
-}
-
-impl ImageStageResponse {
-    fn reference(self) -> Option<String> {
-        self.image_url.or(self.url).or(self.name)
-    }
-}
-
 /// Build the LTX-2.3 two-pass ComfyUI workflow. Ported from off-chain-agent.
 /// Pass 1: half-res (640x360) with euler_ancestral_cfg_pp.
 /// Pass 2: upscale 2x then refine with euler_cfg_pp.
@@ -1286,7 +1269,7 @@ mod tests {
         calls: Arc<Mutex<Vec<Call>>>,
         moderation: Option<ModerationDecision>,
         rate_limit: Option<Result<RateLimiterRequestKey, RateLimiterError>>,
-        stage_image: Option<Result<Option<String>, ImageStageError>>,
+        stage_image: Option<Result<Option<(String, Option<String>)>, ImageStageError>>,
         vast: Option<Result<VastSubmitAccepted, String>>,
     }
 
@@ -1362,13 +1345,15 @@ mod tests {
         async fn stage_image(
             &self,
             _image: Option<ImageSource>,
+            _user_principal: &str,
             _timeout_secs: u64,
-        ) -> Result<Option<String>, ImageStageError> {
+        ) -> Result<Option<(String, Option<String>)>, ImageStageError> {
             self.push(Call::StageImage);
             self.stage_image.clone().unwrap_or_else(|| {
-                Ok(Some(
+                Ok(Some((
                     "https://vast.example.test/staged/input-image.png".to_string(),
-                ))
+                    None,
+                )))
             })
         }
 
@@ -1633,9 +1618,12 @@ mod tests {
             async fn stage_image(
                 &self,
                 image: Option<ImageSource>,
+                user_principal: &str,
                 timeout_secs: u64,
-            ) -> Result<Option<String>, ImageStageError> {
-                self.0.stage_image(image, timeout_secs).await
+            ) -> Result<Option<(String, Option<String>)>, ImageStageError> {
+                self.0
+                    .stage_image(image, user_principal, timeout_secs)
+                    .await
             }
 
             async fn workflow_json(

@@ -57,6 +57,8 @@ pub struct CompleteVideoRequest {
     pub checksum: Option<String>,
     /// Encrypted delegated identity for draft registration via upload service.
     pub encrypted_identity: Option<String>,
+    /// Storj key of the staged input image to delete after job completes.
+    pub staged_image_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -163,10 +165,23 @@ pub async fn complete_with_dependencies<D: CompletionDeps>(
         ));
     }
 
-    match req.status {
+    let result = match req.status {
         CompletionStatus::Success => handle_success_completion(deps, &req, &request_key).await,
         CompletionStatus::Failure => handle_failure_completion(deps, &req, &request_key).await,
+    };
+
+    if let Some(key) = req.staged_image_key {
+        let bucket = crate::consts::YRAL_VIDEOS.clone();
+        let access_grant = crate::consts::ACCESS_GRANT_SFW.clone();
+        tokio::spawn(async move {
+            let storj_url = format!("sj://{bucket}/{key}");
+            if let Err(e) = crate::jobs::uplink_rm(&storj_url, &access_grant).await {
+                tracing::warn!(key = %key, "failed to delete staged image: {e}");
+            }
+        });
     }
+
+    result
 }
 
 async fn handle_success_completion<D: CompletionDeps>(
