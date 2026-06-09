@@ -7,6 +7,7 @@ use storj_interface::videogen::vast::VastSubmitRequest;
 
 fn sample_vast_submit_request() -> VastSubmitRequest {
     VastSubmitRequest {
+        staged_image_key: None,
         request_id: "018f5fa2-05c7-4b4a-8934-19b1f3c29d49".to_string(),
         request_key: RateLimiterRequestKey {
             principal: "aaaaa-aa".to_string(),
