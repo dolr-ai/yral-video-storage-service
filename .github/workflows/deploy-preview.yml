@@ -273,7 +273,7 @@ jobs:
         env:
           STORJ_ACCESS_GRANT_SFW: ${{ secrets.STORJ_ACCESS_GRANT }}
           STORJ_ACCESS_GRANT_NSFW: ${{ secrets.STORJ_ACCESS_GRANT_NSFW }}
-          SFW_BUCKET: yral-videos
+          SFW_BUCKET: yral-sfw
           NSFW_BUCKET: yral-nsfw-videos
           SERVICE_SECRET_TOKEN: ${{ secrets.SERVICE_SECRET_TOKEN }}
           HETZNER_S3_ENDPOINT: ${{ secrets.HETZNER_S3_ENDPOINT }}

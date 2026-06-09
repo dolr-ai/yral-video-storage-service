@@ -839,7 +839,11 @@ impl GenerateDeps for RuntimeGenerateDeps {
             crate::consts::MODERATION_SERVICE_URL.trim_end_matches('/'),
             path
         );
-        tracing::debug!(path, "calling moderation service");
+        let subject_url = match &input.subject {
+            ModerationSubject::ImageUrl(u) => Some(u.as_str()),
+            _ => None,
+        };
+        tracing::debug!(path, subject_url, "calling moderation service");
         let response = self
             .http
             .post(url)
@@ -853,14 +857,14 @@ impl GenerateDeps for RuntimeGenerateDeps {
             .send()
             .await
             .map_err(|e| {
-                tracing::warn!(path, error = %e, "moderation request failed");
+                tracing::warn!(path, subject_url, error = %e, "moderation request failed");
                 ModerationError::RequestFailed(e.to_string())
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body_text = response.text().await.unwrap_or_default();
-            tracing::warn!(path, %status, body = %body_text, "moderation service error response");
+            tracing::warn!(path, subject_url, %status, body = %body_text, "moderation service error response");
             return Err(ModerationError::RequestFailed(format!(
                 "moderation service returned {status}: {body_text}"
             )));

@@ -38,7 +38,7 @@ pub static STORJ_SFW_SHARE_URL: Lazy<Option<String>> =
 
 // Storj configuration
 pub static YRAL_VIDEOS: Lazy<String> = Lazy::new(|| {
-    const FALLBACK: &str = "yral-videos";
+    const FALLBACK: &str = "yral-sfw";
     std::env::var("SFW_BUCKET")
         .inspect_err(|err| tracing::warn!("Using fallback for SFW_BUCKET because {err}"))
         .unwrap_or_else(|_| FALLBACK.into())
