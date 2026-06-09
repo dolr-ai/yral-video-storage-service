@@ -236,6 +236,7 @@ mod tests {
                 ),
                 encrypted_identity: None,
             },
+            staged_image_key: None,
         }
     }
 
