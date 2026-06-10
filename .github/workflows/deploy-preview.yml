@@ -269,6 +269,16 @@ jobs:
 
           echo "app_uuid=${APP_UUID}" >> "$GITHUB_OUTPUT"
 
+      - name: Validate Required Secrets
+        env:
+          VIDEOGEN_SERVICE_AUTH_TOKEN: ${{ secrets.VIDEOGEN_SERVICE_AUTH_TOKEN }}
+        run: |
+          if [ -z "$VIDEOGEN_SERVICE_AUTH_TOKEN" ]; then
+            echo "ERROR: VIDEOGEN_SERVICE_AUTH_TOKEN secret is not set in GitHub repo secrets."
+            echo "Add it under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
       - name: Push Environment Variables
         env:
           STORJ_ACCESS_GRANT_SFW: ${{ secrets.STORJ_ACCESS_GRANT }}
