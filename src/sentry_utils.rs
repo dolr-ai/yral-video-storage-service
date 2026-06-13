@@ -1,7 +1,7 @@
 use axum::{
     body::{Body, Bytes},
     extract::Request,
-    http::{Method, StatusCode, header},
+    http::{header, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -251,12 +251,7 @@ fn add_lightweight_breadcrumb(method: &Method, path: &str, status: u16, duration
     });
 }
 
-fn add_request_breadcrumb(
-    method: &Method,
-    path: &str,
-    query: Option<&str>,
-    body: Option<&str>,
-) {
+fn add_request_breadcrumb(method: &Method, path: &str, query: Option<&str>, body: Option<&str>) {
     let mut data = BTreeMap::new();
     data.insert("method".to_string(), method.to_string().into());
     data.insert("path".to_string(), path.to_string().into());
