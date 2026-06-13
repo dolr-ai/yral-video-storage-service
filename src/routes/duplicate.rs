@@ -388,6 +388,7 @@ pub async fn handler(
         metadata,
     }): Json<Args>,
 ) -> Result<impl IntoResponse, Error> {
+    crate::sentry_utils::set_sentry_user(&publisher_user_id, None);
     let s3_client = &state.s3_client;
     let source = format!(
         "https://customer-2p3jflss4r4hmpnz.cloudflarestream.com/{video_id}/downloads/default.mp4",

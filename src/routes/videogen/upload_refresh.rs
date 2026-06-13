@@ -120,6 +120,8 @@ pub async fn refresh_with_dependencies<D: UploadRefreshDeps>(
         )
     })?;
 
+    crate::sentry_utils::set_sentry_user(&req.user_principal, Some(&req.request_id));
+
     let request_key = RateLimiterRequestKey::from(&req.request_key);
 
     // Step 3: validate principal matches request_key.principal

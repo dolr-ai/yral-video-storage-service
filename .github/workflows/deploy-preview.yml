@@ -323,7 +323,7 @@ jobs:
             --arg storj_mirror_access_grant "$STORJ_MIRROR_ACCESS_GRANT" \
             --arg sfw_share_eu1_url "$SFW_SHARE_EU1_URL" \
             --arg environment "$ENVIRONMENT" \
-            --arg prakash_public_base_url "$PREVIEW_URL" \
+            --arg public_base_url "$PREVIEW_URL" \
             --arg videogen_rabbitmq_publisher_password "$VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD" \
             --arg videogen_rabbitmq_tls_ca_cert_pem_b64 "$VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64" \
             --arg videogen_service_auth_token "$VIDEOGEN_SERVICE_AUTH_TOKEN" \
@@ -348,7 +348,7 @@ jobs:
                 {"key": "STORJ_MIRROR_ACCESS_GRANT", "value": $storj_mirror_access_grant, "is_literal": true},
                 {"key": "SFW_SHARE_EU1_URL", "value": $sfw_share_eu1_url, "is_literal": true},
                 {"key": "ENVIRONMENT", "value": $environment, "is_literal": true},
-                {"key": "PRAKASH_PUBLIC_BASE_URL", "value": $prakash_public_base_url, "is_literal": true},
+                {"key": "PUBLIC_BASE_URL", "value": $public_base_url, "is_literal": true},
                 {"key": "VIDEOGEN_VAST_SUBMIT_TRANSPORT", "value": "rabbitmq", "is_literal": true},
                 {"key": "VIDEOGEN_UPLOAD_SERVICE_URL", "value": "https://upload.yral.com", "is_literal": true},
                 {"key": "MODERATION_MODE", "value": "remote", "is_literal": true},
