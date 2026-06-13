@@ -107,7 +107,7 @@ pub async fn sentry_request_logger(
     let duration = start.elapsed();
 
     if status.as_u16() >= 400 {
-        let req_body_str = request_body_bytes.as_ref().and_then(|b| parse_and_scrub(b));
+        let req_body_str = request_body_bytes.as_ref().and_then(parse_and_scrub);
 
         let resp_content_type = response
             .headers()
@@ -130,7 +130,7 @@ pub async fn sentry_request_logger(
             (response, None)
         };
 
-        let resp_body_str = resp_body_bytes.as_ref().and_then(|b| parse_and_scrub(b));
+        let resp_body_str = resp_body_bytes.as_ref().and_then(parse_and_scrub);
 
         add_request_breadcrumb(&method, &path, query.as_deref(), req_body_str.as_deref());
         add_response_breadcrumb(
