@@ -1,7 +1,7 @@
 use axum::{
     body::{Body, Bytes},
     extract::Request,
-    http::StatusCode,
+    http::{Method, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -69,7 +69,7 @@ pub async fn sentry_request_logger(
 
     let content_type = req
         .headers()
-        .get(http::header::CONTENT_TYPE)
+        .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
@@ -111,7 +111,7 @@ pub async fn sentry_request_logger(
 
         let resp_content_type = response
             .headers()
-            .get(http::header::CONTENT_TYPE)
+            .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
 
@@ -236,7 +236,7 @@ fn scrub_json(value: &mut serde_json::Value) {
 
 // ─── Breadcrumbs ─────────────────────────────────────────────────────────────
 
-fn add_lightweight_breadcrumb(method: &http::Method, path: &str, status: u16, duration_ms: u64) {
+fn add_lightweight_breadcrumb(method: &Method, path: &str, status: u16, duration_ms: u64) {
     let mut data = BTreeMap::new();
     data.insert("method".to_string(), method.to_string().into());
     data.insert("status_code".to_string(), (status as i64).into());
@@ -252,7 +252,7 @@ fn add_lightweight_breadcrumb(method: &http::Method, path: &str, status: u16, du
 }
 
 fn add_request_breadcrumb(
-    method: &http::Method,
+    method: &Method,
     path: &str,
     query: Option<&str>,
     body: Option<&str>,
