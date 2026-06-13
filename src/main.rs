@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 use anyhow::Context;
 use axum::{
     extract::{DefaultBodyLimit, Request},
@@ -12,7 +13,7 @@ use consts::{
     HETZNER_S3_ENDPOINT, HETZNER_S3_REGION, HETZNER_S3_SECRET_KEY, SERVICE_SECRET_TOKEN,
     YRAL_VIDEOS,
 };
-use ic_agent::Agent;
+use ic_agent::{identity::Secp256k1Identity, Agent};
 use once_cell::sync::Lazy;
 use reqwest::{header::AUTHORIZATION, StatusCode};
 use sentry_tower::{NewSentryLayer, SentryHttpLayer};
@@ -34,6 +35,7 @@ mod s3_client;
 pub(crate) mod sentry_utils;
 mod storj_s3_client;
 mod thumbnail;
+mod videogen;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -75,7 +77,12 @@ pub(crate) struct AppState {
         routes::mirror::status,
         routes::mirror::get_config,
         routes::mirror::update_config,
-        routes::videogen::get_in_progress_drafts,
+        routes::videogen::drafts::get_in_progress_drafts,
+        routes::videogen::generate::generate_video,
+        routes::videogen::providers::get_providers,
+        routes::videogen::providers::get_providers_all,
+        routes::videogen::complete::complete_video,
+        routes::videogen::upload_refresh::refresh_upload_url,
         // routes::videogen::get_in_progress_by_principal,
         // routes::videogen::get_all_status_by_principal,
     ),
@@ -97,6 +104,24 @@ pub(crate) struct AppState {
         routes::videogen::InProgressDraftsRequest,
         routes::videogen::InProgressDraftItem,
         routes::videogen::InProgressDraftsResponse,
+        routes::videogen::GenerateVideoRequest,
+        routes::videogen::GenerateVideoRequestBody,
+        routes::videogen::GenerateResponse,
+        routes::videogen::GenerateTokenType,
+        routes::videogen::ImageInput,
+        routes::videogen::ImageSource,
+        routes::videogen::VideoGenError,
+        routes::videogen::VideoUploadHandling,
+        routes::videogen::ProvidersResponse,
+        routes::videogen::ProviderItem,
+        routes::videogen::ProviderCost,
+        routes::videogen::CompleteVideoRequest,
+        routes::videogen::CompletionStatus,
+        routes::videogen::CompletionError,
+        routes::videogen::CompletionRequestKey,
+        routes::videogen::UploadRefreshRequest,
+        routes::videogen::UploadRefreshResponse,
+        routes::videogen::RefreshError,
         // routes::videogen::AllStatusItem,
         // routes::videogen::AllStatusResponse,
     )),
@@ -109,6 +134,8 @@ pub(crate) struct AppState {
 struct ApiDoc;
 
 fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Initialize Sentry
     let _guard = sentry::init((
         "https://9c27a9c734fcc4481e858a089f2c8fee@sentry.prakash.yral.com/7",
@@ -192,10 +219,16 @@ async fn run_server() -> anyhow::Result<()> {
     drop(db_client); // jobs create their own connections
 
     let storj_client = storj_s3_client::StorjS3Client::new().await;
-    let ic_agent = Agent::builder()
-        .with_url(consts::IC_URL.as_str())
-        .build()
-        .context("Failed to build IC agent")?;
+    let ic_agent = {
+        let mut builder = Agent::builder().with_url(consts::IC_URL.as_str());
+        if let Ok(pem) = std::env::var("BACKEND_ADMIN_IDENTITY") {
+            let identity =
+                Secp256k1Identity::from_pem(stringreader::StringReader::new(pem.as_str()))
+                    .context("Failed to parse BACKEND_ADMIN_IDENTITY")?;
+            builder = builder.with_identity(identity);
+        }
+        builder.build().context("Failed to build IC agent")?
+    };
     let cancel = CancellationToken::new();
     let job_cancel = CancellationToken::new();
 
@@ -339,6 +372,24 @@ async fn run_server() -> anyhow::Result<()> {
             "/api/v2/videogen/drafts/in-progress",
             post(routes::videogen::get_in_progress_drafts).with_state(app_state.clone()),
         )
+        .route(
+            "/api/v2/videogen/generate",
+            post(routes::videogen::generate_video)
+                .with_state(app_state.clone())
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+        )
+        .route(
+            "/api/v2/videogen/complete",
+            post(routes::videogen::complete_video)
+                .with_state(app_state.clone())
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/api/v2/videogen/upload-url/refresh",
+            post(routes::videogen::refresh_upload_url)
+                .with_state(app_state.clone())
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         // .route(
         //     "/api/v2/videogen/in-progress/{principal}",
         //     get(routes::videogen::get_in_progress_by_principal).with_state(app_state.clone()),
@@ -347,6 +398,14 @@ async fn run_server() -> anyhow::Result<()> {
         //     "/api/v2/videogen/status/{principal}/all",
         //     get(routes::videogen::get_all_status_by_principal).with_state(app_state.clone()),
         // )
+        .route(
+            "/api/v2/videogen/providers",
+            get(routes::videogen::get_providers),
+        )
+        .route(
+            "/api/v2/videogen/providers-all",
+            get(routes::videogen::get_providers_all),
+        )
         .route("/health", get(health))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(middleware::from_fn(sentry_utils::sentry_request_logger))

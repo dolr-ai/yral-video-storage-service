@@ -33,6 +33,28 @@ pub fn thumb_key_from_mp4_key(key: &str) -> Option<String> {
         .map(|stem| format!("{stem}-thumbnail.png"))
 }
 
+/// Delete an object from Storj via uplink CLI.
+pub async fn uplink_rm(storj_url: &str, access_grant: &str) -> Result<()> {
+    let output = Command::new("uplink")
+        .args([
+            "rm",
+            "--interactive=false",
+            "--analytics=false",
+            "--access",
+            access_grant,
+            storj_url,
+        ])
+        .output()
+        .await
+        .context("failed to spawn uplink")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("uplink rm {storj_url} failed: {stderr}");
+    }
+    Ok(())
+}
+
 /// Upload a local file to Storj via uplink CLI.
 pub async fn uplink_cp(src: &Path, dst: &str, access_grant: &str) -> Result<()> {
     let output = Command::new("uplink")

@@ -1,7 +1,9 @@
+#![recursion_limit = "256"]
 pub mod consts;
 pub mod db;
 pub mod jobs;
 pub mod storj_s3_client;
+pub mod videogen;
 pub mod duplicate {
     use std::collections::BTreeMap;
 

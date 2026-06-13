@@ -16,9 +16,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.97"
+async-trait = "0.1"
 aws-config = { version = "1.5", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1.64"
 axum = { version = "0.8.1", features = ["multipart"] }
+base64 = "0.22"
 bytes = "1.8"
 chrono = "0.4"
 futures = "0.3"
@@ -26,7 +28,7 @@ futures-util = "0.3.31"
 http-body-util = "0.1"
 once_cell = "1.21.1"
 # using rustls-tls because we wanna cross-compile to musl, otherwise openssl becomes a pain
-reqwest = { version = "0.12.15", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12.15", default-features = false, features = ["rustls-tls", "stream", "multipart"] }
 sentry = { version = "0.42.0", default-features = false, features = [
     "rustls",
     "anyhow",
@@ -41,12 +43,13 @@ sentry-tracing = "0.42.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 phash = { path = "crates/phash" }
+rand = "0.8"
 tempfile = "3"
-tokio-postgres = "0.7.15"
+tokio-postgres = { version = "0.7.15", features = ["with-chrono-0_4", "with-serde_json-1"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 thiserror = "2.0.12"
 tower = "0.5"
-tokio = { version = "1.43.0", features = ["full"] }
+tokio = { version = "1.52.0", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -54,6 +57,8 @@ tower-http = { version = "0.6", features = ["cors"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+aes-gcm = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
 utoipa = { version = "5.3.1", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 # IC / canister deps
@@ -63,3 +68,9 @@ k256 = { version = "0.13.3", features = ["jwk"] }
 yral-canisters-client = { git = "https://github.com/dolr-ai/yral-common.git", branch = "master", features = ["full"] }
 yral-types = { git = "https://github.com/dolr-ai/yral-common", branch = "master" }
 stringreader = "0.1.1"
+lapin = { version = "4", default-features = false, features = ["rustls--ring", "tokio"] }
+# Activate tcp-stream's async TLS path (rustls-futures) which lapin's rustls--ring feature omits.
+# Without this, lapin's AMQPS connect falls through to a plain TCP stream and the broker
+# responds to the bare AMQP header with a TLS alert (7 bytes) that parses as Nom(MapOpt).
+tcp-stream = { version = "0.34", default-features = false, features = ["rustls-futures", "rustls--ring", "tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

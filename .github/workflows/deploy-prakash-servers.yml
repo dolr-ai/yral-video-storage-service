@@ -93,6 +93,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      id-token: write
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       POSTGRES_SUPERUSER_PASSWORD: ${{ secrets.POSTGRES_SUPERUSER_PASSWORD }}
@@ -110,6 +111,10 @@ jobs:
       STORJ_EU1_GATEWAY_ACCESS_KEY: ${{ secrets.STORJ_EU1_GATEWAY_ACCESS_KEY }}
       STORJ_EU1_GATEWAY_SECRET_KEY: ${{ secrets.STORJ_EU1_GATEWAY_SECRET_KEY }}
       STORJ_MIRROR_ACCESS_GRANT: ${{ secrets.STORJ_MIRROR_ACCESS_GRANT }}
+      SFW_SHARE_EU1_URL: ${{ secrets.SFW_SHARE_EU1_URL }}
+      VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD: ${{ secrets.VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD }}
+      VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64: ${{ secrets.VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64 }}
+      VIDEOGEN_SERVICE_AUTH_TOKEN: ${{ secrets.VIDEOGEN_SERVICE_AUTH_TOKEN }}
 
     steps:
       - name: Checkout repository
@@ -120,6 +125,18 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY_PRAKASH }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+
+      - name: Import Secrets from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: https://vault.yral.com
+          method: jwt
+          role: yral-video-storage-service-role
+          jwtGithubAudience: "https://github.com/dolr-ai"
+          secrets: |
+            secret/data/yral-video-storage-service/BACKEND_ADMIN_IDENTITY value | BACKEND_ADMIN_IDENTITY ;
+            secret/data/yral-video-storage-service/INTERNAL_ENCRYPTION_SECRET value | INTERNAL_ENCRYPTION_SECRET ;
+            secret/data/yral-video-storage-service/MODERATION_HMAC_SECRET value | MODERATION_HMAC_SECRET ;
 
       - name: Deploy HA to all nodes
         run: |
@@ -150,7 +167,21 @@ jobs:
                 export SERVICE_SECRET_TOKEN='${SERVICE_SECRET_TOKEN}'; \
                 export STORJ_EU1_GATEWAY_ACCESS_KEY='${STORJ_EU1_GATEWAY_ACCESS_KEY}'; \
                 export STORJ_EU1_GATEWAY_SECRET_KEY='${STORJ_EU1_GATEWAY_SECRET_KEY}'; \
-                export STORJ_MIRROR_ACCESS_GRANT='${STORJ_MIRROR_ACCESS_GRANT}';"
+                export STORJ_MIRROR_ACCESS_GRANT='${STORJ_MIRROR_ACCESS_GRANT}'; \
+                export SFW_BUCKET='yral-sfw'; \
+                export NSFW_BUCKET='yral-nsfw-videos'; \
+                export SFW_SHARE_EU1_URL='${SFW_SHARE_EU1_URL}'; \
+                export VIDEOGEN_VAST_SUBMIT_TRANSPORT='rabbitmq'; \
+                export VIDEOGEN_UPLOAD_SERVICE_URL='https://upload.yral.com'; \
+                export MODERATION_MODE='remote'; \
+                export VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD='${VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD}'; \
+                export VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64='${VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64}'; \
+                export VIDEOGEN_SERVICE_AUTH_TOKEN='${VIDEOGEN_SERVICE_AUTH_TOKEN}'; \
+                export BACKEND_ADMIN_IDENTITY='${BACKEND_ADMIN_IDENTITY}'; \
+                export INTERNAL_ENCRYPTION_SECRET='${INTERNAL_ENCRYPTION_SECRET}'; \
+                export MODERATION_HMAC_SECRET='${MODERATION_HMAC_SECRET}'; \
+                export PRAKASH_PUBLIC_BASE_URL='https://storage-interface.prakash.yral.com'; \
+                export ENVIRONMENT='production';"
             fi
 
             ssh "deploy@${NODE_IP}" \

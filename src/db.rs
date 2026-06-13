@@ -59,6 +59,7 @@ DROP TRIGGER IF EXISTS mirror_jobs_updated_at ON mirror_jobs;
 CREATE TRIGGER mirror_jobs_updated_at
     BEFORE UPDATE ON mirror_jobs
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
 ";
 
 pub struct VideoRow {
