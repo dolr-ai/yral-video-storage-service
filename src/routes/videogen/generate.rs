@@ -34,7 +34,7 @@ use crate::{
 
 const VIDEOGEN_PROPERTY: &str = "VIDEOGEN";
 const LTX_PROVIDER: &str = "Ltx2";
-const PUBLIC_BASE_URL_ENV: &str = "PRAKASH_PUBLIC_BASE_URL";
+const PUBLIC_BASE_URL_ENV: &str = "PUBLIC_BASE_URL";
 const UPLOAD_URL_REFRESH_ENABLED_ENV: &str = "VIDEOGEN_UPLOAD_URL_REFRESH_ENABLED";
 const VAST_GENERATE_URL_ENV: &str = "VIDEOGEN_VAST_GENERATE_URL";
 const VAST_API_KEY_ENV: &str = "VAST_API_KEY";
@@ -401,6 +401,8 @@ pub async fn generate_video(
         }
     };
 
+    crate::sentry_utils::set_sentry_user(&request.user_id, None);
+
     let videogen_config = VideogenConfig::from_env().map_err(|error| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -458,7 +460,7 @@ impl GenerateVideoRequest {
 impl GenerateConfig {
     fn from_runtime_config(config: &VideogenConfig) -> Self {
         let public_base_url = std::env::var(PUBLIC_BASE_URL_ENV)
-            .unwrap_or_else(|_| "http://localhost:3000".to_string())
+            .unwrap_or_else(|_| "https://storage-interface.prakash.yral.com".to_string())
             .trim_end_matches('/')
             .to_string();
         let refresh_enabled = std::env::var(UPLOAD_URL_REFRESH_ENABLED_ENV)

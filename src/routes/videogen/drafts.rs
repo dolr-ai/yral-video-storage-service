@@ -80,6 +80,8 @@ pub async fn get_in_progress_drafts(
     let claimed_principal = candid::Principal::from_str(&request.user_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid user_id: {e}")))?;
 
+    crate::sentry_utils::set_sentry_user(&request.user_id, None);
+
     if identity_principal != claimed_principal {
         return Err((
             StatusCode::UNAUTHORIZED,

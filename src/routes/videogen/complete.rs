@@ -153,6 +153,8 @@ pub async fn complete_with_dependencies<D: CompletionDeps>(
         )
     })?;
 
+    crate::sentry_utils::set_sentry_user(&req.user_principal, Some(&req.request_id));
+
     let request_key = RateLimiterRequestKey::from(&req.request_key);
 
     // Step 3: validate principal matches request_key.principal

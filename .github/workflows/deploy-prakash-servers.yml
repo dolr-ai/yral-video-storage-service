@@ -180,7 +180,7 @@ jobs:
                 export BACKEND_ADMIN_IDENTITY='${BACKEND_ADMIN_IDENTITY}'; \
                 export INTERNAL_ENCRYPTION_SECRET='${INTERNAL_ENCRYPTION_SECRET}'; \
                 export MODERATION_HMAC_SECRET='${MODERATION_HMAC_SECRET}'; \
-                export PRAKASH_PUBLIC_BASE_URL='https://storage-interface.prakash.yral.com'; \
+                export PUBLIC_BASE_URL='https://storage-interface.prakash.yral.com'; \
                 export ENVIRONMENT='production';"
             fi
 

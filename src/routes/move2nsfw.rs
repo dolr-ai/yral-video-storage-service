@@ -59,6 +59,7 @@ pub async fn handler(
     State(state): State<AppState>,
     Json(request): Json<Args>,
 ) -> Result<impl IntoResponse, Error> {
+    crate::sentry_utils::set_sentry_user(&request.publisher_user_id, None);
     let s3_client = &state.s3_client;
     // Download video from S3 (SFW storage)
     let s3_video_key = format!("{}/{}.mp4", request.publisher_user_id, request.video_id);
