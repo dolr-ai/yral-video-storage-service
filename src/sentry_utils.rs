@@ -84,17 +84,24 @@ pub async fn sentry_request_logger(
         }
     });
 
-    let should_capture = should_capture_body(content_type.as_deref());
+    let content_length: Option<usize> = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok());
+
+    // Only buffer if content-type is capturable AND body fits within capture limit.
+    // Skip for large bodies (e.g. base64 images in videogen requests) to avoid consuming
+    // the body stream before route-level DefaultBodyLimit overrides take effect.
+    let should_capture = should_capture_body(content_type.as_deref())
+        && content_length.map_or(false, |len| len <= BODY_CAPTURE_LIMIT);
 
     let (req, request_body_bytes) = if should_capture {
         match buffer_request_body(req).await {
             Ok(result) => result,
             Err(e) => {
                 tracing::warn!("sentry: failed to buffer request body: {e}");
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "failed to process request".to_string(),
-                ));
+                (req, None)
             }
         }
     } else {
@@ -115,7 +122,16 @@ pub async fn sentry_request_logger(
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
 
-        let (response, resp_body_bytes) = if should_capture_body(resp_content_type.as_deref()) {
+        let resp_content_length: Option<usize> = response
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok());
+
+        let should_capture_resp = should_capture_body(resp_content_type.as_deref())
+            && resp_content_length.map_or(false, |len| len <= BODY_CAPTURE_LIMIT);
+
+        let (response, resp_body_bytes) = if should_capture_resp {
             match buffer_response_body(response).await {
                 Ok(r) => r,
                 Err(e) => {
