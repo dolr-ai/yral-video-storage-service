@@ -869,12 +869,16 @@ impl GenerateDeps for RuntimeGenerateDeps {
                     path,
                     subject_url,
                     error = %e,
+                    is_timeout = e.is_timeout(),
+                    is_connect = e.is_connect(),
                     error_code = "MOD_TRANSPORT_ERROR",
                     "moderation request failed [MOD_TRANSPORT_ERROR]: network error calling NSFW API"
                 );
                 sentry::configure_scope(|scope| {
                     scope.set_extra("moderation.path", path.into());
                     scope.set_extra("moderation.error_code", "MOD_TRANSPORT_ERROR".into());
+                    scope.set_extra("moderation.is_timeout", e.is_timeout().into());
+                    scope.set_extra("moderation.is_connect", e.is_connect().into());
                     if let Some(url) = subject_url {
                         scope.set_extra("moderation.subject_url", url.into());
                     }
