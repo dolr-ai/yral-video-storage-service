@@ -337,10 +337,16 @@ impl From<GenerateError> for GenerateHttpError {
                 error: VideoGenError::InvalidInput(message),
             },
             GenerateError::Moderation(ref e) => {
-                tracing::error!(error = %e, "moderation check failed");
+                tracing::error!(
+                    error = %e,
+                    error_code = "MOD_REQUEST_FAILED",
+                    "moderation service request failed [MOD_REQUEST_FAILED]: NSFW API unreachable or returned error"
+                );
                 Self {
                     status: StatusCode::SERVICE_UNAVAILABLE,
-                    error: VideoGenError::NetworkError("Moderation unavailable".to_string()),
+                    error: VideoGenError::NetworkError(
+                        "MOD_REQUEST_FAILED: Moderation service unavailable".to_string(),
+                    ),
                 }
             }
             GenerateError::RateLimiter(RateLimiterError::Limited(message)) => Self {
@@ -859,14 +865,43 @@ impl GenerateDeps for RuntimeGenerateDeps {
             .send()
             .await
             .map_err(|e| {
-                tracing::warn!(path, subject_url, error = %e, "moderation request failed");
+                tracing::warn!(
+                    path,
+                    subject_url,
+                    error = %e,
+                    error_code = "MOD_TRANSPORT_ERROR",
+                    "moderation request failed [MOD_TRANSPORT_ERROR]: network error calling NSFW API"
+                );
+                sentry::configure_scope(|scope| {
+                    scope.set_extra("moderation.path", path.into());
+                    scope.set_extra("moderation.error_code", "MOD_TRANSPORT_ERROR".into());
+                    if let Some(url) = subject_url {
+                        scope.set_extra("moderation.subject_url", url.into());
+                    }
+                });
                 ModerationError::RequestFailed(e.to_string())
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body_text = response.text().await.unwrap_or_default();
-            tracing::warn!(path, subject_url, %status, body = %body_text, "moderation service error response");
+            tracing::warn!(
+                path,
+                subject_url,
+                %status,
+                body = %body_text,
+                error_code = "MOD_SERVICE_ERROR",
+                "moderation service error response [MOD_SERVICE_ERROR]: NSFW API returned non-2xx"
+            );
+            sentry::configure_scope(|scope| {
+                scope.set_extra("moderation.path", path.into());
+                scope.set_extra("moderation.http_status", status.as_u16().into());
+                scope.set_extra("moderation.response_body", body_text.clone().into());
+                scope.set_extra("moderation.error_code", "MOD_SERVICE_ERROR".into());
+                if let Some(url) = subject_url {
+                    scope.set_extra("moderation.subject_url", url.into());
+                }
+            });
             return Err(ModerationError::RequestFailed(format!(
                 "moderation service returned {status}: {body_text}"
             )));
