@@ -101,7 +101,10 @@ pub async fn sentry_request_logger(
             Ok(result) => result,
             Err(e) => {
                 tracing::warn!("sentry: failed to buffer request body: {e}");
-                (req, None)
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to process request".to_string(),
+                ));
             }
         }
     } else {
