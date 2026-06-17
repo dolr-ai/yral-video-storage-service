@@ -30,6 +30,7 @@ use utoipa_swagger_ui::SwaggerUi;
 pub(crate) mod consts;
 mod db;
 mod jobs;
+mod media_index;
 mod routes;
 mod s3_client;
 pub(crate) mod sentry_utils;
@@ -216,6 +217,9 @@ async fn run_server() -> anyhow::Result<()> {
     db::init_schema(&db_client)
         .await
         .context("Failed to init DB schema")?;
+    media_index::init_schema(&db_client)
+        .await
+        .context("Failed to init media index schema")?;
     drop(db_client); // jobs create their own connections
 
     let storj_client = storj_s3_client::StorjS3Client::new().await;

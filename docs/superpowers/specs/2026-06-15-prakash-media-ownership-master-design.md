@@ -114,12 +114,21 @@ The repo already has pHash-related infrastructure:
 - `src/db.rs` has `video_index` and `mirror_jobs`.
 - `src/routes/mirror.rs` exposes mirror audit, pHash backfill, and duplicate pHash endpoints.
 
-Important mismatch: the prior Storj mirror design says `crates/phash` should be ported verbatim from off-chain and produce a 640-character binary string. The current local crate is not byte-compatible for two reasons:
+`video_index.phash` is legacy mirror compatibility storage, not the new canonical pHash table. During the transition it may carry both old local hashes and new off-chain-compatible hashes, so every value must be interpreted with its version columns:
+
+- legacy mirror rows: `phash_kind = 'phash'`, `phash_version = 'legacy_hex_8x8_v0'`;
+- new off-chain-compatible rows: `phash_kind = 'phash'`, `phash_version = 'offchain_binary_10x8_v1'`.
+
+Duplicate grouping against `video_index` must use `(phash_kind, phash_version, phash)`. Long-term media identity must move to `servable_video_hashes`; do not treat `video_index.phash` as source of truth for the ownership migration.
+
+As of the current foundation branch, `crates/phash` contains the off-chain-compatible `offchain_binary_10x8_v1` implementation. The old timestamp-seek/hex behavior remains only as legacy mirror compatibility where explicitly versioned; it must not be treated as the canonical pHash implementation.
+
+The compatibility port was required because the prior local implementation had two independent incompatibilities:
 
 - **Format gap:** local returns concatenated hex hashes, while off-chain returns a 640-character binary string.
 - **Frame-selection gap:** local seeks by timestamp and hashes the first decoded frame after each seek, while off-chain sequentially decodes and selects frames by frame index, then cyclically fills short videos. Even if local changed hex to binary, it would still hash different frames for many videos.
 
-The migration must copy off-chain's pHash source behavior verbatim before refactoring. Reimplementing a cleaner pHash algorithm first would break exact-match cache compatibility and legacy pHash comparisons.
+The migration must preserve off-chain's pHash source behavior before refactoring. Reimplementing a cleaner pHash algorithm first would break exact-match cache compatibility and legacy pHash comparisons.
 
 ### In Off-Chain
 
@@ -204,6 +213,8 @@ Postgres in this service should be the operational source of truth. BigQuery is 
 Kvrocks and Milvus should be treated as downstream systems, not sources of truth for media identity. Kvrocks currently stores `offchain:*` materialized records and is being moved under `ansuman-*` ownership in [#2045](https://github.com/dolr-ai/yral/issues/2045). Milvus hosting for personalization is covered by [#2023](https://github.com/dolr-ai/yral/issues/2023), but personalization embeddings are a separate vector space from pHash duplicate-detection vectors. This service should expose the durable media/hash feed that downstream duplicate-detection consumers can consume if DS keeps pHash in Milvus.
 
 The master index should support exact pHash duplicate queries directly in Postgres through indexed pHash columns. Redis/Kvrocks exact-match caches may exist downstream for performance, but they must be rebuildable from this service's source-of-truth data.
+
+The canonical pHash table for the migration is `servable_video_hashes`, not the existing mirror `video_index.phash` column. The mirror column can remain as an operational bridge while old mirror jobs still exist, but canonical media identity, downstream feeds, and exact duplicate lookup should read/write the versioned rows in `servable_video_hashes`.
 
 ### Downstream Feed Contract
 
@@ -352,7 +363,7 @@ Recommended initial values:
 - `hash_version = 'offchain_binary_10x8_v1'` for compatibility with off-chain's 640-bit binary pHash
 - `input_media_version = 'current_stored_object_v1'` until canonical re-encoding is defined
 
-If the current hex-producing local implementation is retained for mirror-only audit, store it as a separate version such as `local_hex_10x8_v0`. Do not mix it with off-chain binary hashes.
+Existing `video_index.phash` rows produced by the legacy mirror implementation must be tagged with `phash_kind = 'phash'` and `phash_version = 'legacy_hex_8x8_v0'`. Keep those rows out of canonical exact-duplicate comparisons with `offchain_binary_10x8_v1`.
 
 ### `media_feed_events`
 
@@ -382,6 +393,16 @@ CREATE INDEX idx_media_feed_events_video
 Events must be appended in the same database transaction as the source write. Consumers should treat the feed as at-least-once, use `cursor` as the replay/event id, and use `(video_id, hash_kind, hash_version, input_media_version)` as the materialized record key.
 
 For v1 implementation, the same transaction must acquire a single outbox serialization lock before inserting into `media_feed_events`. In Postgres this can be a transaction-scoped advisory lock with a stable key reserved for media feed appends. The lock is held only around the source write plus outbox insert transaction, not around video download or pHash computation.
+
+Repository helpers for feed-visible writes should be transaction-first. A caller that inserts or updates `all_servable_videos_on_yral` or `servable_video_hashes` must be able to perform the source write and append the feed event through the same transaction without duplicating SQL. Raw `&Client` write helpers are acceptable only for non-feed setup or tests; the production path should use `&Transaction` helpers or eventful wrappers.
+
+Media and hash upserts must return whether the row was inserted, materially changed, or unchanged. Media upserts must also report whether a new source-evidence row was inserted so imports can account for newly discovered sources even when the canonical media row is unchanged. Feed events are emitted for inserted/materially changed canonical rows only. Recomputing the same hash and metadata must not advance `computed_at` or produce a duplicate `hash_upserted` event.
+
+Master-index upserts must define merge semantics for sparse imports. A source row that lacks optional storage or metadata should not erase a previously discovered non-null canonical value unless the caller explicitly marks the field as cleared, deleted, or superseded. This keeps legacy imports, storage scans, upload callbacks, and videogen callbacks from clobbering each other while the index is still accumulating evidence.
+
+Feed readers must not silently coerce unknown `event_kind` values into a known kind. Unknown event kinds should either fail parsing or be returned as an unknown/raw variant so consumers do not misclassify feed data.
+
+Schema initialization must be safe for rolling deploys with multiple service instances starting at once. Trigger/function setup for `media_feed_events` should be serialized with a stable schema-init advisory lock or moved to a real migration runner before production deployment. While this branch is pre-deploy, the additive startup schema should still include `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` guards for first-slice tables so partially initialized local or staging databases can recover.
 
 ### `media_job_runs`
 
@@ -480,6 +501,7 @@ The first slice should include only the pieces needed to move pHash ownership sa
 
 - copy off-chain pHash behavior verbatim into `crates/phash`;
 - add golden compatibility tests and deterministic fixture tests;
+- version transitional mirror pHash storage so old local hashes and new off-chain-compatible hashes are never mixed;
 - store pHash in Postgres with `hash_version` and `input_media_version`;
 - create the basic master servable-video index;
 - create `media_feed_events` for monotonic downstream replay;
@@ -550,7 +572,7 @@ These remain outside this program unless ownership changes explicitly:
 - Copy off-chain `phash.rs` behavior verbatim into `crates/phash` as the `offchain_binary_10x8_v1` compatibility implementation.
 - Preserve sequential frame decode, frame-index selection, cyclic fill, 640-character binary formatting, and metadata extraction.
 - Add only the API wrapper needed by this repo after golden tests lock the copied behavior.
-- Preserve the current mirror job behavior only if it is given an explicit hash version.
+- Preserve the current mirror job behavior only if it is given an explicit hash version. Existing local mirror hashes must be tagged as `legacy_hex_8x8_v0`; new off-chain-compatible rows must be tagged as `offchain_binary_10x8_v1`.
 - Add golden tests and fixture-based determinism tests.
 - Do not add Milvus vector-packing or near-duplicate helpers to this service's production API; those belong with the DS-owned Milvus ingestion path if it remains in use.
 - Keep any hamming-distance or vector-packing code test-only unless Phase 5 explicitly needs it for sampled parity checks.
@@ -810,20 +832,23 @@ Ticket [#2104](https://github.com/dolr-ai/yral/issues/2104) should be treated as
 | Before Phase 4 live compute | Golden pHash tests passing and legacy compatibility decision documented |
 | Before Phase 5 migration | Exact duplicate behavior compared against off-chain for sampled videos |
 | Before Phase 6 cleanup | Master index coverage report shows no unknown references |
+| Before production deployment | Deployment image pHash parity checklist completed from `docs/superpowers/plans/2026-06-17-phash-deployment-todo.md` |
+| Before enabling pHash outside local development or running production backfill | Deployment-image tests, FFmpeg/libav version capture, off-chain sample comparison, and transitional `video_index` column verification from `docs/superpowers/plans/2026-06-17-phash-deployment-todo.md` completed |
 | Before Phase 8 off-chain removal | No callers, queues, or jobs still target off-chain pHash |
 
 ---
 
-## First Execution Slice
+Deployment validation is a final enablement gate. It must not block the next implementation slice that creates canonical media-index storage.
 
-The first implementation plan should be small and prove the foundation:
+## Next Execution Slice
 
-1. Add pHash contract tests that expect a 640-character binary pHash.
-2. Copy off-chain `phash.rs` behavior verbatim into `crates/phash` and wrap it as `offchain_binary_10x8_v1`.
-3. Add metadata extraction tests.
-4. Add the first master-index schema tables, including `media_feed_events`, `media_job_runs`, and `media_job_failures`, behind existing Postgres initialization patterns.
-5. Add a read-only import from current `video_index` into `all_servable_videos_on_yral`.
-6. Add an audit query for "servable videos missing required pHash."
+Phase 1A has established the pHash compatibility contract and transitional mirror versioning. Phase 1B has added the canonical media-index schema, versioned hash repository helpers, and serialized feed outbox. The next implementation slice should populate and expose that foundation:
+
+1. Import current `video_index` rows as `legacy_video_index` source evidence.
+2. Import versioned mirror hashes from `video_index.phash`, `video_index.phash_kind`, and `video_index.phash_version` into `servable_video_hashes` when all three fields are present.
+3. Append `media_feed_events` in the same serialized transaction for inserted or materially changed canonical rows.
+4. Add audit queries for servable videos missing the required pHash and for source/status/provider coverage.
+5. Keep `video_index.phash`, `video_index.phash_kind`, and `video_index.phash_version` only for mirror compatibility until mirror routes are retired or renamed.
 
 This slice advances [#2113](https://github.com/dolr-ai/yral/issues/2113), starts [#2112](https://github.com/dolr-ai/yral/issues/2112), and creates the evidence needed for [#2108](https://github.com/dolr-ai/yral/issues/2108).
 

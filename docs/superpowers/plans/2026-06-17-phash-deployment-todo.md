@@ -16,6 +16,12 @@ Use this checklist before enabling the new pHash path outside local development.
 cargo test -p storj-interface --lib db::tests --locked
 ```
 
+- [x] Run the media-index DB tests with Docker/Postgres available. Passed locally on 2026-06-17 after Docker Desktop was started:
+
+```sh
+cargo test media_index -- --nocapture --test-threads=1
+```
+
 - [ ] Run the identity crypto test with a non-empty secret:
 
 ```sh
