@@ -77,6 +77,8 @@ pub struct VideoEntry {
 #[derive(Debug, serde::Deserialize)]
 pub struct DuplicateEntry {
     pub phash: String,
+    pub hash_kind: String,
+    pub hash_version: String,
     pub videos: Vec<VideoEntry>,
 }
 
@@ -90,6 +92,8 @@ pub struct DuplicatesResponse {
 #[derive(Debug, serde::Deserialize)]
 pub struct DuplicateGroup {
     pub phash: String,
+    pub hash_kind: String,
+    pub hash_version: String,
     pub count: usize,
     pub videos: Vec<VideoEntry>,
 }

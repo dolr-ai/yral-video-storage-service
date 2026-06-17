@@ -83,7 +83,10 @@ async fn main() {
                     println!("\nduplicate phashes ({}):", r.duplicate_phashes.len());
                     for d in &r.duplicate_phashes {
                         let ids: Vec<&str> = d.videos.iter().map(|v| v.video_id.as_str()).collect();
-                        println!("  {} → {:?}", d.phash, ids);
+                        println!(
+                            "  {}/{} {} → {:?}",
+                            d.hash_kind, d.hash_version, d.phash, ids
+                        );
                     }
                 }
                 Ok(())
@@ -95,7 +98,10 @@ async fn main() {
                 println!("duplicate groups:  {}", r.total_groups);
                 println!("duplicate videos:  {}", r.total_duplicate_videos);
                 for g in &r.groups {
-                    println!("\n  phash: {} ({} videos)", g.phash, g.count);
+                    println!(
+                        "\n  phash: {}/{} {} ({} videos)",
+                        g.hash_kind, g.hash_version, g.phash, g.count
+                    );
                     for v in &g.videos {
                         println!("    video_id:    {}", v.video_id);
                         println!("    storj_key:   {}", v.storj_key.as_deref().unwrap_or("—"));
@@ -141,7 +147,8 @@ async fn main() {
             };
             match client.video_duplicates(vid).await {
                 Ok(Some(g)) => {
-                    println!("phash: {}", g.phash);
+                    println!("phash: {} {}", g.hash_version, g.phash);
+                    println!("kind: {}", g.hash_kind);
                     println!("count: {}", g.count);
                     for v in &g.videos {
                         println!("  {}", v.video_id);
