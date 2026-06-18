@@ -22,6 +22,12 @@ cargo test -p storj-interface --lib db::tests --locked
 cargo test media_index -- --nocapture --test-threads=1
 ```
 
+- [ ] Run the legacy media-import job tests with Docker/Postgres available:
+
+```sh
+cargo test media_imports -- --nocapture --test-threads=1
+```
+
 - [ ] Run the identity crypto test with a non-empty secret:
 
 ```sh
@@ -41,6 +47,16 @@ INTERNAL_ENCRYPTION_SECRET=<deployment-like-test-secret> cargo test -p storj-int
   - `phash_version = 'offchain_binary_10x8_v1'`
 - [ ] Confirm duplicate grouping uses `(phash_kind, phash_version, phash)`, not only `phash`.
 - [ ] Check query plan/index usage for duplicate queries after enough rows exist.
+
+## Required During Legacy Media Import (Phase 1C)
+
+- [ ] Run `import_current_video_index` with a small `limit` first (smoke batch) before a full run.
+- [ ] Confirm `media_job_runs` records the run lifecycle: `running` -> `succeeded` / `succeeded_with_failures` (`failed` only when the whole job aborts).
+- [ ] Confirm imported rows land in `all_servable_videos_on_yral` and `servable_video_sources` with `source_kind = 'legacy_video_index'` and a populated `raw_payload`.
+- [ ] Confirm complete `(phash, phash_kind, phash_version)` tuples import into `servable_video_hashes` with `input_media_version = 'legacy_video_index_object_v1'`.
+- [ ] Confirm rows missing both `storj_key` and `hetzner_key` are recorded in `media_job_failures`, not silently skipped.
+- [ ] Confirm feed events: one `media_visibility_changed` per imported/changed media row, one `hash_upserted` per inserted/changed hash row, and none for unchanged rows.
+- [ ] Re-run the import and confirm idempotency: no duplicate source rows and no new feed events for unchanged rows.
 
 ## Compatibility Gate
 
