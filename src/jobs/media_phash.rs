@@ -84,6 +84,12 @@ async fn run_inner(
     let page_size = crate::consts::SCAN_PAGE_SIZE.load(std::sync::atomic::Ordering::Relaxed);
     let concurrency = crate::consts::PHASH_CONCURRENCY.load(std::sync::atomic::Ordering::Relaxed);
 
+    // Exclusive `video_id` cursor. We advance it past every fetched row so a row
+    // that fails to produce a hash (permanent compute failure) is not re-fetched
+    // on the next iteration — otherwise the missing-hash scan would loop forever.
+    // Such rows stay "missing" and are retried on the next full job run.
+    let mut after: Option<String> = None;
+
     loop {
         if cancel.is_cancelled() {
             tracing::info!(scanned = summary.scanned_rows, "media_phash: cancelled");
@@ -105,6 +111,7 @@ async fn run_inner(
             HASH_KIND,
             HASH_VERSION,
             INPUT_MEDIA_VERSION,
+            after.as_deref(),
             batch_limit,
         )
         .await?;
@@ -112,6 +119,9 @@ async fn run_inner(
         if rows.is_empty() {
             break;
         }
+
+        // Rows are ordered by video_id; advance the cursor past this batch.
+        after = rows.last().map(|row| row.video_id.clone());
 
         // Parallel download + hash; bounded by PHASH_CONCURRENCY to avoid
         // exhausting tempfile descriptors.  NEVER use join_all here.
@@ -829,12 +839,13 @@ mod tests {
         .await
         .unwrap();
 
-        // Without limit: only video-f2 should be returned
+        // Without limit (no cursor): only video-f2 should be returned
         let missing = crate::media_index::videos_missing_canonical_phash(
             &client,
             HASH_KIND,
             HASH_VERSION,
             INPUT_MEDIA_VERSION,
+            None,
             None,
         )
         .await
@@ -852,6 +863,7 @@ mod tests {
             HASH_KIND,
             HASH_VERSION,
             INPUT_MEDIA_VERSION,
+            None,
             Some(1),
         )
         .await
@@ -862,5 +874,63 @@ mod tests {
             1,
             "limit=1 should return exactly 1 row"
         );
+    }
+
+    // ── test 7: scan cursor advances past fetched rows (forward progress) ─────
+    // Guards against the missing-hash loop re-fetching a permanently-failing row
+    // forever: paging by an exclusive video_id cursor must skip rows already seen.
+
+    #[tokio::test]
+    async fn missing_hash_scan_cursor_excludes_rows_at_or_before_it() {
+        let (_pg, client) = test_client().await;
+        init_test_schema(&client).await;
+
+        // Three unhashed videos; none get a canonical hash (simulates a batch
+        // where every row failed to compute).
+        seed_video(&client, "video-g1").await;
+        seed_video(&client, "video-g2").await;
+        seed_video(&client, "video-g3").await;
+
+        // First page (no cursor, limit 2): the first two by video_id.
+        let page1 = crate::media_index::videos_missing_canonical_phash(
+            &client,
+            HASH_KIND,
+            HASH_VERSION,
+            INPUT_MEDIA_VERSION,
+            None,
+            Some(2),
+        )
+        .await
+        .unwrap();
+        let page1_ids: Vec<_> = page1.iter().map(|r| r.video_id.as_str()).collect();
+        assert_eq!(page1_ids, vec!["video-g1", "video-g2"]);
+
+        // Next page with cursor = last id of page1: must NOT re-return g1/g2,
+        // even though they are still missing a hash.
+        let page2 = crate::media_index::videos_missing_canonical_phash(
+            &client,
+            HASH_KIND,
+            HASH_VERSION,
+            INPUT_MEDIA_VERSION,
+            Some("video-g2"),
+            Some(2),
+        )
+        .await
+        .unwrap();
+        let page2_ids: Vec<_> = page2.iter().map(|r| r.video_id.as_str()).collect();
+        assert_eq!(page2_ids, vec!["video-g3"]);
+
+        // Cursor past the last row terminates the scan.
+        let page3 = crate::media_index::videos_missing_canonical_phash(
+            &client,
+            HASH_KIND,
+            HASH_VERSION,
+            INPUT_MEDIA_VERSION,
+            Some("video-g3"),
+            Some(2),
+        )
+        .await
+        .unwrap();
+        assert!(page3.is_empty(), "cursor past the last row yields no rows");
     }
 }

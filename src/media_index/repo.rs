@@ -395,11 +395,18 @@ pub struct MissingHashRow {
 /// Scan `all_servable_videos_on_yral` for rows that are MISSING the canonical
 /// pHash tuple.  The query is incremental/resumable — rows already hashed are
 /// simply absent from the result.
+///
+/// `after` is an exclusive `video_id` cursor: only rows with `video_id > after`
+/// are returned (results are ordered by `video_id`). Callers paging a backfill
+/// MUST advance this cursor past the last row of each batch; otherwise a row
+/// that never gets a hash (e.g. a permanent compute failure) stays "missing"
+/// and would be re-fetched forever.
 pub async fn videos_missing_canonical_phash(
     client: &Client,
     hash_kind: &str,
     hash_version: &str,
     input_media_version: &str,
+    after: Option<&str>,
     limit: Option<i64>,
 ) -> Result<Vec<MissingHashRow>, tokio_postgres::Error> {
     let sql = "SELECT v.video_id,
@@ -414,18 +421,28 @@ pub async fn videos_missing_canonical_phash(
                  AND h.hash_version = $2
                  AND h.input_media_version = $3
                WHERE h.video_id IS NULL
+                 AND ($4::TEXT IS NULL OR v.video_id > $4)
                ORDER BY v.video_id";
 
     let rows = if let Some(limit) = limit {
         client
             .query(
-                &format!("{sql} LIMIT $4"),
-                &[&hash_kind, &hash_version, &input_media_version, &limit],
+                &format!("{sql} LIMIT $5"),
+                &[
+                    &hash_kind,
+                    &hash_version,
+                    &input_media_version,
+                    &after,
+                    &limit,
+                ],
             )
             .await?
     } else {
         client
-            .query(sql, &[&hash_kind, &hash_version, &input_media_version])
+            .query(
+                sql,
+                &[&hash_kind, &hash_version, &input_media_version, &after],
+            )
             .await?
     };
 
