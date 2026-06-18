@@ -1,5 +1,7 @@
 #[allow(dead_code)]
 pub mod media_imports;
+#[allow(dead_code)]
+pub mod media_phash;
 pub mod mirror;
 pub mod phash_backfill;
 pub mod scan_hetzner;

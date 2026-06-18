@@ -378,6 +378,69 @@ fn hash_material_matches(row: &Row, input: &HashRecordInput<'_>) -> bool {
         && metadata.as_ref() == input.metadata.as_ref()
 }
 
+/// A master-table row that is missing the canonical pHash tuple
+/// `(hash_kind='phash', hash_version='offchain_binary_10x8_v1',
+///   input_media_version='current_stored_object_v1')`.
+///
+/// Used by the `media_phash` job to discover work that still needs doing.
+#[derive(Debug, Clone)]
+pub struct MissingHashRow {
+    pub video_id: String,
+    pub storage_provider: Option<String>,
+    pub object_key: Option<String>,
+    pub servable_status: String,
+    pub bucket: Option<String>,
+}
+
+/// Scan `all_servable_videos_on_yral` for rows that are MISSING the canonical
+/// pHash tuple.  The query is incremental/resumable — rows already hashed are
+/// simply absent from the result.
+pub async fn videos_missing_canonical_phash(
+    client: &Client,
+    hash_kind: &str,
+    hash_version: &str,
+    input_media_version: &str,
+    limit: Option<i64>,
+) -> Result<Vec<MissingHashRow>, tokio_postgres::Error> {
+    let sql = "SELECT v.video_id,
+                      v.storage_provider,
+                      v.object_key,
+                      v.servable_status,
+                      v.bucket
+               FROM all_servable_videos_on_yral v
+               LEFT JOIN servable_video_hashes h
+                  ON h.video_id = v.video_id
+                 AND h.hash_kind = $1
+                 AND h.hash_version = $2
+                 AND h.input_media_version = $3
+               WHERE h.video_id IS NULL
+               ORDER BY v.video_id";
+
+    let rows = if let Some(limit) = limit {
+        client
+            .query(
+                &format!("{sql} LIMIT $4"),
+                &[&hash_kind, &hash_version, &input_media_version, &limit],
+            )
+            .await?
+    } else {
+        client
+            .query(sql, &[&hash_kind, &hash_version, &input_media_version])
+            .await?
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(|row| MissingHashRow {
+            video_id: row.get(0),
+            storage_provider: row.get(1),
+            object_key: row.get(2),
+            servable_status: row.get(3),
+            bucket: row.get(4),
+        })
+        .collect())
+}
+
 pub async fn find_exact_duplicates(
     client: &Client,
     query: ExactDuplicateQuery<'_>,
