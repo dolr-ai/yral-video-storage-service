@@ -159,7 +159,7 @@ This service may store an `nsfw_state` value imported from the appropriate owner
 
 ### Existing Index Concepts
 
-This repo already maintains the equivalent of `all_videos_uploaded_to_hetzner_and_storj_buckets` through the mirror index. Ticket [#2112](https://github.com/dolr-ai/yral/issues/2112) asks for a broader master table named `all_servable_videos_on_yral` that includes:
+This repo already maintains the equivalent of `all_videos_uploaded_to_hetzner_and_storj_buckets` through the mirror index. Caveat (2026-06-18): the mirror index (`video_index`) is not yet a complete catalog of the buckets — it currently holds the pre-cutoff candidate subset captured by the backfill audit (~583k of ~1.56M Hetzner objects), so the legacy import that copies `video_index` into the master table is bounded by that subset until full bucket discovery is run. Treat `video_index` as a partial source, not the full bucket. Ticket [#2112](https://github.com/dolr-ai/yral/issues/2112) asks for a broader master table named `all_servable_videos_on_yral` that includes:
 
 - all new videos uploaded to the network;
 - all videos from `videos_unique_v2` with corresponding metadata;

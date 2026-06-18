@@ -530,7 +530,12 @@ async fn feed_event_append_serializes_cursor_visible_writes() {
 
 ## Phase 1C: Legacy video_index Import
 
-Next implementation phase starts here.
+Status: implemented and committed on `prakash/migrate-phash` (`10e3f5b`). Docker-backed `media_imports` (5) and `media_index` (18) suites passed locally on 2026-06-18. Post-implementation review fixes applied:
+
+- Media-row feed events use `media_visibility_changed` (a first-time servable import is a visibility change), not `storage_location_changed`.
+- `mark_job_run_failed` is best-effort so a failed status update never masks the original error.
+- `ImportSummary` is `#[must_use]`; the unexpected-error test asserts the `ImportError::Postgres` variant.
+- `hash_bit_length = phash.len()` is correct: imported pHash is the off-chain 640-char binary string (one char per bit), so string length is the bit count.
 
 ### Test First
 
@@ -550,8 +555,10 @@ Next implementation phase starts here.
 - [ ] Add job entry function:
 
   ```rust
+  // Implemented as &mut Client: tokio_postgres::Client::transaction() requires
+  // &mut self, and each row imports its media/source/hash/feed writes in one txn.
   pub async fn import_current_video_index(
-      client: &tokio_postgres::Client,
+      client: &mut tokio_postgres::Client,
       requested_by: &str,
       limit: Option<i64>,
   ) -> Result<ImportSummary, ImportError>
@@ -568,7 +575,7 @@ Next implementation phase starts here.
   - `source_kind = 'legacy_video_index'`.
   - `raw_payload` contains the raw source row for reconciliation.
 
-- [ ] For every feed-visible changed imported row, insert one `media_feed_events` row in the same transaction using the serialized outbox helper.
+- [ ] For every feed-visible changed imported row, insert one `media_feed_events` row in the same transaction using the serialized outbox helper. Use `media_visibility_changed` for the media-row event (the import makes the video known/servable for the first time).
 
 - [ ] When a source row has `phash`, `phash_kind`, and `phash_version`, import it into `servable_video_hashes` with `input_media_version = 'legacy_video_index_object_v1'`. Use the hash upsert outcome and append a `hash_upserted` feed event only for `Inserted` or `Changed`.
 
@@ -614,6 +621,12 @@ Next implementation phase starts here.
 ### Implement
 
 - [ ] Create `src/jobs/media_phash.rs`.
+
+- [ ] Row selection (decided 2026-06-18): scan `all_servable_videos_on_yral` for rows missing the canonical hash `(hash_kind='phash', hash_version='offchain_binary_10x8_v1', input_media_version='current_stored_object_v1')` via a `LEFT JOIN ... WHERE h.video_id IS NULL` helper. This is inherently incremental and resumable: completed rows drop out of the scan, so re-running after the master table grows fingerprints only the new rows. Matches master spec "selects master-index videos missing the required pHash version."
+
+- [ ] Storage source (decided 2026-06-18): download by the master row's `storage_provider` — `hetzner` -> `S3Client`, `storj` -> `StorjS3Client` (with `bucket`/`object_key`). The current dataset is Hetzner-stored so it routes to Hetzner; provider dispatch keeps Storj-only rows working without code changes.
+
+- [ ] Scale (decided 2026-06-18): this is a long-running backfill over the full master table (~583k+ videos), not a one-shot. Reuse the `phash_backfill.rs` loop shape: page batches, bound concurrent in-flight work with `buffer_unordered` (never `join_all` — tempfile pressure), and honor a `CancellationToken`. Resume is free because the missing-hash scan re-selects only unfinished rows.
 
 - [ ] Build on the existing S3 download and blocking pHash pattern from `src/jobs/phash_backfill.rs`, but write to the new media tables.
 
@@ -778,6 +791,7 @@ Deployment-image and rollout checks from `2026-06-17-phash-deployment-todo.md` a
 
 Do not fold these into the first execution slice:
 
+- Full Hetzner/Storj bucket discovery into `all_servable_videos_on_yral`. Phase 1C populates the master table by copying `video_index` only, and `video_index` currently holds the pre-cutoff candidate subset (~583k of ~1.56M Hetzner objects per backfill run `20260511T041549Z`), not the whole bucket. Completing the master table for new/remaining videos (re-running the Hetzner audit/mirror with a widened scope, or a direct bucket->master discovery job) is deferred. Because Phase 1D selects by missing canonical hash, re-running it after the master table grows fingerprints only the newly added rows — no special "remaining videos" code is required.
 - Canister import with IC agent pagination and reconciliation.
 - `media_artifacts` catalog for originals, canonical encodes, HLS, thumbnails, staged objects, mirrored objects, and deletion state.
 - `media_post_refs` or canister reference catalog.
