@@ -17,6 +17,40 @@ pub enum MirrorError {
     Http(#[from] reqwest::Error),
 }
 
+/// Coverage stats from the media audit endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct CoverageStats {
+    pub total_servable: i64,
+    pub with_canonical_phash: i64,
+    pub missing_canonical_phash: i64,
+}
+
+/// Running status of media import and phash jobs.
+#[derive(Debug, serde::Deserialize)]
+pub struct MediaJobsStatus {
+    pub import_running: bool,
+    pub phash_running: bool,
+}
+
+/// A single event from the media feed.
+#[derive(Debug, serde::Deserialize)]
+pub struct MediaFeedEvent {
+    pub cursor: i64,
+    pub event_kind: String,
+    pub video_id: String,
+    pub hash_kind: Option<String>,
+    pub hash_version: Option<String>,
+    pub input_media_version: Option<String>,
+    pub payload: serde_json::Value,
+    pub created_at: String,
+}
+
+/// Response from the media feed endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct MediaFeedResponse {
+    pub events: Vec<MediaFeedEvent>,
+}
+
 /// Response from cancel_all endpoint.
 #[derive(Debug, serde::Deserialize)]
 pub struct CancelResponse {
@@ -389,6 +423,116 @@ impl MirrorClient {
 
         match resp.status().as_u16() {
             200 => Ok(resp.json::<ConfigResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Trigger video-index import job (202 accepted, 409 already running).
+    pub async fn media_import(&self, limit: Option<u64>) -> Result<(), MirrorError> {
+        self.post_job("/media/import/video-index", limit, None, None)
+            .await
+    }
+
+    /// Trigger pHash computation job (202 accepted, 409 already running).
+    pub async fn media_phash(&self, limit: Option<u64>) -> Result<(), MirrorError> {
+        self.post_job("/media/phash/run", limit, None, None).await
+    }
+
+    /// Cancel any running media import / phash jobs (returns 200 with JSON body).
+    pub async fn media_cancel(&self) -> Result<serde_json::Value, MirrorError> {
+        let path = "/media/jobs/cancel";
+        let (ts, sig) = self.sign("POST", path);
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<serde_json::Value>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Get the running status of media import and phash jobs.
+    pub async fn media_status(&self) -> Result<MediaJobsStatus, MirrorError> {
+        let path = "/media/jobs/status";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<MediaJobsStatus>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Get coverage stats: how many servable videos have a canonical pHash.
+    pub async fn media_audit(&self) -> Result<CoverageStats, MirrorError> {
+        let path = "/media/audit/missing-phash";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<CoverageStats>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Stream events from the media feed.  Query params are appended to the
+    /// request URL; the HMAC signs the path only (query excluded), matching
+    /// server-side signing behaviour.
+    pub async fn media_feed(
+        &self,
+        after: Option<i64>,
+        limit: Option<u64>,
+    ) -> Result<MediaFeedResponse, MirrorError> {
+        let path = "/media/feed/events";
+        let (ts, sig) = self.sign("GET", path);
+        let mut req = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"));
+        if let Some(a) = after {
+            req = req.query(&[("after", a.to_string())]);
+        }
+        if let Some(n) = limit {
+            req = req.query(&[("limit", n.to_string())]);
+        }
+        let resp = req.send().await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<MediaFeedResponse>().await?),
             401 | 403 => Err(MirrorError::Unauthorized),
             status => {
                 let body = resp.text().await.unwrap_or_default();
