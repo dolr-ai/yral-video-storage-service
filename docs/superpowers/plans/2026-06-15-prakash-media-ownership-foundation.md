@@ -535,7 +535,7 @@ Status: implemented and committed on `prakash/migrate-phash` (`10e3f5b`). Docker
 - Media-row feed events use `media_visibility_changed` (a first-time servable import is a visibility change), not `storage_location_changed`.
 - `mark_job_run_failed` is best-effort so a failed status update never masks the original error.
 - `ImportSummary` is `#[must_use]`; the unexpected-error test asserts the `ImportError::Postgres` variant.
-- `hash_bit_length = phash.len()` is correct: imported pHash is the off-chain 640-char binary string (one char per bit), so string length is the bit count.
+- `hash_bit_length = phash.len()` records the stored hash string's character count. NOTE (corrected 2026-06-19 against the real `video_index` dump): the legacy `video_index.phash` is the local crate's **160-char hex** format (`legacy_hex_8x8_v0`), i.e. 640 perceptual bits encoded as 160 hex chars — NOT a 640-char binary string. So for legacy rows `hash_bit_length` is the encoded char length (160), not the perceptual bit count (640). Accepted as-is: legacy hex rows are transitional and explicitly excluded from canonical exact-duplicate comparison (which uses 1D's `offchain_binary_10x8_v1` rows, where the value is a 640-char binary string and `len == 640 == bit count`). `find_exact_duplicates` keys on `(hash_kind, hash_version, hash_value)` only and never reads `hash_bit_length`, so dedup is unaffected.
 
 ### Test First
 
