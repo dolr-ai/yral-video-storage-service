@@ -89,10 +89,12 @@ async fn run_inner(
     // on the next iteration — otherwise the missing-hash scan would loop forever.
     // Such rows stay "missing" and are retried on the next full job run.
     let mut after: Option<String> = None;
+    let mut cancelled = false;
 
     loop {
         if cancel.is_cancelled() {
             tracing::info!(scanned = summary.scanned_rows, "media_phash: cancelled");
+            cancelled = true;
             break;
         }
 
@@ -192,7 +194,12 @@ async fn run_inner(
         }
     }
 
-    complete_job_run(client, &summary, run_status(summary.row_failures)).await?;
+    complete_job_run(
+        client,
+        &summary,
+        terminal_status(cancelled, summary.row_failures),
+    )
+    .await?;
 
     tracing::info!(
         scanned = summary.scanned_rows,
@@ -211,6 +218,16 @@ fn run_status(row_failures: i64) -> &'static str {
         "succeeded"
     } else {
         "succeeded_with_failures"
+    }
+}
+
+/// Maps cancellation flag and per-row failure count to the terminal status.
+/// A cancelled run always finalises as `cancelled`, regardless of failures.
+fn terminal_status(cancelled: bool, row_failures: i64) -> &'static str {
+    if cancelled {
+        "cancelled"
+    } else {
+        run_status(row_failures)
     }
 }
 
@@ -874,6 +891,16 @@ mod tests {
             1,
             "limit=1 should return exactly 1 row"
         );
+    }
+
+    // ── test 8: cancelled run finalizes with cancelled status ─────────────────
+
+    #[test]
+    fn cancelled_run_finalizes_cancelled_status() {
+        assert_eq!(terminal_status(true, 0), "cancelled");
+        assert_eq!(terminal_status(true, 5), "cancelled");
+        assert_eq!(terminal_status(false, 0), "succeeded");
+        assert_eq!(terminal_status(false, 3), "succeeded_with_failures");
     }
 
     // ── test 7: scan cursor advances past fetched rows (forward progress) ─────
