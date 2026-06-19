@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use tokio_postgres::{Client, Transaction};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const JOB_KIND: &str = "legacy_video_index_import";
@@ -46,6 +47,7 @@ pub async fn import_current_video_index(
     client: &mut Client,
     requested_by: &str,
     limit: Option<i64>,
+    cancel: &CancellationToken,
 ) -> Result<ImportSummary, ImportError> {
     let job_run_id = Uuid::new_v4();
     insert_job_run(client, job_run_id, requested_by).await?;
@@ -59,7 +61,7 @@ pub async fn import_current_video_index(
         }
     }
 
-    let result = import_current_video_index_inner(client, job_run_id, limit).await;
+    let result = import_current_video_index_inner(client, job_run_id, limit, cancel).await;
     if let Err(err) = &result {
         // Best-effort: preserve the original error even if the status update fails.
         let _ = mark_job_run_failed(client, job_run_id, &err.to_string()).await;
@@ -71,6 +73,7 @@ async fn import_current_video_index_inner(
     client: &mut Client,
     job_run_id: Uuid,
     limit: Option<i64>,
+    cancel: &CancellationToken,
 ) -> Result<ImportSummary, ImportError> {
     let rows = fetch_legacy_rows(client, limit).await?;
     let mut summary = ImportSummary {
@@ -82,7 +85,12 @@ async fn import_current_video_index_inner(
         row_failures: 0,
     };
 
+    let mut cancelled = false;
     for row in rows {
+        if cancel.is_cancelled() {
+            cancelled = true;
+            break;
+        }
         summary.scanned_rows += 1;
         let tx = client.transaction().await?;
 
@@ -178,7 +186,9 @@ async fn import_current_video_index_inner(
         tx.commit().await?;
     }
 
-    let status = if summary.row_failures == 0 {
+    let status = if cancelled {
+        "cancelled"
+    } else if summary.row_failures == 0 {
         "succeeded"
     } else {
         "succeeded_with_failures"
@@ -428,6 +438,7 @@ fn summary_totals(summary: &ImportSummary) -> Value {
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::media_index::test_support::test_client;
@@ -457,9 +468,14 @@ mod tests {
             .await
             .unwrap();
 
-        let summary = super::import_current_video_index(&mut client, "test-runner", None)
-            .await
-            .unwrap();
+        let summary = super::import_current_video_index(
+            &mut client,
+            "test-runner",
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(summary.scanned_rows, 2);
         assert_eq!(summary.imported_media_rows, 2);
@@ -569,9 +585,14 @@ mod tests {
             .await
             .unwrap();
 
-        let summary = super::import_current_video_index(&mut client, "test-runner", None)
-            .await
-            .unwrap();
+        let summary = super::import_current_video_index(
+            &mut client,
+            "test-runner",
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(summary.hash_rows_upserted, 1);
         assert_eq!(summary.hash_feed_events_appended, 1);
@@ -654,12 +675,22 @@ mod tests {
             .await
             .unwrap();
 
-        let first = super::import_current_video_index(&mut client, "test-runner", None)
-            .await
-            .unwrap();
-        let second = super::import_current_video_index(&mut client, "test-runner", None)
-            .await
-            .unwrap();
+        let first = super::import_current_video_index(
+            &mut client,
+            "test-runner",
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let second = super::import_current_video_index(
+            &mut client,
+            "test-runner",
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(first.hash_feed_events_appended, 1);
         assert_eq!(second.hash_feed_events_appended, 0);
@@ -718,9 +749,14 @@ mod tests {
             .await
             .unwrap();
 
-        let summary = super::import_current_video_index(&mut client, "test-runner", None)
-            .await
-            .unwrap();
+        let summary = super::import_current_video_index(
+            &mut client,
+            "test-runner",
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(summary.scanned_rows, 1);
         assert_eq!(summary.imported_media_rows, 0);
@@ -802,9 +838,14 @@ mod tests {
             .await
             .unwrap();
 
-        let err = super::import_current_video_index(&mut client, "test-runner", None)
-            .await
-            .unwrap_err();
+        let err = super::import_current_video_index(
+            &mut client,
+            "test-runner",
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         // The dropped table surfaces as a Postgres error, not the InvalidLimit variant,
         // and the original error must be preserved (not masked by the status update).
         assert!(
@@ -824,5 +865,38 @@ mod tests {
             .unwrap();
         assert_eq!(run_row.get::<_, String>(0), "failed");
         assert!(run_row.get::<_, Option<String>>(1).is_some());
+    }
+
+    #[tokio::test]
+    async fn import_honors_cancellation_and_finalizes_cancelled() {
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        client
+            .execute(
+                "INSERT INTO video_index (video_id, storj_key, hetzner_key, phash, phash_kind, phash_version)
+                 VALUES ('vid-cancel', 'creator/vid-cancel.mp4', 'legacy/vid-cancel.mp4', 'abc', 'phash', 'legacy_hex_8x8_v0')",
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // pre-cancelled
+
+        let summary = super::import_current_video_index(&mut client, "test-runner", None, &cancel)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.scanned_rows, 0);
+
+        let status: String = client
+            .query_one(
+                "SELECT status FROM media_job_runs WHERE id = $1::TEXT::UUID",
+                &[&summary.job_run_id.to_string()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(status, "cancelled");
     }
 }
