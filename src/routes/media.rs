@@ -55,6 +55,42 @@ pub struct FeedResponse {
     pub events: Vec<FeedEvent>,
 }
 
+// ─── Media job response types ─────────────────────────────────────────────────
+
+#[derive(Serialize, ToSchema)]
+pub struct MediaJobsStatus {
+    pub import_running: bool,
+    pub phash_running: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct MediaCancelResponse {
+    pub message: String,
+    pub cancelled: Vec<String>,
+}
+
+/// Pure, unit-testable status body. Reads both flags atomically and returns the
+/// current snapshot. Decomposed from the handler so it can be tested without an
+/// HTTP server (mirrors the `run_status`/`persist_one` decomposition pattern).
+pub fn media_jobs_status_body(
+    import: &std::sync::atomic::AtomicBool,
+    phash: &std::sync::atomic::AtomicBool,
+) -> MediaJobsStatus {
+    MediaJobsStatus {
+        import_running: import.load(Ordering::Acquire),
+        phash_running: phash.load(Ordering::Acquire),
+    }
+}
+
+/// Query params for the pHash run handler.
+#[derive(Deserialize, IntoParams)]
+pub struct PhashParams {
+    /// Optional row limit passed to the pHash job
+    pub limit: Option<i64>,
+    /// Optional label for who triggered the run (default: "media_phash_api")
+    pub requested_by: Option<String>,
+}
+
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 /// Start the legacy video-index import job in the background.
@@ -94,6 +130,11 @@ pub async fn import_video_index(
         .unwrap_or_else(|| "media_import_api".to_string());
     let limit = params.limit;
     let guard = JobGuard(state.job_media_import_running.clone());
+    let cancel = state
+        .media_job_cancel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
     tokio::spawn(async move {
         let _guard = guard;
@@ -112,6 +153,7 @@ pub async fn import_video_index(
             &mut client,
             &requested_by,
             limit,
+            &cancel,
         )
         .await
         {
@@ -222,6 +264,117 @@ pub async fn feed_events(
             })
             .collect(),
     }))
+}
+
+/// Start the media pHash compute job in the background.
+///
+/// Returns 202 Accepted immediately; the job runs asynchronously.
+/// Returns 409 Conflict if the job is already running.
+#[utoipa::path(
+    post,
+    path = "/media/phash/run",
+    tag = "media",
+    params(PhashParams),
+    responses(
+        (status = 202, description = "pHash job started"),
+        (status = 409, description = "pHash job already running"),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
+pub async fn run_phash(
+    State(state): State<AppState>,
+    Query(params): Query<PhashParams>,
+) -> StatusCode {
+    if state
+        .job_media_phash_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return StatusCode::CONFLICT;
+    }
+
+    let s3 = state.s3_client.clone();
+    let storj = state.storj_client.clone();
+    let db_url = state.db_url.clone();
+    let limit = params.limit;
+    let requested_by = params
+        .requested_by
+        .map(|s| s.chars().take(256).collect::<String>())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "media_phash_api".to_string());
+    let guard = JobGuard(state.job_media_phash_running.clone());
+    let cancel = state
+        .media_job_cancel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+
+    tokio::spawn(async move {
+        let _guard = guard;
+        if let Err(e) =
+            crate::jobs::media_phash::run(s3, storj, db_url, cancel, limit, &requested_by).await
+        {
+            tracing::error!(error = %e, "media_phash: job failed");
+            sentry::capture_message(
+                &format!("media_phash job failed: {e}"),
+                sentry::Level::Error,
+            );
+        }
+    });
+
+    StatusCode::ACCEPTED
+}
+
+/// Cancel all running media jobs (import and pHash).
+///
+/// The cancellation token is replaced so subsequently started jobs get a fresh
+/// token. Both media_import and media_phash listen on this shared token.
+#[utoipa::path(
+    post,
+    path = "/media/jobs/cancel",
+    tag = "media",
+    responses(
+        (status = 200, description = "Cancellation signal sent", body = MediaCancelResponse),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
+pub async fn cancel_media_jobs(State(state): State<AppState>) -> Json<MediaCancelResponse> {
+    use tokio_util::sync::CancellationToken;
+
+    // Swap in a fresh token and cancel the old one OUTSIDE the lock to avoid
+    // holding the lock while cancellation propagates (mirrors mirror::cancel_all).
+    let old_token = {
+        let mut token = state
+            .media_job_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old = token.clone();
+        *token = CancellationToken::new();
+        old
+    };
+    old_token.cancel();
+
+    Json(MediaCancelResponse {
+        message: "media jobs cancellation requested".into(),
+        cancelled: vec!["media_import".into(), "media_phash".into()],
+    })
+}
+
+/// Report the current running status of all media jobs.
+#[utoipa::path(
+    get,
+    path = "/media/jobs/status",
+    tag = "media",
+    responses(
+        (status = 200, description = "Current media job running status", body = MediaJobsStatus),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
+pub async fn media_jobs_status(State(state): State<AppState>) -> Json<MediaJobsStatus> {
+    Json(media_jobs_status_body(
+        &state.job_media_import_running,
+        &state.job_media_phash_running,
+    ))
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -462,6 +615,21 @@ mod tests {
             events[0].payload["object_key"],
             "hetzner/denorm-video-001.mp4"
         );
+    }
+
+    /// `media_jobs_status_body` returns the correct snapshot of both running flags.
+    #[test]
+    fn media_status_reports_running_flags() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let import = Arc::new(AtomicBool::new(false));
+        let phash = Arc::new(AtomicBool::new(true));
+        let body = super::media_jobs_status_body(&import, &phash);
+        assert!(!body.import_running);
+        assert!(body.phash_running);
+        phash.store(false, Ordering::Release);
+        let body = super::media_jobs_status_body(&import, &phash);
+        assert!(!body.phash_running);
     }
 
     /// The import running flag prevents two concurrent imports and returns 409.

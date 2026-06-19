@@ -52,6 +52,10 @@ pub(crate) struct AppState {
     pub job_mirror_running: Arc<AtomicBool>,
     pub job_pipeline_running: Arc<AtomicBool>,
     pub job_media_import_running: Arc<AtomicBool>,
+    /// Separate cancellation token for the two media jobs (import + pHash).
+    /// Cancelling this does NOT affect the mirror jobs and vice-versa.
+    pub media_job_cancel: Arc<Mutex<CancellationToken>>,
+    pub job_media_phash_running: Arc<AtomicBool>,
     pub ic_agent: Agent,
 }
 
@@ -82,6 +86,9 @@ pub(crate) struct AppState {
         routes::media::import_video_index,
         routes::media::missing_phash_audit,
         routes::media::feed_events,
+        routes::media::run_phash,
+        routes::media::cancel_media_jobs,
+        routes::media::media_jobs_status,
         routes::videogen::drafts::get_in_progress_drafts,
         routes::videogen::generate::generate_video,
         routes::videogen::providers::get_providers,
@@ -109,6 +116,8 @@ pub(crate) struct AppState {
         routes::media::CoverageStatsResponse,
         routes::media::FeedEvent,
         routes::media::FeedResponse,
+        routes::media::MediaJobsStatus,
+        routes::media::MediaCancelResponse,
         routes::videogen::InProgressDraftsRequest,
         routes::videogen::InProgressDraftItem,
         routes::videogen::InProgressDraftsResponse,
@@ -258,6 +267,8 @@ async fn run_server() -> anyhow::Result<()> {
         job_mirror_running: Arc::new(AtomicBool::new(false)),
         job_pipeline_running: Arc::new(AtomicBool::new(false)),
         job_media_import_running: Arc::new(AtomicBool::new(false)),
+        media_job_cancel: Arc::new(Mutex::new(CancellationToken::new())),
+        job_media_phash_running: Arc::new(AtomicBool::new(false)),
         ic_agent,
     };
 
@@ -396,6 +407,24 @@ async fn run_server() -> anyhow::Result<()> {
         .route(
             "/media/feed/events",
             get(routes::media::feed_events)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/phash/run",
+            post(routes::media::run_phash)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/jobs/cancel",
+            post(routes::media::cancel_media_jobs)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/jobs/status",
+            get(routes::media::media_jobs_status)
                 .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
         )
