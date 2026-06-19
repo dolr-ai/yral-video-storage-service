@@ -458,6 +458,46 @@ pub async fn videos_missing_canonical_phash(
         .collect())
 }
 
+/// Coverage stats for the canonical pHash tuple
+/// `(hash_kind='phash', hash_version='offchain_binary_10x8_v1',
+///   input_media_version='current_stored_object_v1')`.
+///
+/// `total_servable` — total rows in `all_servable_videos_on_yral`.
+/// `with_canonical_phash` — rows that have the canonical hash tuple.
+/// `missing_canonical_phash` — rows that are still missing it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoverageStats {
+    pub total_servable: i64,
+    pub with_canonical_phash: i64,
+    pub missing_canonical_phash: i64,
+}
+
+pub async fn canonical_phash_coverage(
+    client: &Client,
+) -> Result<CoverageStats, tokio_postgres::Error> {
+    let row = client
+        .query_one(
+            "SELECT
+                COUNT(*) AS total_servable,
+                COUNT(h.video_id) AS with_canonical_phash,
+                COUNT(*) - COUNT(h.video_id) AS missing_canonical_phash
+             FROM all_servable_videos_on_yral v
+             LEFT JOIN servable_video_hashes h
+                ON h.video_id = v.video_id
+               AND h.hash_kind = 'phash'
+               AND h.hash_version = 'offchain_binary_10x8_v1'
+               AND h.input_media_version = 'current_stored_object_v1'",
+            &[],
+        )
+        .await?;
+
+    Ok(CoverageStats {
+        total_servable: row.get(0),
+        with_canonical_phash: row.get(1),
+        missing_canonical_phash: row.get(2),
+    })
+}
+
 pub async fn find_exact_duplicates(
     client: &Client,
     query: ExactDuplicateQuery<'_>,

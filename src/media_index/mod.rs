@@ -10,8 +10,8 @@ pub mod types;
 pub use feed::{append_feed_event_txn, list_feed_events_after, FeedReadError};
 #[allow(unused_imports)]
 pub use repo::{
-    find_exact_duplicates, upsert_hash_record_txn, upsert_servable_video_txn,
-    videos_missing_canonical_phash, MissingHashRow,
+    canonical_phash_coverage, find_exact_duplicates, upsert_hash_record_txn,
+    upsert_servable_video_txn, videos_missing_canonical_phash, CoverageStats, MissingHashRow,
 };
 pub use schema::init_schema;
 pub use types::*;

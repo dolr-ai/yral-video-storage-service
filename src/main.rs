@@ -51,6 +51,7 @@ pub(crate) struct AppState {
     pub job_phash_running: Arc<AtomicBool>,
     pub job_mirror_running: Arc<AtomicBool>,
     pub job_pipeline_running: Arc<AtomicBool>,
+    pub job_media_import_running: Arc<AtomicBool>,
     pub ic_agent: Agent,
 }
 
@@ -78,6 +79,9 @@ pub(crate) struct AppState {
         routes::mirror::status,
         routes::mirror::get_config,
         routes::mirror::update_config,
+        routes::media::import_video_index,
+        routes::media::missing_phash_audit,
+        routes::media::feed_events,
         routes::videogen::drafts::get_in_progress_drafts,
         routes::videogen::generate::generate_video,
         routes::videogen::providers::get_providers,
@@ -102,6 +106,9 @@ pub(crate) struct AppState {
         routes::mirror::JobStatus,
         routes::mirror::ConfigResponse,
         routes::mirror::ConfigUpdate,
+        routes::media::CoverageStatsResponse,
+        routes::media::FeedEvent,
+        routes::media::FeedResponse,
         routes::videogen::InProgressDraftsRequest,
         routes::videogen::InProgressDraftItem,
         routes::videogen::InProgressDraftsResponse,
@@ -129,6 +136,7 @@ pub(crate) struct AppState {
     tags(
         (name = "videos", description = "Video management endpoints"),
         (name = "mirror", description = "Mirror job management"),
+        (name = "media", description = "Media ownership and feed endpoints"),
         (name = "videogen", description = "Video generation status"),
     )
 )]
@@ -249,6 +257,7 @@ async fn run_server() -> anyhow::Result<()> {
         job_phash_running: Arc::new(AtomicBool::new(false)),
         job_mirror_running: Arc::new(AtomicBool::new(false)),
         job_pipeline_running: Arc::new(AtomicBool::new(false)),
+        job_media_import_running: Arc::new(AtomicBool::new(false)),
         ic_agent,
     };
 
@@ -370,6 +379,24 @@ async fn run_server() -> anyhow::Result<()> {
             "/mirror/config",
             get(routes::mirror::get_config)
                 .post(routes::mirror::update_config)
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/import/video-index",
+            post(routes::media::import_video_index)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/audit/missing-phash",
+            get(routes::media::missing_phash_audit)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/feed/events",
+            get(routes::media::feed_events)
+                .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
         )
         .route(
