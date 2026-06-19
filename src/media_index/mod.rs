@@ -102,7 +102,7 @@ pub(crate) mod test_support {
     }
 
     pub(crate) async fn connect_test_client(url: &str) -> Client {
-        let (client, connection) = tokio_postgres::connect(&url, NoTls).await.unwrap();
+        let (client, connection) = tokio_postgres::connect(url, NoTls).await.unwrap();
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 tracing::error!(error = %e, "postgres test connection closed");
