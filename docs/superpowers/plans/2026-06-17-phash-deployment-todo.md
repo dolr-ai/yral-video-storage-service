@@ -64,6 +64,21 @@ INTERNAL_ENCRYPTION_SECRET=<deployment-like-test-secret> cargo test -p storj-int
 - [ ] If the bits differ due to FFmpeg/libav or image-hasher drift, do not publish those rows as `offchain_binary_10x8_v1`.
 - [ ] If deployment output intentionally differs from off-chain, mint a new `hash_version` and keep legacy rows out of exact-duplicate comparisons.
 
+## Operational Routes Hardening (Phase 1E findings)
+
+These came out of the security + database review of the `/media/*` routes (2026-06-19). All are pre-existing, service-wide concerns surfaced by — not introduced by — Phase 1E. Already fixed in Phase 1E: all three `/media/*` routes require HMAC, and `requested_by` is clamped to 256 chars.
+
+**Gate blocker — must land before the media feed serves real consumers:**
+
+- [ ] Introduce a Postgres connection pool (`deadpool-postgres`/`bb8`) and store it in `AppState` instead of `db_url`; every handler currently calls `db::connect` per request (new TCP + PG connection each time). `GET /media/feed/events` is designed to be polled, so without a pool, consumer polling + the per-request connections can exhaust `max_connections` and deny service. This is a cross-cutting refactor — do it in its own focused PR, not on the media-ownership branch.
+
+**Program-level follow-ups (track as tickets; not media-branch work):**
+
+- [ ] Add rate limiting to public-facing routes (pairs with the pool work).
+- [ ] Move the hardcoded Sentry DSN (`src/main.rs`) to an env var AND rotate the leaked key (moving to env does not un-leak the committed value).
+- [ ] HMAC replay: the ±5-minute window has no nonce/jti tracking; a signed request can be replayed within the window. Shared by all signed routes — needs client coordination.
+- [ ] Tighten CORS (`allow_origin(Any)` / `allow_headers(Any)`).
+
 ## After Deploy
 
 - [ ] Run one limited pHash backfill batch and verify `phash`, `phash_kind`, and `phash_version` are populated together.
