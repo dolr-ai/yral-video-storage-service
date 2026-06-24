@@ -69,6 +69,115 @@ pub async fn import_current_video_index(
     result
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct RowCounts {
+    imported_media_rows: i64,
+    hash_rows_upserted: i64,
+    hash_feed_events_appended: i64,
+    row_failures: i64,
+}
+
+/// Import a single legacy row within an existing transaction. Keyless rows are
+/// recorded as a failure (NOT an error) and return `row_failures = 1`. Returns
+/// the per-row counter deltas. Any returned `Err` is a real SQL error that
+/// poisons `tx` and must trigger the caller's rollback + per-row fallback.
+async fn import_one_row_txn(
+    tx: &Transaction<'_>,
+    row: &LegacyVideoIndexRow,
+    job_run_id: Uuid,
+) -> Result<RowCounts, tokio_postgres::Error> {
+    let mut counts = RowCounts::default();
+
+    let Some(storage) = canonical_storage(row) else {
+        record_row_failure_txn(
+            tx,
+            job_run_id,
+            &row.video_id,
+            "storage_selection",
+            "legacy video_index row has neither storj_key nor hetzner_key",
+        )
+        .await?;
+        counts.row_failures = 1;
+        return Ok(counts);
+    };
+
+    let media_outcome = import_media_row_txn(tx, row, storage).await?;
+    if matches!(
+        media_outcome.media,
+        crate::media_index::UpsertOutcome::Inserted | crate::media_index::UpsertOutcome::Changed
+    ) {
+        crate::media_index::append_feed_event_txn(
+            tx,
+            crate::media_index::FeedEventInput {
+                event_kind: crate::media_index::FeedEventKind::MediaVisibilityChanged,
+                video_id: &row.video_id,
+                hash_kind: None,
+                hash_version: None,
+                input_media_version: None,
+                payload: media_feed_payload(row, storage),
+            },
+        )
+        .await?;
+        counts.imported_media_rows = 1;
+    }
+
+    if let (Some(phash), Some(phash_kind), Some(phash_version)) = (
+        row.phash.as_deref(),
+        row.phash_kind.as_deref(),
+        row.phash_version.as_deref(),
+    ) {
+        let provenance = hash_provenance(row);
+        let outcome = crate::media_index::upsert_hash_record_txn(
+            tx,
+            crate::media_index::HashRecordInput {
+                video_id: &row.video_id,
+                hash_kind: phash_kind,
+                hash_version: phash_version,
+                input_media_version: INPUT_MEDIA_VERSION,
+                hash_value: phash,
+                hash_bit_length: phash.len() as i32,
+                num_frames: 0,
+                hash_size: 0,
+                computed_from_provider: provenance.map(|s| s.provider),
+                computed_from_bucket: provenance.and_then(|s| s.bucket),
+                computed_from_key: provenance.map(|s| s.object_key),
+                metadata: Some(json!({"source": SOURCE_KIND})),
+            },
+        )
+        .await?;
+
+        if matches!(
+            outcome,
+            crate::media_index::UpsertOutcome::Inserted
+                | crate::media_index::UpsertOutcome::Changed
+        ) {
+            crate::media_index::append_feed_event_txn(
+                tx,
+                crate::media_index::FeedEventInput {
+                    event_kind: crate::media_index::FeedEventKind::HashUpserted,
+                    video_id: &row.video_id,
+                    hash_kind: Some(phash_kind),
+                    hash_version: Some(phash_version),
+                    input_media_version: Some(INPUT_MEDIA_VERSION),
+                    payload: json!({
+                        "video_id": row.video_id,
+                        "hash_kind": phash_kind,
+                        "hash_version": phash_version,
+                        "input_media_version": INPUT_MEDIA_VERSION,
+                        "hash_value": phash,
+                        "source": SOURCE_KIND
+                    }),
+                },
+            )
+            .await?;
+            counts.hash_rows_upserted = 1;
+            counts.hash_feed_events_appended = 1;
+        }
+    }
+
+    Ok(counts)
+}
+
 async fn import_current_video_index_inner(
     client: &mut Client,
     job_run_id: Uuid,
@@ -94,96 +203,12 @@ async fn import_current_video_index_inner(
         summary.scanned_rows += 1;
         let tx = client.transaction().await?;
 
-        let Some(storage) = canonical_storage(&row) else {
-            record_row_failure_txn(
-                &tx,
-                job_run_id,
-                &row.video_id,
-                "storage_selection",
-                "legacy video_index row has neither storj_key nor hetzner_key",
-            )
-            .await?;
-            tx.commit().await?;
-            summary.row_failures += 1;
-            continue;
-        };
-
-        let media_outcome = import_media_row_txn(&tx, &row, storage).await?;
-        if matches!(
-            media_outcome.media,
-            crate::media_index::UpsertOutcome::Inserted
-                | crate::media_index::UpsertOutcome::Changed
-        ) {
-            crate::media_index::append_feed_event_txn(
-                &tx,
-                crate::media_index::FeedEventInput {
-                    event_kind: crate::media_index::FeedEventKind::MediaVisibilityChanged,
-                    video_id: &row.video_id,
-                    hash_kind: None,
-                    hash_version: None,
-                    input_media_version: None,
-                    payload: media_feed_payload(&row, storage),
-                },
-            )
-            .await?;
-            summary.imported_media_rows += 1;
-        }
-
-        if let (Some(phash), Some(phash_kind), Some(phash_version)) = (
-            row.phash.as_deref(),
-            row.phash_kind.as_deref(),
-            row.phash_version.as_deref(),
-        ) {
-            let provenance = hash_provenance(&row);
-            let outcome = crate::media_index::upsert_hash_record_txn(
-                &tx,
-                crate::media_index::HashRecordInput {
-                    video_id: &row.video_id,
-                    hash_kind: phash_kind,
-                    hash_version: phash_version,
-                    input_media_version: INPUT_MEDIA_VERSION,
-                    hash_value: phash,
-                    hash_bit_length: phash.len() as i32,
-                    num_frames: 0,
-                    hash_size: 0,
-                    computed_from_provider: provenance.map(|source| source.provider),
-                    computed_from_bucket: provenance.and_then(|source| source.bucket),
-                    computed_from_key: provenance.map(|source| source.object_key),
-                    metadata: Some(json!({"source": SOURCE_KIND})),
-                },
-            )
-            .await?;
-
-            if matches!(
-                outcome,
-                crate::media_index::UpsertOutcome::Inserted
-                    | crate::media_index::UpsertOutcome::Changed
-            ) {
-                crate::media_index::append_feed_event_txn(
-                    &tx,
-                    crate::media_index::FeedEventInput {
-                        event_kind: crate::media_index::FeedEventKind::HashUpserted,
-                        video_id: &row.video_id,
-                        hash_kind: Some(phash_kind),
-                        hash_version: Some(phash_version),
-                        input_media_version: Some(INPUT_MEDIA_VERSION),
-                        payload: json!({
-                            "video_id": row.video_id,
-                            "hash_kind": phash_kind,
-                            "hash_version": phash_version,
-                            "input_media_version": INPUT_MEDIA_VERSION,
-                            "hash_value": phash,
-                            "source": SOURCE_KIND
-                        }),
-                    },
-                )
-                .await?;
-                summary.hash_rows_upserted += 1;
-                summary.hash_feed_events_appended += 1;
-            }
-        }
-
+        let counts = import_one_row_txn(&tx, &row, job_run_id).await?;
         tx.commit().await?;
+        summary.imported_media_rows += counts.imported_media_rows;
+        summary.hash_rows_upserted += counts.hash_rows_upserted;
+        summary.hash_feed_events_appended += counts.hash_feed_events_appended;
+        summary.row_failures += counts.row_failures;
     }
 
     let status = if cancelled {
