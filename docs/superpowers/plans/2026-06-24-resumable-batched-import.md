@@ -375,6 +375,19 @@ async fn second_run_imports_only_missing_rows() {
 }
 ```
 
+**Update the existing `unexpected_import_errors_mark_the_job_run_failed` test** for the circuit breaker. It currently seeds **1** row, drops `media_feed_events`, and expects status `failed`. Under the new fallback, 1 failing row is *isolated* (recorded, not fatal) → `succeeded_with_failures`, so the breaker must be exercised: seed **`MAX_CONSECUTIVE_IMPORT_FAILURES + 10` (= 60)** rows before dropping `media_feed_events`. Every row then fails in the fallback, consecutive failures hit the threshold, and `import_current_video_index` returns `Err(ImportError::TooManyConsecutiveFailures { .. })` → the run is marked `failed`. Assert: returns `Err`, and `media_job_runs.status == "failed"`. This becomes the systemic-error test (one bad row is isolated; *many consecutive* failures fail the job).
+
+```rust
+// seed 60 rows, then:
+client.execute("DROP TABLE media_feed_events", &[]).await.unwrap();
+let err = super::import_current_video_index(&mut client, "t", None, &cancel).await.unwrap_err();
+assert!(matches!(err, super::ImportError::TooManyConsecutiveFailures { .. }));
+let status: String = client.query_one(
+    "SELECT status FROM media_job_runs ORDER BY started_at DESC LIMIT 1", &[],
+).await.unwrap().get(0);
+assert_eq!(status, "failed");
+```
+
 Keep the existing `import_honors_cancellation_and_finalizes_cancelled` and idempotency tests — they must still pass.
 
 - [ ] **Step 2: Run, verify the new tests fail**
@@ -382,7 +395,25 @@ Keep the existing `import_honors_cancellation_and_finalizes_cancelled` and idemp
 Run: `cargo test -p storj-interface --lib media_imports -- --test-threads=1`
 Expected: at least `second_run_imports_only_missing_rows` FAILS — the post-Task-3 loop still uses `fetch_legacy_rows` (no skip-existing), so the re-run re-scans the already-imported row and `scanned_rows == 1` does not hold. (The keyless/forward-progress test may already pass on counts before the rewrite; the resume test is the one that reliably drives this task.)
 
-- [ ] **Step 3: Rewrite `import_current_video_index_inner`**
+- [ ] **Step 3a: Add the systemic-failure circuit breaker (const + error variant)**
+
+The per-row fallback records a failed row and continues (isolating one bad row). To avoid masking a *systemic* error (e.g. a missing table failing every row) as "succeeded_with_failures", a consecutive-failure threshold trips the job to `failed`.
+
+Add near the top of `media_imports.rs`:
+```rust
+/// If this many rows fail consecutively in the per-row fallback, treat the
+/// error as systemic (not one bad row) and fail the whole job. Reset to 0 on
+/// any successful row / committed batch.
+const MAX_CONSECUTIVE_IMPORT_FAILURES: i64 = 50;
+```
+
+Add a variant to `ImportError`:
+```rust
+#[error("import aborted after {consecutive} consecutive row failures (systemic error); last: {last_error}")]
+TooManyConsecutiveFailures { consecutive: i64, last_error: String },
+```
+
+- [ ] **Step 3b: Rewrite `import_current_video_index_inner`**
 
 ```rust
 async fn import_current_video_index_inner(
@@ -399,6 +430,7 @@ async fn import_current_video_index_inner(
         .load(std::sync::atomic::Ordering::Relaxed);
     let mut after: Option<String> = None;
     let mut cancelled = false;
+    let mut consecutive_failures: i64 = 0; // for the systemic-error circuit breaker
 
     loop {
         if cancel.is_cancelled() { cancelled = true; break; }
@@ -437,6 +469,7 @@ async fn import_current_video_index_inner(
             summary.hash_rows_upserted += page_counts.hash_rows_upserted;
             summary.hash_feed_events_appended += page_counts.hash_feed_events_appended;
             summary.row_failures += page_counts.row_failures;
+            consecutive_failures = 0; // a batch committed cleanly → not systemic
         } else {
             // a real SQL error poisoned the batch tx; roll back and reprocess
             // this page row-by-row to isolate the offending row.
@@ -450,6 +483,7 @@ async fn import_current_video_index_inner(
                         summary.hash_rows_upserted += c.hash_rows_upserted;
                         summary.hash_feed_events_appended += c.hash_feed_events_appended;
                         summary.row_failures += c.row_failures;
+                        consecutive_failures = 0; // a row succeeded (incl. handled keyless) → not systemic
                     }
                     Err(e) => {
                         drop(row_tx);
@@ -459,6 +493,14 @@ async fn import_current_video_index_inner(
                         ).await?;
                         fail_tx.commit().await?;
                         summary.row_failures += 1;
+                        consecutive_failures += 1;
+                        if consecutive_failures >= MAX_CONSECUTIVE_IMPORT_FAILURES {
+                            // systemic error (every row failing the same way) → fail loud.
+                            return Err(ImportError::TooManyConsecutiveFailures {
+                                consecutive: consecutive_failures,
+                                last_error: e.to_string(),
+                            });
+                        }
                     }
                 }
             }
