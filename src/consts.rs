@@ -124,6 +124,16 @@ pub static SCAN_PAGE_SIZE: Lazy<AtomicI64> = Lazy::new(|| {
         .unwrap_or(2500);
     AtomicI64::new(val)
 });
+/// Rows committed per transaction by the legacy video_index import (Phase 1C).
+/// Batching cuts COMMIT/fsync (and sync-replica) cost vs per-row commits.
+pub static MEDIA_IMPORT_BATCH_SIZE: Lazy<AtomicI64> = Lazy::new(|| {
+    let val = std::env::var("MEDIA_IMPORT_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(500);
+    AtomicI64::new(val)
+});
 pub static MAX_PHASH_RETRIES: Lazy<i32> = Lazy::new(|| {
     std::env::var("MAX_PHASH_RETRIES")
         .ok()
