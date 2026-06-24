@@ -881,8 +881,7 @@ impl RuntimeGenerateDeps {
             let status = response.status();
             // 5xx and 429 are transient; other 4xx mean our request is wrong
             // (bad signature, malformed body) and will never succeed on retry.
-            let retryable =
-                status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
+            let retryable = status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
             let body_text = response.text().await.unwrap_or_default();
             tracing::warn!(
                 path,
