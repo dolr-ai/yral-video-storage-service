@@ -24,7 +24,17 @@ pub enum ImportError {
     InvalidLimit(i64),
     #[error("postgres legacy video_index import failed: {0}")]
     Postgres(#[from] tokio_postgres::Error),
+    #[error("import aborted after {consecutive} consecutive row failures (systemic error); last: {last_error}")]
+    TooManyConsecutiveFailures {
+        consecutive: i64,
+        last_error: String,
+    },
 }
+
+/// If this many rows fail consecutively in the per-row fallback, treat the
+/// error as systemic (not one bad row) and fail the whole job. Reset to 0 on
+/// any successful row / committed batch.
+const MAX_CONSECUTIVE_IMPORT_FAILURES: i64 = 50;
 
 #[derive(Debug, Clone)]
 struct LegacyVideoIndexRow {
@@ -69,13 +79,121 @@ pub async fn import_current_video_index(
     result
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct RowCounts {
+    imported_media_rows: i64,
+    hash_rows_upserted: i64,
+    hash_feed_events_appended: i64,
+    row_failures: i64,
+}
+
+/// Import a single legacy row within an existing transaction. Keyless rows are
+/// recorded as a failure (NOT an error) and return `row_failures = 1`. Returns
+/// the per-row counter deltas. Any returned `Err` is a real SQL error that
+/// poisons `tx` and must trigger the caller's rollback + per-row fallback.
+async fn import_one_row_txn(
+    tx: &Transaction<'_>,
+    row: &LegacyVideoIndexRow,
+    job_run_id: Uuid,
+) -> Result<RowCounts, tokio_postgres::Error> {
+    let mut counts = RowCounts::default();
+
+    let Some(storage) = canonical_storage(row) else {
+        record_row_failure_txn(
+            tx,
+            job_run_id,
+            &row.video_id,
+            "storage_selection",
+            "legacy video_index row has neither storj_key nor hetzner_key",
+        )
+        .await?;
+        counts.row_failures = 1;
+        return Ok(counts);
+    };
+
+    let media_outcome = import_media_row_txn(tx, row, storage).await?;
+    if matches!(
+        media_outcome.media,
+        crate::media_index::UpsertOutcome::Inserted | crate::media_index::UpsertOutcome::Changed
+    ) {
+        crate::media_index::append_feed_event_txn(
+            tx,
+            crate::media_index::FeedEventInput {
+                event_kind: crate::media_index::FeedEventKind::MediaVisibilityChanged,
+                video_id: &row.video_id,
+                hash_kind: None,
+                hash_version: None,
+                input_media_version: None,
+                payload: media_feed_payload(row, storage),
+            },
+        )
+        .await?;
+        counts.imported_media_rows = 1;
+    }
+
+    if let (Some(phash), Some(phash_kind), Some(phash_version)) = (
+        row.phash.as_deref(),
+        row.phash_kind.as_deref(),
+        row.phash_version.as_deref(),
+    ) {
+        let provenance = hash_provenance(row);
+        let outcome = crate::media_index::upsert_hash_record_txn(
+            tx,
+            crate::media_index::HashRecordInput {
+                video_id: &row.video_id,
+                hash_kind: phash_kind,
+                hash_version: phash_version,
+                input_media_version: INPUT_MEDIA_VERSION,
+                hash_value: phash,
+                hash_bit_length: phash.len() as i32,
+                num_frames: 0,
+                hash_size: 0,
+                computed_from_provider: provenance.map(|s| s.provider),
+                computed_from_bucket: provenance.and_then(|s| s.bucket),
+                computed_from_key: provenance.map(|s| s.object_key),
+                metadata: Some(json!({"source": SOURCE_KIND})),
+            },
+        )
+        .await?;
+
+        if matches!(
+            outcome,
+            crate::media_index::UpsertOutcome::Inserted
+                | crate::media_index::UpsertOutcome::Changed
+        ) {
+            crate::media_index::append_feed_event_txn(
+                tx,
+                crate::media_index::FeedEventInput {
+                    event_kind: crate::media_index::FeedEventKind::HashUpserted,
+                    video_id: &row.video_id,
+                    hash_kind: Some(phash_kind),
+                    hash_version: Some(phash_version),
+                    input_media_version: Some(INPUT_MEDIA_VERSION),
+                    payload: json!({
+                        "video_id": row.video_id,
+                        "hash_kind": phash_kind,
+                        "hash_version": phash_version,
+                        "input_media_version": INPUT_MEDIA_VERSION,
+                        "hash_value": phash,
+                        "source": SOURCE_KIND
+                    }),
+                },
+            )
+            .await?;
+            counts.hash_rows_upserted = 1;
+            counts.hash_feed_events_appended = 1;
+        }
+    }
+
+    Ok(counts)
+}
+
 async fn import_current_video_index_inner(
     client: &mut Client,
     job_run_id: Uuid,
     limit: Option<i64>,
     cancel: &CancellationToken,
 ) -> Result<ImportSummary, ImportError> {
-    let rows = fetch_legacy_rows(client, limit).await?;
     let mut summary = ImportSummary {
         job_run_id,
         scanned_rows: 0,
@@ -84,106 +202,104 @@ async fn import_current_video_index_inner(
         hash_feed_events_appended: 0,
         row_failures: 0,
     };
-
+    let batch_size =
+        crate::consts::MEDIA_IMPORT_BATCH_SIZE.load(std::sync::atomic::Ordering::Relaxed);
+    let mut after: Option<String> = None;
     let mut cancelled = false;
-    for row in rows {
+    let mut consecutive_failures: i64 = 0; // for the systemic-error circuit breaker
+
+    loop {
         if cancel.is_cancelled() {
             cancelled = true;
             break;
         }
-        summary.scanned_rows += 1;
-        let tx = client.transaction().await?;
 
-        let Some(storage) = canonical_storage(&row) else {
-            record_row_failure_txn(
-                &tx,
-                job_run_id,
-                &row.video_id,
-                "storage_selection",
-                "legacy video_index row has neither storj_key nor hetzner_key",
-            )
-            .await?;
-            tx.commit().await?;
-            summary.row_failures += 1;
-            continue;
+        // Global limit: cap rows fetched across the whole run.
+        let remaining = limit.map(|l| l - summary.scanned_rows);
+        if remaining == Some(0) {
+            break;
+        }
+        let page_limit = match remaining {
+            Some(r) => r.min(batch_size),
+            None => batch_size,
         };
 
-        let media_outcome = import_media_row_txn(&tx, &row, storage).await?;
-        if matches!(
-            media_outcome.media,
-            crate::media_index::UpsertOutcome::Inserted
-                | crate::media_index::UpsertOutcome::Changed
-        ) {
-            crate::media_index::append_feed_event_txn(
-                &tx,
-                crate::media_index::FeedEventInput {
-                    event_kind: crate::media_index::FeedEventKind::MediaVisibilityChanged,
-                    video_id: &row.video_id,
-                    hash_kind: None,
-                    hash_version: None,
-                    input_media_version: None,
-                    payload: media_feed_payload(&row, storage),
-                },
-            )
-            .await?;
-            summary.imported_media_rows += 1;
+        let page = fetch_missing_legacy_rows_after(client, after.as_deref(), page_limit).await?;
+        if page.is_empty() {
+            break;
         }
+        // Advance the cursor on FETCH (not on import success) so an all-failing
+        // page still makes forward progress and the loop terminates.
+        after = page.last().map(|r| r.video_id.clone());
 
-        if let (Some(phash), Some(phash_kind), Some(phash_version)) = (
-            row.phash.as_deref(),
-            row.phash_kind.as_deref(),
-            row.phash_version.as_deref(),
-        ) {
-            let provenance = hash_provenance(&row);
-            let outcome = crate::media_index::upsert_hash_record_txn(
-                &tx,
-                crate::media_index::HashRecordInput {
-                    video_id: &row.video_id,
-                    hash_kind: phash_kind,
-                    hash_version: phash_version,
-                    input_media_version: INPUT_MEDIA_VERSION,
-                    hash_value: phash,
-                    hash_bit_length: phash.len() as i32,
-                    num_frames: 0,
-                    hash_size: 0,
-                    computed_from_provider: provenance.map(|source| source.provider),
-                    computed_from_bucket: provenance.and_then(|source| source.bucket),
-                    computed_from_key: provenance.map(|source| source.object_key),
-                    metadata: Some(json!({"source": SOURCE_KIND})),
-                },
-            )
-            .await?;
-
-            if matches!(
-                outcome,
-                crate::media_index::UpsertOutcome::Inserted
-                    | crate::media_index::UpsertOutcome::Changed
-            ) {
-                crate::media_index::append_feed_event_txn(
-                    &tx,
-                    crate::media_index::FeedEventInput {
-                        event_kind: crate::media_index::FeedEventKind::HashUpserted,
-                        video_id: &row.video_id,
-                        hash_kind: Some(phash_kind),
-                        hash_version: Some(phash_version),
-                        input_media_version: Some(INPUT_MEDIA_VERSION),
-                        payload: json!({
-                            "video_id": row.video_id,
-                            "hash_kind": phash_kind,
-                            "hash_version": phash_version,
-                            "input_media_version": INPUT_MEDIA_VERSION,
-                            "hash_value": phash,
-                            "source": SOURCE_KIND
-                        }),
-                    },
-                )
-                .await?;
-                summary.hash_rows_upserted += 1;
-                summary.hash_feed_events_appended += 1;
+        // Optimistic batch: import the whole page in one transaction.
+        let mut page_counts = RowCounts::default();
+        let tx = client.transaction().await?;
+        let mut batch_ok = true;
+        for row in &page {
+            match import_one_row_txn(&tx, row, job_run_id).await {
+                Ok(c) => {
+                    page_counts.imported_media_rows += c.imported_media_rows;
+                    page_counts.hash_rows_upserted += c.hash_rows_upserted;
+                    page_counts.hash_feed_events_appended += c.hash_feed_events_appended;
+                    page_counts.row_failures += c.row_failures;
+                }
+                Err(_) => {
+                    batch_ok = false;
+                    break;
+                }
             }
         }
 
-        tx.commit().await?;
+        if batch_ok {
+            tx.commit().await?;
+            summary.imported_media_rows += page_counts.imported_media_rows;
+            summary.hash_rows_upserted += page_counts.hash_rows_upserted;
+            summary.hash_feed_events_appended += page_counts.hash_feed_events_appended;
+            summary.row_failures += page_counts.row_failures;
+            consecutive_failures = 0; // a batch committed cleanly → not systemic
+        } else {
+            // A real SQL error poisoned the batch tx. Roll it back and reprocess
+            // this page row-by-row to isolate the offending row.
+            drop(tx);
+            for row in &page {
+                let row_tx = client.transaction().await?;
+                match import_one_row_txn(&row_tx, row, job_run_id).await {
+                    Ok(c) => {
+                        row_tx.commit().await?;
+                        summary.imported_media_rows += c.imported_media_rows;
+                        summary.hash_rows_upserted += c.hash_rows_upserted;
+                        summary.hash_feed_events_appended += c.hash_feed_events_appended;
+                        summary.row_failures += c.row_failures;
+                        consecutive_failures = 0; // a row succeeded (incl. handled keyless) → not systemic
+                    }
+                    Err(e) => {
+                        drop(row_tx);
+                        let fail_tx = client.transaction().await?;
+                        record_row_failure_txn(
+                            &fail_tx,
+                            job_run_id,
+                            &row.video_id,
+                            "import_error",
+                            &e.to_string(),
+                        )
+                        .await?;
+                        fail_tx.commit().await?;
+                        summary.row_failures += 1;
+                        consecutive_failures += 1;
+                        if consecutive_failures >= MAX_CONSECUTIVE_IMPORT_FAILURES {
+                            // Systemic error (every row failing the same way) → fail loud.
+                            return Err(ImportError::TooManyConsecutiveFailures {
+                                consecutive: consecutive_failures,
+                                last_error: e.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        summary.scanned_rows += page.len() as i64;
     }
 
     let status = if cancelled {
@@ -213,18 +329,29 @@ async fn insert_job_run(
     Ok(())
 }
 
-async fn fetch_legacy_rows(
+/// Paged, skip-existing scan of legacy `video_index`. Returns up to `limit`
+/// rows with `video_id > after` (or from the start when `after` is None) that
+/// are NOT yet present in `all_servable_videos_on_yral`. Both columns are PKs,
+/// so the anti-join + cursor range are index-driven. Mirrors the convention of
+/// `media_index::videos_missing_canonical_phash`.
+async fn fetch_missing_legacy_rows_after(
     client: &Client,
-    limit: Option<i64>,
+    after: Option<&str>,
+    limit: i64,
 ) -> Result<Vec<LegacyVideoIndexRow>, tokio_postgres::Error> {
-    let sql = "SELECT video_id, storj_key, hetzner_key, phash, phash_kind, phash_version
-               FROM video_index
-               ORDER BY created_at, video_id";
-    let rows = if let Some(limit) = limit {
-        client.query(&format!("{sql} LIMIT $1"), &[&limit]).await?
-    } else {
-        client.query(sql, &[]).await?
-    };
+    let rows = client
+        .query(
+            "SELECT v.video_id, v.storj_key, v.hetzner_key, v.phash, v.phash_kind, v.phash_version
+             FROM video_index v
+             WHERE ($1::TEXT IS NULL OR v.video_id > $1)
+               AND NOT EXISTS (
+                 SELECT 1 FROM all_servable_videos_on_yral m WHERE m.video_id = v.video_id
+               )
+             ORDER BY v.video_id
+             LIMIT $2",
+            &[&after, &limit],
+        )
+        .await?;
 
     Ok(rows
         .into_iter()
@@ -446,6 +573,103 @@ mod tests {
     async fn init_test_schema(client: &tokio_postgres::Client) {
         crate::db::init_schema(client).await.unwrap();
         crate::media_index::init_schema(client).await.unwrap();
+    }
+
+    fn servable_input(video_id: &str) -> crate::media_index::ServableVideoInput<'_> {
+        crate::media_index::ServableVideoInput {
+            video_id,
+            publisher_user_id: None,
+            post_id: None,
+            source_kind: "legacy_video_index",
+            source_ref: Some(video_id),
+            servable_status: "servable",
+            nsfw_state: None,
+            storage_provider: Some("storj"),
+            bucket: None,
+            object_key: Some(video_id),
+            canonical_url: None,
+            thumbnail_key: None,
+            duration_ms: None,
+            width: None,
+            height: None,
+            fps: None,
+            container: None,
+            video_codec: None,
+            audio_codec: None,
+            moov_atom_front: None,
+            canonical_encoding_version: None,
+            discovered_from: "test",
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_returns_only_rows_missing_from_master() {
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        // three legacy rows
+        for vid in ["v-a", "v-b", "v-c"] {
+            client
+                .execute(
+                    "INSERT INTO video_index (video_id, storj_key) VALUES ($1, $2)",
+                    &[&vid, &format!("creator/{vid}.mp4")],
+                )
+                .await
+                .unwrap();
+        }
+        // v-b already in master
+        let tx = client.transaction().await.unwrap();
+        crate::media_index::upsert_servable_video_txn(&tx, servable_input("v-b"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let rows = super::fetch_missing_legacy_rows_after(&client, None, 100)
+            .await
+            .unwrap();
+        let ids: Vec<_> = rows.iter().map(|r| r.video_id.as_str()).collect();
+        assert_eq!(ids, vec!["v-a", "v-c"], "v-b is in master, must be skipped");
+    }
+
+    #[tokio::test]
+    async fn scan_pages_by_video_id_cursor_and_respects_limit() {
+        let (_pg, client) = test_client().await;
+        init_test_schema(&client).await;
+        for vid in ["v-a", "v-b", "v-c"] {
+            client
+                .execute(
+                    "INSERT INTO video_index (video_id, storj_key) VALUES ($1, $2)",
+                    &[&vid, &format!("creator/{vid}.mp4")],
+                )
+                .await
+                .unwrap();
+        }
+        // limit 2, no cursor -> first two by video_id
+        let page1 = super::fetch_missing_legacy_rows_after(&client, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            page1
+                .iter()
+                .map(|r| r.video_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["v-a", "v-b"]
+        );
+        // cursor past v-b -> only v-c
+        let page2 = super::fetch_missing_legacy_rows_after(&client, Some("v-b"), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            page2
+                .iter()
+                .map(|r| r.video_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["v-c"]
+        );
+        // cursor past last -> empty
+        let page3 = super::fetch_missing_legacy_rows_after(&client, Some("v-c"), 2)
+            .await
+            .unwrap();
+        assert!(page3.is_empty());
     }
 
     #[tokio::test]
@@ -825,46 +1049,173 @@ mod tests {
         let (_pg, mut client) = test_client().await;
         init_test_schema(&client).await;
 
-        client
-            .execute(
-                "INSERT INTO video_index (video_id, storj_key)
-                 VALUES ('video-error', 'creator/video-error.mp4')",
-                &[],
-            )
-            .await
-            .unwrap();
+        // Seed MAX_CONSECUTIVE_IMPORT_FAILURES + 10 (= 60) rows so the circuit breaker trips.
+        // With one row the per-row fallback would isolate the failure as succeeded_with_failures;
+        // many consecutive failures (all hitting the missing table) must fail the whole job.
+        for i in 0..(super::MAX_CONSECUTIVE_IMPORT_FAILURES + 10) {
+            client
+                .execute(
+                    "INSERT INTO video_index (video_id, storj_key) VALUES ($1, $2)",
+                    &[
+                        &format!("video-error-{i:03}"),
+                        &format!("creator/video-error-{i:03}.mp4"),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
         client
             .execute("DROP TABLE media_feed_events", &[])
             .await
             .unwrap();
 
-        let err = super::import_current_video_index(
-            &mut client,
-            "test-runner",
-            None,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-        // The dropped table surfaces as a Postgres error, not the InvalidLimit variant,
-        // and the original error must be preserved (not masked by the status update).
+        let cancel = CancellationToken::new();
+        let err = super::import_current_video_index(&mut client, "test-runner", None, &cancel)
+            .await
+            .unwrap_err();
+        // With the dropped table every row's fallback also fails → consecutive counter hits
+        // MAX_CONSECUTIVE_IMPORT_FAILURES → TooManyConsecutiveFailures returned.
         assert!(
-            matches!(err, ImportError::Postgres(_)),
-            "expected a postgres error, got {err:?}"
+            matches!(err, ImportError::TooManyConsecutiveFailures { .. }),
+            "expected TooManyConsecutiveFailures, got {err:?}"
         );
 
-        let run_row = client
+        let status: String = client
             .query_one(
-                "SELECT status, error_message
-                 FROM media_job_runs
-                 ORDER BY started_at DESC
-                 LIMIT 1",
+                "SELECT status FROM media_job_runs ORDER BY started_at DESC LIMIT 1",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(status, "failed");
+    }
+
+    #[tokio::test]
+    async fn keyless_row_in_a_batch_is_recorded_and_rest_of_batch_commits() {
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        // one good, one keyless (no storj/hetzner), one good
+        client
+            .execute(
+                "INSERT INTO video_index (video_id, storj_key) VALUES ('g1','creator/g1.mp4')",
                 &[],
             )
             .await
             .unwrap();
-        assert_eq!(run_row.get::<_, String>(0), "failed");
-        assert!(run_row.get::<_, Option<String>>(1).is_some());
+        client
+            .execute("INSERT INTO video_index (video_id) VALUES ('bad1')", &[])
+            .await
+            .unwrap();
+        client
+            .execute(
+                "INSERT INTO video_index (video_id, storj_key) VALUES ('g2','creator/g2.mp4')",
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let summary = super::import_current_video_index(&mut client, "t", None, &cancel)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.scanned_rows, 3);
+        assert_eq!(summary.imported_media_rows, 2);
+        assert_eq!(summary.row_failures, 1);
+        // good rows in master
+        let n: i64 = client
+            .query_one("SELECT count(*) FROM all_servable_videos_on_yral", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(n, 2);
+        // failure recorded
+        let f: i64 = client
+            .query_one(
+                "SELECT count(*) FROM media_job_failures WHERE video_id='bad1'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(f, 1);
+    }
+
+    #[tokio::test]
+    async fn import_makes_progress_over_keyless_rows_and_terminates() {
+        use std::sync::atomic::Ordering;
+        // Force tiny batches so multiple pages of keyless rows are exercised.
+        let prev_batch = crate::consts::MEDIA_IMPORT_BATCH_SIZE.swap(2, Ordering::Relaxed);
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        for vid in ["k1", "k2", "k3", "k4", "k5"] {
+            client
+                .execute("INSERT INTO video_index (video_id) VALUES ($1)", &[&vid])
+                .await
+                .unwrap();
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let summary = super::import_current_video_index(&mut client, "t", None, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(summary.scanned_rows, 5);
+        assert_eq!(summary.row_failures, 5);
+        assert_eq!(summary.imported_media_rows, 0);
+        let status: String = client
+            .query_one(
+                "SELECT status FROM media_job_runs WHERE id=$1::TEXT::UUID",
+                &[&summary.job_run_id.to_string()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(status, "succeeded_with_failures");
+        crate::consts::MEDIA_IMPORT_BATCH_SIZE.store(prev_batch, Ordering::Relaxed);
+    }
+
+    #[tokio::test]
+    async fn second_run_imports_only_missing_rows() {
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        client
+            .execute(
+                "INSERT INTO video_index (video_id, storj_key) VALUES ('r1','creator/r1.mp4')",
+                &[],
+            )
+            .await
+            .unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let _first = super::import_current_video_index(&mut client, "t", None, &cancel)
+            .await
+            .unwrap();
+        let events_after_first: i64 = client
+            .query_one("SELECT count(*) FROM media_feed_events", &[])
+            .await
+            .unwrap()
+            .get(0);
+        // add a new legacy row, re-run
+        client
+            .execute(
+                "INSERT INTO video_index (video_id, storj_key) VALUES ('r2','creator/r2.mp4')",
+                &[],
+            )
+            .await
+            .unwrap();
+        let summary = super::import_current_video_index(&mut client, "t", None, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(summary.scanned_rows, 1, "only the new row r2 is scanned");
+        assert_eq!(summary.imported_media_rows, 1);
+        let events_after_second: i64 = client
+            .query_one("SELECT count(*) FROM media_feed_events", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert!(
+            events_after_second > events_after_first,
+            "only r2's events added; r1 not re-emitted"
+        );
     }
 
     #[tokio::test]
