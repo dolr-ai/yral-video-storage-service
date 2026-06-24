@@ -39,6 +39,21 @@ const UPLOAD_URL_REFRESH_ENABLED_ENV: &str = "VIDEOGEN_UPLOAD_URL_REFRESH_ENABLE
 const VAST_GENERATE_URL_ENV: &str = "VIDEOGEN_VAST_GENERATE_URL";
 const VAST_API_KEY_ENV: &str = "VAST_API_KEY";
 
+/// Total moderation attempts before giving up (1 initial + retries).
+const MODERATION_MAX_ATTEMPTS: u32 = 3;
+/// Base backoff between moderation retries; doubles each attempt.
+const MODERATION_RETRY_BASE_DELAY_MS: u64 = 200;
+
+/// Outcome of a single failed moderation attempt.
+enum AttemptError {
+    /// Transient failure worth retrying: network error, 5xx, 429, or a
+    /// malformed 2xx body.
+    Retryable(ModerationError),
+    /// Permanent failure where retrying cannot help (4xx client error). The
+    /// request is wrong, not the service — fail fast.
+    Terminal(ModerationError),
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct GenerateVideoRequest {
     pub request: GenerateVideoRequestBody,
@@ -340,13 +355,14 @@ impl From<GenerateError> for GenerateHttpError {
                 tracing::error!(
                     error = %e,
                     error_code = "MOD_REQUEST_FAILED",
-                    "moderation service request failed [MOD_REQUEST_FAILED]: NSFW API unreachable or returned error"
+                    "moderation service request failed after retries [MOD_REQUEST_FAILED]: NSFW API unreachable or returned error"
                 );
+                // Retries are exhausted by the time this maps to a response.
+                // Surface a client-actionable error so the client can prompt the
+                // user to revise their input rather than treating it as an outage.
                 Self {
-                    status: StatusCode::SERVICE_UNAVAILABLE,
-                    error: VideoGenError::NetworkError(
-                        "MOD_REQUEST_FAILED: Moderation service unavailable".to_string(),
-                    ),
+                    status: StatusCode::BAD_REQUEST,
+                    error: VideoGenError::InvalidInput("Invalid input prompt".to_string()),
                 }
             }
             GenerateError::RateLimiter(RateLimiterError::Limited(message)) => Self {
@@ -798,6 +814,120 @@ impl RuntimeGenerateDeps {
             http: reqwest::Client::new(),
         }
     }
+
+    /// Single moderation HTTP attempt. The timestamp/signature are generated
+    /// per call so each retry carries a fresh anti-replay window.
+    async fn moderate_once(
+        &self,
+        secret: &str,
+        path: &str,
+        request_body: &[u8],
+        subject_url: Option<&str>,
+    ) -> Result<ModerationDecision, AttemptError> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let signature = crate::videogen::hmac::sign_moderation_request(
+            secret.as_bytes(),
+            "POST",
+            path,
+            timestamp,
+            request_body,
+        );
+
+        let url = format!(
+            "{}{}",
+            crate::consts::MODERATION_SERVICE_URL.trim_end_matches('/'),
+            path
+        );
+        tracing::debug!(path, subject_url, "calling moderation service");
+        let response = self
+            .http
+            .post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .header("X-Internal-Timestamp", timestamp.to_string())
+            .header("X-Internal-Signature", signature)
+            .timeout(std::time::Duration::from_millis(
+                self.config.moderation_timeout_ms,
+            ))
+            .body(request_body.to_vec())
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    path,
+                    subject_url,
+                    error = %e,
+                    is_timeout = e.is_timeout(),
+                    is_connect = e.is_connect(),
+                    error_code = "MOD_TRANSPORT_ERROR",
+                    "moderation request failed [MOD_TRANSPORT_ERROR]: network error calling NSFW API"
+                );
+                sentry::configure_scope(|scope| {
+                    scope.set_extra("moderation.path", path.into());
+                    scope.set_extra("moderation.error_code", "MOD_TRANSPORT_ERROR".into());
+                    scope.set_extra("moderation.is_timeout", e.is_timeout().into());
+                    scope.set_extra("moderation.is_connect", e.is_connect().into());
+                    if let Some(url) = subject_url {
+                        scope.set_extra("moderation.subject_url", url.into());
+                    }
+                });
+                // Network/timeout/connect errors are transient.
+                AttemptError::Retryable(ModerationError::RequestFailed(e.to_string()))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            // 5xx and 429 are transient; other 4xx mean our request is wrong
+            // (bad signature, malformed body) and will never succeed on retry.
+            let retryable =
+                status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
+            let body_text = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                path,
+                subject_url,
+                %status,
+                retryable,
+                body = %body_text,
+                error_code = "MOD_SERVICE_ERROR",
+                "moderation service error response [MOD_SERVICE_ERROR]: NSFW API returned non-2xx"
+            );
+            sentry::configure_scope(|scope| {
+                scope.set_extra("moderation.path", path.into());
+                scope.set_extra("moderation.http_status", status.as_u16().into());
+                scope.set_extra("moderation.response_body", body_text.clone().into());
+                scope.set_extra("moderation.error_code", "MOD_SERVICE_ERROR".into());
+                scope.set_extra("moderation.retryable", retryable.into());
+                if let Some(url) = subject_url {
+                    scope.set_extra("moderation.subject_url", url.into());
+                }
+            });
+            let err = ModerationError::RequestFailed(format!(
+                "moderation service returned {status}: {body_text}"
+            ));
+            return Err(if retryable {
+                AttemptError::Retryable(err)
+            } else {
+                AttemptError::Terminal(err)
+            });
+        }
+
+        let body: Value = response.json().await.map_err(|e| {
+            // A 2xx with an unparseable body is a transient service anomaly.
+            AttemptError::Retryable(ModerationError::RequestFailed(e.to_string()))
+        })?;
+
+        let is_nsfw = body
+            .get("is_nsfw")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if is_nsfw {
+            Ok(ModerationDecision::Unsafe)
+        } else {
+            Ok(ModerationDecision::Safe)
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -830,101 +960,66 @@ impl GenerateDeps for RuntimeGenerateDeps {
             ),
         };
 
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let signature = crate::videogen::hmac::sign_moderation_request(
-            secret.as_bytes(),
-            "POST",
-            path,
-            timestamp,
-            &request_body,
-        );
-
-        let url = format!(
-            "{}{}",
-            crate::consts::MODERATION_SERVICE_URL.trim_end_matches('/'),
-            path
-        );
         let subject_url = match &input.subject {
             ModerationSubject::ImageUrl(u) => Some(u.as_str()),
             _ => None,
         };
-        tracing::debug!(path, subject_url, "calling moderation service");
-        let response = self
-            .http
-            .post(url)
-            .header(CONTENT_TYPE, "application/json")
-            .header("X-Internal-Timestamp", timestamp.to_string())
-            .header("X-Internal-Signature", signature)
-            .timeout(std::time::Duration::from_millis(
-                self.config.moderation_timeout_ms,
-            ))
-            .body(request_body)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::warn!(
-                    path,
-                    subject_url,
-                    error = %e,
-                    is_timeout = e.is_timeout(),
-                    is_connect = e.is_connect(),
-                    error_code = "MOD_TRANSPORT_ERROR",
-                    "moderation request failed [MOD_TRANSPORT_ERROR]: network error calling NSFW API"
-                );
-                sentry::configure_scope(|scope| {
-                    scope.set_extra("moderation.path", path.into());
-                    scope.set_extra("moderation.error_code", "MOD_TRANSPORT_ERROR".into());
-                    scope.set_extra("moderation.is_timeout", e.is_timeout().into());
-                    scope.set_extra("moderation.is_connect", e.is_connect().into());
-                    if let Some(url) = subject_url {
-                        scope.set_extra("moderation.subject_url", url.into());
-                    }
-                });
-                ModerationError::RequestFailed(e.to_string())
-            })?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body_text = response.text().await.unwrap_or_default();
-            tracing::warn!(
-                path,
-                subject_url,
-                %status,
-                body = %body_text,
-                error_code = "MOD_SERVICE_ERROR",
-                "moderation service error response [MOD_SERVICE_ERROR]: NSFW API returned non-2xx"
-            );
-            sentry::configure_scope(|scope| {
-                scope.set_extra("moderation.path", path.into());
-                scope.set_extra("moderation.http_status", status.as_u16().into());
-                scope.set_extra("moderation.response_body", body_text.clone().into());
-                scope.set_extra("moderation.error_code", "MOD_SERVICE_ERROR".into());
-                if let Some(url) = subject_url {
-                    scope.set_extra("moderation.subject_url", url.into());
+        // Retry transient moderation failures (transport errors, non-2xx,
+        // malformed responses) before giving up. The caller maps an exhausted
+        // result to an "Invalid input prompt" client error.
+        let mut last_err: Option<ModerationError> = None;
+        for attempt in 1..=MODERATION_MAX_ATTEMPTS {
+            match self
+                .moderate_once(&secret, path, &request_body, subject_url)
+                .await
+            {
+                Ok(decision) => return Ok(decision),
+                // Permanent failure: don't waste further attempts.
+                Err(AttemptError::Terminal(e)) => {
+                    tracing::error!(
+                        path,
+                        subject_url,
+                        attempt,
+                        error = %e,
+                        error_code = "MOD_TERMINAL_ERROR",
+                        "moderation failed permanently [MOD_TERMINAL_ERROR]: request rejected by NSFW API"
+                    );
+                    return Err(e);
                 }
-            });
-            return Err(ModerationError::RequestFailed(format!(
-                "moderation service returned {status}: {body_text}"
-            )));
+                Err(AttemptError::Retryable(e)) => {
+                    if attempt < MODERATION_MAX_ATTEMPTS {
+                        let delay = std::time::Duration::from_millis(
+                            MODERATION_RETRY_BASE_DELAY_MS * 2u64.pow(attempt - 1),
+                        );
+                        tracing::warn!(
+                            path,
+                            subject_url,
+                            attempt,
+                            max_attempts = MODERATION_MAX_ATTEMPTS,
+                            delay_ms = delay.as_millis() as u64,
+                            error = %e,
+                            "moderation attempt failed, retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                    last_err = Some(e);
+                }
+            }
         }
 
-        let body: Value = response
-            .json()
-            .await
-            .map_err(|e| ModerationError::RequestFailed(e.to_string()))?;
-
-        let is_nsfw = body
-            .get("is_nsfw")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if is_nsfw {
-            Ok(ModerationDecision::Unsafe)
-        } else {
-            Ok(ModerationDecision::Safe)
-        }
+        // The loop runs at least once and only reaches here via the retryable
+        // branch, so last_err is always set.
+        let err = last_err.expect("retry loop records an error before exhausting");
+        tracing::error!(
+            path,
+            subject_url,
+            attempts = MODERATION_MAX_ATTEMPTS,
+            error = %err,
+            error_code = "MOD_RETRIES_EXHAUSTED",
+            "moderation failed after all retries [MOD_RETRIES_EXHAUSTED]: NSFW API unreachable"
+        );
+        Err(err)
     }
 
     async fn create_rate_limit(
@@ -1357,6 +1452,7 @@ mod tests {
     struct FakeDeps {
         calls: Arc<Mutex<Vec<Call>>>,
         moderation: Option<ModerationDecision>,
+        moderation_fails: bool,
         rate_limit: Option<Result<RateLimiterRequestKey, RateLimiterError>>,
         stage_image: Option<Result<Option<(String, Option<String>)>, ImageStageError>>,
         vast: Option<Result<VastSubmitAccepted, String>>,
@@ -1384,6 +1480,11 @@ mod tests {
         ) -> Result<ModerationDecision, ModerationError> {
             assert_eq!(input.prompt, "make a sunrise over mountains");
             self.push(Call::Moderate);
+            if self.moderation_fails {
+                return Err(ModerationError::RequestFailed(
+                    "simulated moderation outage".to_string(),
+                ));
+            }
             Ok(self.moderation.unwrap_or(ModerationDecision::Safe))
         }
 
@@ -1606,6 +1707,24 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
         assert!(matches!(err.error, VideoGenError::InvalidInput(_)));
+        assert_eq!(deps.calls(), vec![Call::Moderate]);
+    }
+
+    #[tokio::test]
+    async fn moderation_failure_returns_invalid_input_prompt_without_rate_limiter() {
+        let deps = FakeDeps {
+            moderation_fails: true,
+            ..FakeDeps::with_calls()
+        };
+
+        let result = generate_with_dependencies(request(), &deps, config()).await;
+
+        let err = result.unwrap_err();
+        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.error,
+            VideoGenError::InvalidInput("Invalid input prompt".to_string())
+        );
         assert_eq!(deps.calls(), vec![Call::Moderate]);
     }
 
