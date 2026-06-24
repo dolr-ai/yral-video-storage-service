@@ -24,7 +24,17 @@ pub enum ImportError {
     InvalidLimit(i64),
     #[error("postgres legacy video_index import failed: {0}")]
     Postgres(#[from] tokio_postgres::Error),
+    #[error("import aborted after {consecutive} consecutive row failures (systemic error); last: {last_error}")]
+    TooManyConsecutiveFailures {
+        consecutive: i64,
+        last_error: String,
+    },
 }
+
+/// If this many rows fail consecutively in the per-row fallback, treat the
+/// error as systemic (not one bad row) and fail the whole job. Reset to 0 on
+/// any successful row / committed batch.
+const MAX_CONSECUTIVE_IMPORT_FAILURES: i64 = 50;
 
 #[derive(Debug, Clone)]
 struct LegacyVideoIndexRow {
@@ -184,7 +194,6 @@ async fn import_current_video_index_inner(
     limit: Option<i64>,
     cancel: &CancellationToken,
 ) -> Result<ImportSummary, ImportError> {
-    let rows = fetch_legacy_rows(client, limit).await?;
     let mut summary = ImportSummary {
         job_run_id,
         scanned_rows: 0,
@@ -193,22 +202,104 @@ async fn import_current_video_index_inner(
         hash_feed_events_appended: 0,
         row_failures: 0,
     };
-
+    let batch_size =
+        crate::consts::MEDIA_IMPORT_BATCH_SIZE.load(std::sync::atomic::Ordering::Relaxed);
+    let mut after: Option<String> = None;
     let mut cancelled = false;
-    for row in rows {
+    let mut consecutive_failures: i64 = 0; // for the systemic-error circuit breaker
+
+    loop {
         if cancel.is_cancelled() {
             cancelled = true;
             break;
         }
-        summary.scanned_rows += 1;
-        let tx = client.transaction().await?;
 
-        let counts = import_one_row_txn(&tx, &row, job_run_id).await?;
-        tx.commit().await?;
-        summary.imported_media_rows += counts.imported_media_rows;
-        summary.hash_rows_upserted += counts.hash_rows_upserted;
-        summary.hash_feed_events_appended += counts.hash_feed_events_appended;
-        summary.row_failures += counts.row_failures;
+        // Global limit: cap rows fetched across the whole run.
+        let remaining = limit.map(|l| l - summary.scanned_rows);
+        if remaining == Some(0) {
+            break;
+        }
+        let page_limit = match remaining {
+            Some(r) => r.min(batch_size),
+            None => batch_size,
+        };
+
+        let page = fetch_missing_legacy_rows_after(client, after.as_deref(), page_limit).await?;
+        if page.is_empty() {
+            break;
+        }
+        // Advance the cursor on FETCH (not on import success) so an all-failing
+        // page still makes forward progress and the loop terminates.
+        after = page.last().map(|r| r.video_id.clone());
+
+        // Optimistic batch: import the whole page in one transaction.
+        let mut page_counts = RowCounts::default();
+        let tx = client.transaction().await?;
+        let mut batch_ok = true;
+        for row in &page {
+            match import_one_row_txn(&tx, row, job_run_id).await {
+                Ok(c) => {
+                    page_counts.imported_media_rows += c.imported_media_rows;
+                    page_counts.hash_rows_upserted += c.hash_rows_upserted;
+                    page_counts.hash_feed_events_appended += c.hash_feed_events_appended;
+                    page_counts.row_failures += c.row_failures;
+                }
+                Err(_) => {
+                    batch_ok = false;
+                    break;
+                }
+            }
+        }
+
+        if batch_ok {
+            tx.commit().await?;
+            summary.imported_media_rows += page_counts.imported_media_rows;
+            summary.hash_rows_upserted += page_counts.hash_rows_upserted;
+            summary.hash_feed_events_appended += page_counts.hash_feed_events_appended;
+            summary.row_failures += page_counts.row_failures;
+            consecutive_failures = 0; // a batch committed cleanly → not systemic
+        } else {
+            // A real SQL error poisoned the batch tx. Roll it back and reprocess
+            // this page row-by-row to isolate the offending row.
+            drop(tx);
+            for row in &page {
+                let row_tx = client.transaction().await?;
+                match import_one_row_txn(&row_tx, row, job_run_id).await {
+                    Ok(c) => {
+                        row_tx.commit().await?;
+                        summary.imported_media_rows += c.imported_media_rows;
+                        summary.hash_rows_upserted += c.hash_rows_upserted;
+                        summary.hash_feed_events_appended += c.hash_feed_events_appended;
+                        summary.row_failures += c.row_failures;
+                        consecutive_failures = 0; // a row succeeded (incl. handled keyless) → not systemic
+                    }
+                    Err(e) => {
+                        drop(row_tx);
+                        let fail_tx = client.transaction().await?;
+                        record_row_failure_txn(
+                            &fail_tx,
+                            job_run_id,
+                            &row.video_id,
+                            "import_error",
+                            &e.to_string(),
+                        )
+                        .await?;
+                        fail_tx.commit().await?;
+                        summary.row_failures += 1;
+                        consecutive_failures += 1;
+                        if consecutive_failures >= MAX_CONSECUTIVE_IMPORT_FAILURES {
+                            // Systemic error (every row failing the same way) → fail loud.
+                            return Err(ImportError::TooManyConsecutiveFailures {
+                                consecutive: consecutive_failures,
+                                last_error: e.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        summary.scanned_rows += page.len() as i64;
     }
 
     let status = if cancelled {
@@ -236,32 +327,6 @@ async fn insert_job_run(
         )
         .await?;
     Ok(())
-}
-
-async fn fetch_legacy_rows(
-    client: &Client,
-    limit: Option<i64>,
-) -> Result<Vec<LegacyVideoIndexRow>, tokio_postgres::Error> {
-    let sql = "SELECT video_id, storj_key, hetzner_key, phash, phash_kind, phash_version
-               FROM video_index
-               ORDER BY created_at, video_id";
-    let rows = if let Some(limit) = limit {
-        client.query(&format!("{sql} LIMIT $1"), &[&limit]).await?
-    } else {
-        client.query(sql, &[]).await?
-    };
-
-    Ok(rows
-        .into_iter()
-        .map(|row| LegacyVideoIndexRow {
-            video_id: row.get(0),
-            storj_key: row.get(1),
-            hetzner_key: row.get(2),
-            phash: row.get(3),
-            phash_kind: row.get(4),
-            phash_version: row.get(5),
-        })
-        .collect())
 }
 
 /// Paged, skip-existing scan of legacy `video_index`. Returns up to `limit`
@@ -984,46 +1049,173 @@ mod tests {
         let (_pg, mut client) = test_client().await;
         init_test_schema(&client).await;
 
-        client
-            .execute(
-                "INSERT INTO video_index (video_id, storj_key)
-                 VALUES ('video-error', 'creator/video-error.mp4')",
-                &[],
-            )
-            .await
-            .unwrap();
+        // Seed MAX_CONSECUTIVE_IMPORT_FAILURES + 10 (= 60) rows so the circuit breaker trips.
+        // With one row the per-row fallback would isolate the failure as succeeded_with_failures;
+        // many consecutive failures (all hitting the missing table) must fail the whole job.
+        for i in 0..(super::MAX_CONSECUTIVE_IMPORT_FAILURES + 10) {
+            client
+                .execute(
+                    "INSERT INTO video_index (video_id, storj_key) VALUES ($1, $2)",
+                    &[
+                        &format!("video-error-{i:03}"),
+                        &format!("creator/video-error-{i:03}.mp4"),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
         client
             .execute("DROP TABLE media_feed_events", &[])
             .await
             .unwrap();
 
-        let err = super::import_current_video_index(
-            &mut client,
-            "test-runner",
-            None,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-        // The dropped table surfaces as a Postgres error, not the InvalidLimit variant,
-        // and the original error must be preserved (not masked by the status update).
+        let cancel = CancellationToken::new();
+        let err = super::import_current_video_index(&mut client, "test-runner", None, &cancel)
+            .await
+            .unwrap_err();
+        // With the dropped table every row's fallback also fails → consecutive counter hits
+        // MAX_CONSECUTIVE_IMPORT_FAILURES → TooManyConsecutiveFailures returned.
         assert!(
-            matches!(err, ImportError::Postgres(_)),
-            "expected a postgres error, got {err:?}"
+            matches!(err, ImportError::TooManyConsecutiveFailures { .. }),
+            "expected TooManyConsecutiveFailures, got {err:?}"
         );
 
-        let run_row = client
+        let status: String = client
             .query_one(
-                "SELECT status, error_message
-                 FROM media_job_runs
-                 ORDER BY started_at DESC
-                 LIMIT 1",
+                "SELECT status FROM media_job_runs ORDER BY started_at DESC LIMIT 1",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(status, "failed");
+    }
+
+    #[tokio::test]
+    async fn keyless_row_in_a_batch_is_recorded_and_rest_of_batch_commits() {
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        // one good, one keyless (no storj/hetzner), one good
+        client
+            .execute(
+                "INSERT INTO video_index (video_id, storj_key) VALUES ('g1','creator/g1.mp4')",
                 &[],
             )
             .await
             .unwrap();
-        assert_eq!(run_row.get::<_, String>(0), "failed");
-        assert!(run_row.get::<_, Option<String>>(1).is_some());
+        client
+            .execute("INSERT INTO video_index (video_id) VALUES ('bad1')", &[])
+            .await
+            .unwrap();
+        client
+            .execute(
+                "INSERT INTO video_index (video_id, storj_key) VALUES ('g2','creator/g2.mp4')",
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let summary = super::import_current_video_index(&mut client, "t", None, &cancel)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.scanned_rows, 3);
+        assert_eq!(summary.imported_media_rows, 2);
+        assert_eq!(summary.row_failures, 1);
+        // good rows in master
+        let n: i64 = client
+            .query_one("SELECT count(*) FROM all_servable_videos_on_yral", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(n, 2);
+        // failure recorded
+        let f: i64 = client
+            .query_one(
+                "SELECT count(*) FROM media_job_failures WHERE video_id='bad1'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(f, 1);
+    }
+
+    #[tokio::test]
+    async fn import_makes_progress_over_keyless_rows_and_terminates() {
+        use std::sync::atomic::Ordering;
+        // Force tiny batches so multiple pages of keyless rows are exercised.
+        let prev_batch = crate::consts::MEDIA_IMPORT_BATCH_SIZE.swap(2, Ordering::Relaxed);
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        for vid in ["k1", "k2", "k3", "k4", "k5"] {
+            client
+                .execute("INSERT INTO video_index (video_id) VALUES ($1)", &[&vid])
+                .await
+                .unwrap();
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let summary = super::import_current_video_index(&mut client, "t", None, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(summary.scanned_rows, 5);
+        assert_eq!(summary.row_failures, 5);
+        assert_eq!(summary.imported_media_rows, 0);
+        let status: String = client
+            .query_one(
+                "SELECT status FROM media_job_runs WHERE id=$1::TEXT::UUID",
+                &[&summary.job_run_id.to_string()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(status, "succeeded_with_failures");
+        crate::consts::MEDIA_IMPORT_BATCH_SIZE.store(prev_batch, Ordering::Relaxed);
+    }
+
+    #[tokio::test]
+    async fn second_run_imports_only_missing_rows() {
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        client
+            .execute(
+                "INSERT INTO video_index (video_id, storj_key) VALUES ('r1','creator/r1.mp4')",
+                &[],
+            )
+            .await
+            .unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let _first = super::import_current_video_index(&mut client, "t", None, &cancel)
+            .await
+            .unwrap();
+        let events_after_first: i64 = client
+            .query_one("SELECT count(*) FROM media_feed_events", &[])
+            .await
+            .unwrap()
+            .get(0);
+        // add a new legacy row, re-run
+        client
+            .execute(
+                "INSERT INTO video_index (video_id, storj_key) VALUES ('r2','creator/r2.mp4')",
+                &[],
+            )
+            .await
+            .unwrap();
+        let summary = super::import_current_video_index(&mut client, "t", None, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(summary.scanned_rows, 1, "only the new row r2 is scanned");
+        assert_eq!(summary.imported_media_rows, 1);
+        let events_after_second: i64 = client
+            .query_one("SELECT count(*) FROM media_feed_events", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert!(
+            events_after_second > events_after_first,
+            "only r2's events added; r1 not re-emitted"
+        );
     }
 
     #[tokio::test]
