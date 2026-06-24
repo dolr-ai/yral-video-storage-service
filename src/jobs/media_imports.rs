@@ -239,6 +239,43 @@ async fn fetch_legacy_rows(
         .collect())
 }
 
+/// Paged, skip-existing scan of legacy `video_index`. Returns up to `limit`
+/// rows with `video_id > after` (or from the start when `after` is None) that
+/// are NOT yet present in `all_servable_videos_on_yral`. Both columns are PKs,
+/// so the anti-join + cursor range are index-driven. Mirrors the convention of
+/// `media_index::videos_missing_canonical_phash`.
+async fn fetch_missing_legacy_rows_after(
+    client: &Client,
+    after: Option<&str>,
+    limit: i64,
+) -> Result<Vec<LegacyVideoIndexRow>, tokio_postgres::Error> {
+    let rows = client
+        .query(
+            "SELECT v.video_id, v.storj_key, v.hetzner_key, v.phash, v.phash_kind, v.phash_version
+             FROM video_index v
+             WHERE ($1::TEXT IS NULL OR v.video_id > $1)
+               AND NOT EXISTS (
+                 SELECT 1 FROM all_servable_videos_on_yral m WHERE m.video_id = v.video_id
+               )
+             ORDER BY v.video_id
+             LIMIT $2",
+            &[&after, &limit],
+        )
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| LegacyVideoIndexRow {
+            video_id: row.get(0),
+            storj_key: row.get(1),
+            hetzner_key: row.get(2),
+            phash: row.get(3),
+            phash_kind: row.get(4),
+            phash_version: row.get(5),
+        })
+        .collect())
+}
+
 async fn import_media_row_txn(
     tx: &Transaction<'_>,
     row: &LegacyVideoIndexRow,
@@ -446,6 +483,103 @@ mod tests {
     async fn init_test_schema(client: &tokio_postgres::Client) {
         crate::db::init_schema(client).await.unwrap();
         crate::media_index::init_schema(client).await.unwrap();
+    }
+
+    fn servable_input(video_id: &str) -> crate::media_index::ServableVideoInput<'_> {
+        crate::media_index::ServableVideoInput {
+            video_id,
+            publisher_user_id: None,
+            post_id: None,
+            source_kind: "legacy_video_index",
+            source_ref: Some(video_id),
+            servable_status: "servable",
+            nsfw_state: None,
+            storage_provider: Some("storj"),
+            bucket: None,
+            object_key: Some(video_id),
+            canonical_url: None,
+            thumbnail_key: None,
+            duration_ms: None,
+            width: None,
+            height: None,
+            fps: None,
+            container: None,
+            video_codec: None,
+            audio_codec: None,
+            moov_atom_front: None,
+            canonical_encoding_version: None,
+            discovered_from: "test",
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_returns_only_rows_missing_from_master() {
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        // three legacy rows
+        for vid in ["v-a", "v-b", "v-c"] {
+            client
+                .execute(
+                    "INSERT INTO video_index (video_id, storj_key) VALUES ($1, $2)",
+                    &[&vid, &format!("creator/{vid}.mp4")],
+                )
+                .await
+                .unwrap();
+        }
+        // v-b already in master
+        let tx = client.transaction().await.unwrap();
+        crate::media_index::upsert_servable_video_txn(&tx, servable_input("v-b"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let rows = super::fetch_missing_legacy_rows_after(&client, None, 100)
+            .await
+            .unwrap();
+        let ids: Vec<_> = rows.iter().map(|r| r.video_id.as_str()).collect();
+        assert_eq!(ids, vec!["v-a", "v-c"], "v-b is in master, must be skipped");
+    }
+
+    #[tokio::test]
+    async fn scan_pages_by_video_id_cursor_and_respects_limit() {
+        let (_pg, client) = test_client().await;
+        init_test_schema(&client).await;
+        for vid in ["v-a", "v-b", "v-c"] {
+            client
+                .execute(
+                    "INSERT INTO video_index (video_id, storj_key) VALUES ($1, $2)",
+                    &[&vid, &format!("creator/{vid}.mp4")],
+                )
+                .await
+                .unwrap();
+        }
+        // limit 2, no cursor -> first two by video_id
+        let page1 = super::fetch_missing_legacy_rows_after(&client, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            page1
+                .iter()
+                .map(|r| r.video_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["v-a", "v-b"]
+        );
+        // cursor past v-b -> only v-c
+        let page2 = super::fetch_missing_legacy_rows_after(&client, Some("v-b"), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            page2
+                .iter()
+                .map(|r| r.video_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["v-c"]
+        );
+        // cursor past last -> empty
+        let page3 = super::fetch_missing_legacy_rows_after(&client, Some("v-c"), 2)
+            .await
+            .unwrap();
+        assert!(page3.is_empty());
     }
 
     #[tokio::test]
