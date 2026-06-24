@@ -67,7 +67,11 @@ pub async fn failure_summary(
 // counts grouped by phase, plus a bounded sample of last_error per phase.
 ```
 
-Implementation note for `failure_summary`: group by `phase` for counts, and gather samples with a bounded per-phase subquery (e.g. a lateral `SELECT DISTINCT left(last_error,200) ... WHERE phase = g.phase ORDER BY created_at DESC LIMIT 5`), or two queries (counts, then samples) joined in Rust. Filter by `job_kind` when provided. Order groups by `count` desc.
+Implementation note for `failure_summary`: group by `phase` for counts, then gather samples. **Do NOT use `SELECT DISTINCT left(last_error,200) ... ORDER BY created_at DESC`** — Postgres rejects `DISTINCT` with an `ORDER BY` on an expression not in the select list. Use one of:
+- `DISTINCT ON (left(last_error,200)) left(last_error,200), created_at ... ORDER BY left(last_error,200), created_at DESC` (then take 5), or
+- **two queries** (counts grouped by phase; recent rows per phase) deduped/capped in Rust — simplest, recommended.
+
+Filter by `job_kind` when provided. Order groups by `count` desc.
 
 ### 2. Routes — `src/routes/media.rs` (HMAC)
 
@@ -107,9 +111,10 @@ while let Some((row, res)) = s.next().await {
 ### 6. Sharper failure phase
 
 In `media_phash`'s failure path, record `phase` by error class instead of the single `"phash_compute"`:
-- download/fetch errors → `"phash_download"`
-- ffmpeg/decode/hash errors → `"phash_decode"`
-(persist-side errors keep their own phase.) This makes `failure_summary`'s phase grouping directly meaningful. Determined from where the `Result<_, String>` error originates in the download-and-hash closure (it already distinguishes the stages in its error strings).
+- tempfile/clone setup + download/fetch errors → `"phash_download"`
+- ffmpeg/decode/hash (incl. `spawn_blocking` panic) errors → `"phash_decode"`
+
+**Do this with a typed stage, not string-prefix matching** (the reviewer flagged that `persist_one` currently gets a flat `Result<VideoHashResult, String>`, so a phase can only be recovered by brittle prefix matching otherwise). Change the download-and-hash closure to carry the failed stage, e.g. return `Result<VideoHashResult, (&'static str, String)>` where the `&'static str` is the phase (`"phash_download"` for the tempfile/clone/download steps, `"phash_decode"` for the `spawn_blocking`/`hash_video_with_metadata` step). `persist_one` then records that phase verbatim instead of the hardcoded `"phash_compute"`. Setup errors (tempfile/clone) bucket under `"phash_download"` since they precede decode.
 
 ## Surfaces
 
@@ -124,7 +129,9 @@ DB-backed (testcontainers):
 - `recent_job_runs`: insert runs with varied `started_at`, assert newest-first + fields (incl. `totals`) returned.
 - `failure_summary`: seed `media_job_failures` across phases (with key-varying `last_error`s), assert grouping by `phase`, correct counts, ≤5 samples per phase, and the `job_kind` filter.
 - Route handlers: JSON shape, limit clamping (≤100, ≥1), `job_kind` passthrough. (Auth layering verified structurally as with the other media routes.)
-- `media_phash`: existing `persist_one` tests still pass (unchanged). The stream-persist change is in the untested orchestration shell (`run_inner`), consistent with how the codebase treats the I/O shell; the phase-split is covered by asserting a forced download-vs-decode failure records the expected `phase` via `persist_one`.
+- `media_phash`: existing `persist_one` tests still pass (unchanged). The stream-persist change is in the untested orchestration shell (`run_inner`), consistent with how the codebase treats the I/O shell. The phase-split is covered by asserting a forced download-vs-decode failure records the expected `phase` via `persist_one`. **Note:** the existing test that asserts the failure `phase == "phash_compute"` (around `media_phash.rs:806`) must be UPDATED to the new phase values (`phash_download`/`phash_decode`), not merely added to.
+
+Minor: confirm `#[derive(ToSchema)]` works on `JobRunView.totals: Option<serde_json::Value>` (the feed precedent uses a non-Option `Value`); trivial, glance during impl.
 
 ## Files to touch
 
