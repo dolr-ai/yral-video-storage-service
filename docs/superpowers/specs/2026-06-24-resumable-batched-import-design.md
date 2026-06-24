@@ -47,7 +47,9 @@ LIMIT $2
 ```
 
 - Use the **same cursor convention as the existing `videos_missing_canonical_phash`** helper (`repo.rs`): `after: Option<&str>`, guarded by `($1::TEXT IS NULL OR v.video_id > $1)`. Start `after = None`, advance to the last `video_id` of each page, stop when a page returns zero rows. (Do NOT use an empty-string sentinel — a row whose `video_id` is literally `''` would be skipped, and the `Option`/NULL guard is the established codebase pattern.)
-- Both `video_index.video_id` and `all_servable_videos_on_yral.video_id` are primary keys → the anti-join and the cursor range are index-driven. On a resumed run the already-imported rows are skipped by an index-only check, not re-processed.
+- Both `video_index.video_id` and `all_servable_videos_on_yral.video_id` are primary keys → the anti-join and the cursor range are index-driven.
+- **Resume cost (honest):** resume is cheap *relative to re-processing*, not free. Each run sweeps an index-anti-join over the already-done rows (PK-index-only probes — no heap fetch, no per-row transaction) before/while reaching the remainder. At ~1M rows that's on the order of seconds-to-minutes of index probing per run, versus the current job's hours of re-`BEGIN`/`COMMIT` re-processing.
+- **Ordering note:** the scan orders by `video_id` (the current job ordered by `created_at, video_id`). Import order and therefore feed-event cursor allocation now follow `video_id` order. Harmless — consumers page by `cursor`, not by `created_at`.
 - Streams page-by-page → bounded memory regardless of table size.
 
 ### 2. Import — optimistic batch, per-row fallback
@@ -62,7 +64,13 @@ For each page (a `Vec` of rows held in memory):
 
 ### `limit` semantics under paging
 
-`limit: Option<i64>` stays a **global cap on rows scanned across the whole run** (unchanged meaning; still validated `>= 0`). Implement by tracking `remaining`: each page fetches `LIMIT min(batch_size, remaining)`, decrement `remaining` by the page's row count, and stop when `remaining == 0` or a page is empty. `None` means unbounded (the full backfill).
+`limit: Option<i64>` is a **global cap across the whole run, still validated `>= 0`**. Note the meaning shifts subtly under skip-existing: the scan only ever returns rows *missing* from master, so `limit` now caps **missing rows imported/attempted**, not raw `video_index` rows. This is the more useful meaning (bound the work) and matches how the validation run behaved (`--limit 100` on an empty master imported 100). Implement by tracking `remaining`: each page fetches `LIMIT min(batch_size, remaining)`, decrement `remaining` by the page's row count, stop when `remaining == 0` or a page is empty. `None` = unbounded (the full backfill).
+
+### Performance expectations
+
+Batching targets the **dominant cost**: this is a Patroni HA Postgres cluster, so each `COMMIT` likely waits on a synchronous-replica ack. Per-row commit = a cross-node round-trip *per row*; batching 500 rows/commit removes ~500× of those waits (plus 500× fewer local fsyncs). That is the big win and the reason a full pass drops from many hours toward a fraction of that.
+
+It is **not** bulk-`COPY` speed, and the spec must not imply 500× wall-clock. The ~5 statements per row (master upsert + source + `raw_payload` update + hash upsert + 2 feed appends) are still issued sequentially over the network, so per-statement round-trip latency remains the residual floor. If, after this change, throughput is still inadequate at 1M, the next lever is a true bulk path (multi-row `INSERT` / `COPY` + set-based feed-event insertion) — explicitly **out of scope here** (YAGNI until measured).
 
 ### 3. Cancellation, job lifecycle
 
@@ -72,7 +80,7 @@ For each page (a `Vec` of rows held in memory):
 
 ### 4. Config
 
-New `MEDIA_IMPORT_BATCH_SIZE` in `src/consts.rs`, modeled exactly like the existing `SCAN_PAGE_SIZE` — a `Lazy<AtomicI64>` defaulting to **500**, env-overridable (so it's runtime-tunable via the same mechanism, not a hard `const`). 500 keeps the transaction small enough to avoid long advisory-lock holds while cutting fsyncs ~500×.
+New `MEDIA_IMPORT_BATCH_SIZE` in `src/consts.rs`, modeled exactly like the existing `SCAN_PAGE_SIZE` — a `Lazy<AtomicI64>` defaulting to **500**, env-overridable. 500 keeps the transaction small enough to avoid long advisory-lock holds while cutting fsyncs ~500×. Note: unlike `scan_page_size`, this is **env-only** — it is *not* exposed via the `/mirror/config` runtime-update endpoint in this change (add it there later if live tuning during the backfill proves necessary).
 
 ## Accepted limitations (documented, not bugs)
 
@@ -89,6 +97,7 @@ DB-backed (testcontainers), seeding `video_index` + `all_servable_videos_on_yral
 4. **Per-row fallback isolation:** force one row in a page to raise a SQL error → that row is recorded in `media_job_failures`, the rest of the page commits, run ends `succeeded_with_failures`.
 5. **Cancel between batches:** pre-cancelled token → stops early, run finalized `cancelled`, partial progress committed.
 6. **Idempotent re-run:** running twice over the same data produces no duplicate source rows and no new feed events on the second run.
+7. **Forward progress over un-importable rows:** seed a page-plus of keyless rows (no `storj_key`/`hetzner_key`, which never enter master). The run must **advance past them and terminate** (the cursor advances on fetch, not on import success — guards against an infinite re-fetch loop), record each in `media_job_failures`, and finish `succeeded_with_failures`. Re-running re-attempts them (anti-join re-selects; failure re-recorded via upsert, no duplicates) and still terminates.
 
 ## Files to touch
 
