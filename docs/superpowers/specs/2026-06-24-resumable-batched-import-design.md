@@ -38,7 +38,7 @@ Replace `fetch_legacy_rows`'s load-all with a paged anti-join, paging by a `vide
 ```sql
 SELECT v.video_id, v.storj_key, v.hetzner_key, v.phash, v.phash_kind, v.phash_version
 FROM video_index v
-WHERE v.video_id > $1
+WHERE ($1::TEXT IS NULL OR v.video_id > $1)
   AND NOT EXISTS (
     SELECT 1 FROM all_servable_videos_on_yral m WHERE m.video_id = v.video_id
   )
@@ -46,7 +46,7 @@ ORDER BY v.video_id
 LIMIT $2
 ```
 
-- Loop: start `$1 = ''` (empty string; all text `video_id` sort after it), advance `$1` to the last `video_id` of each page, stop when a page returns zero rows.
+- Use the **same cursor convention as the existing `videos_missing_canonical_phash`** helper (`repo.rs`): `after: Option<&str>`, guarded by `($1::TEXT IS NULL OR v.video_id > $1)`. Start `after = None`, advance to the last `video_id` of each page, stop when a page returns zero rows. (Do NOT use an empty-string sentinel — a row whose `video_id` is literally `''` would be skipped, and the `Option`/NULL guard is the established codebase pattern.)
 - Both `video_index.video_id` and `all_servable_videos_on_yral.video_id` are primary keys → the anti-join and the cursor range are index-driven. On a resumed run the already-imported rows are skipped by an index-only check, not re-processed.
 - Streams page-by-page → bounded memory regardless of table size.
 
@@ -56,8 +56,13 @@ For each page (a `Vec` of rows held in memory):
 
 - **Happy path:** open ONE transaction, import every row in the page (the existing per-row work — `upsert_servable_video_txn` for master + source `raw_payload`, `upsert_hash_record_txn`, and the two feed-event appends via the serialized outbox helper), then `COMMIT`. **One fsync per page, zero subtransactions.**
 - Keyless rows (no `storj_key`/`hetzner_key`) are **not** errors: they record a `media_job_failures` row and continue within the same batch (unchanged Phase 1C behavior).
-- **Fallback path:** if importing a row raises a real SQL error (which poisons the open transaction), `ROLLBACK` the batch, restore the summary counters to their pre-batch snapshot, then reprocess that same page **row-by-row, each in its own transaction**. This isolates the offending row (recorded in `media_job_failures`) while committing the rest. Genuine row errors are rare, so this path almost never runs.
+- **Fallback path:** if importing a row raises a real SQL error (which poisons the open transaction), `ROLLBACK` the batch, then reprocess that same page **row-by-row, each in its own transaction**. This isolates the offending row (recorded in `media_job_failures`) while committing the rest. Genuine row errors are rare, so this path almost never runs.
+- **Counter accounting (explicit):** accumulate each page's counts in **local variables**, and fold them into the run `summary` (`scanned_rows`, `imported_media_rows`, `hash_rows_upserted`, `hash_feed_events_appended`, `row_failures`) **only after the batch `COMMIT` succeeds** — so a rolled-back batch contributes nothing and there is no "restore" to do. On the fallback path, accumulate from the per-row commits instead. `scanned_rows` counts **each row exactly once** (a row reprocessed by the fallback is not double-counted). This preserves the exact totals semantics the current tests assert (e.g. `scanned_rows == 2`).
 - **Crash-consistency:** because a batch commits atomically, a process kill mid-batch rolls the batch back — no half-imported rows. The next run re-imports that page via skip-existing.
+
+### `limit` semantics under paging
+
+`limit: Option<i64>` stays a **global cap on rows scanned across the whole run** (unchanged meaning; still validated `>= 0`). Implement by tracking `remaining`: each page fetches `LIMIT min(batch_size, remaining)`, decrement `remaining` by the page's row count, and stop when `remaining == 0` or a page is empty. `None` means unbounded (the full backfill).
 
 ### 3. Cancellation, job lifecycle
 
@@ -67,11 +72,11 @@ For each page (a `Vec` of rows held in memory):
 
 ### 4. Config
 
-New `MEDIA_IMPORT_BATCH_SIZE` constant in `src/consts.rs`, default **500**, overridable via env. 500 keeps the transaction small enough to avoid long advisory-lock holds while cutting fsyncs ~500×.
+New `MEDIA_IMPORT_BATCH_SIZE` in `src/consts.rs`, modeled exactly like the existing `SCAN_PAGE_SIZE` — a `Lazy<AtomicI64>` defaulting to **500**, env-overridable (so it's runtime-tunable via the same mechanism, not a hard `const`). 500 keeps the transaction small enough to avoid long advisory-lock holds while cutting fsyncs ~500×.
 
 ## Accepted limitations (documented, not bugs)
 
-- **No update re-sync.** Skip-existing imports only rows absent from master; it will not re-import a row whose `video_index` data changed after its first import (e.g. a `storj_key` added later). Acceptable for the effectively append-only legacy table. No full-rescan mode (YAGNI) until update-sync is actually needed.
+- **No update re-sync.** Skip-existing keys on master-row *presence*, so it will not re-touch a row already in master. This covers two cases, both acceptable: (a) a `video_index` row whose data changed after first import (e.g. a `storj_key` added later) is not re-synced; (b) a row left in master *without* its hash row / hash feed event by an older partial run of the previous per-row job is skipped (master present) and its hash event is never emitted. Both are fine for the effectively append-only legacy table. No full-rescan mode (YAGNI) until update-sync is actually needed.
 - **Keyless rows re-attempted each run.** They never get a master row, so the anti-join re-selects them on every run and re-records the same `media_job_failures` row (upsert, no duplicates). Tiny minority; acceptable.
 
 ## Testing
