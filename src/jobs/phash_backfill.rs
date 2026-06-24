@@ -1,6 +1,6 @@
 use anyhow::Result;
 use futures::StreamExt;
-use phash::PHasher;
+use phash::{PHasher, VideoHashResult};
 use tempfile::NamedTempFile;
 use tokio_util::sync::CancellationToken;
 
@@ -35,11 +35,11 @@ pub async fn run(
 
         // buffer_unordered bounds concurrent in-flight futures (and their tempfiles).
         // Do NOT use join_all — that would open SCAN_PAGE_SIZE tempfiles simultaneously.
-        let results: Vec<(String, Result<String>)> = futures::stream::iter(rows)
+        let results: Vec<(String, Result<VideoHashResult>)> = futures::stream::iter(rows)
             .map(|row| {
                 let s3 = s3.clone();
                 async move {
-                    let result: Result<String> = async {
+                    let result: Result<VideoHashResult> = async {
                         let tmp =
                             NamedTempFile::new().map_err(|e| anyhow::anyhow!("tempfile: {e}"))?;
                         {
@@ -57,11 +57,12 @@ pub async fn run(
 
                         // Pass path only (not file handle) into blocking thread
                         let path = tmp.path().to_owned();
-                        let phash_result =
-                            tokio::task::spawn_blocking(move || PHasher::new().compute_hash(&path))
-                                .await
-                                .map_err(|e| anyhow::anyhow!("spawn_blocking panic: {e}"))
-                                .and_then(|r| r.map_err(|e| anyhow::anyhow!("phash: {e}")))?;
+                        let phash_result = tokio::task::spawn_blocking(move || {
+                            PHasher::new().hash_video_with_metadata(&path)
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("spawn_blocking panic: {e}"))
+                        .and_then(|r| r.map_err(|e| anyhow::anyhow!("phash: {e}")))?;
 
                         drop(tmp);
                         Ok(phash_result)
@@ -79,8 +80,15 @@ pub async fn run(
         // Sequential DB writes after all parallel work
         for (video_id, result) in results {
             match result {
-                Ok(phash) => {
-                    db::update_phash_success(&client, &video_id, &phash).await?;
+                Ok(result) => {
+                    db::update_phash_success(
+                        &client,
+                        &video_id,
+                        &result.hash,
+                        result.hash_kind,
+                        result.hash_version,
+                    )
+                    .await?;
                 }
                 Err(e) => {
                     tracing::error!(video_id = %video_id, error = %e, "phash failed");

@@ -19,11 +19,19 @@ Commands:
   config               Show dynamic configuration
   config-set           Update configuration (use --phash, --mirror, --page)
 
+  media-import         Trigger video-index import into media master table [--limit N]
+  media-phash          Trigger pHash computation for media master entries [--limit N]
+  media-cancel         Cancel any running media import / phash jobs
+  media-status         Show running status of media import and phash jobs
+  media-audit          Show pHash coverage stats for servable videos
+  media-feed           Stream events from the media feed [--after CURSOR] [--limit N]
+
 Options:
-  --limit N           Stop after processing N items (scan/phash/mirror/run-pipeline)
+  --limit N           Stop after processing N items (scan/phash/mirror/run-pipeline/media-*)
   --prefix PREFIX     Filter by object key prefix, e.g. publisher-id/  (scan/run-pipeline)
   --full-scan         Scan entire S3 bucket and reset failed jobs instead of resuming (scan/run-pipeline)
   --video VIDEO_ID    Video ID for video-duplicates command
+  --after CURSOR      Cursor (i64) for media-feed pagination
 
 Environment:
   MIRROR_SERVICE_URL    Base URL of the service (required)
@@ -47,6 +55,12 @@ fn parse_full_scan(args: &[String]) -> Option<bool> {
     } else {
         None
     }
+}
+
+fn parse_after(args: &[String]) -> Option<i64> {
+    args.windows(2)
+        .find(|w| w[0] == "--after")
+        .and_then(|w| w[1].parse().ok())
 }
 
 #[tokio::main]
@@ -83,7 +97,10 @@ async fn main() {
                     println!("\nduplicate phashes ({}):", r.duplicate_phashes.len());
                     for d in &r.duplicate_phashes {
                         let ids: Vec<&str> = d.videos.iter().map(|v| v.video_id.as_str()).collect();
-                        println!("  {} → {:?}", d.phash, ids);
+                        println!(
+                            "  {}/{} {} → {:?}",
+                            d.hash_kind, d.hash_version, d.phash, ids
+                        );
                     }
                 }
                 Ok(())
@@ -95,7 +112,10 @@ async fn main() {
                 println!("duplicate groups:  {}", r.total_groups);
                 println!("duplicate videos:  {}", r.total_duplicate_videos);
                 for g in &r.groups {
-                    println!("\n  phash: {} ({} videos)", g.phash, g.count);
+                    println!(
+                        "\n  phash: {}/{} {} ({} videos)",
+                        g.hash_kind, g.hash_version, g.phash, g.count
+                    );
                     for v in &g.videos {
                         println!("    video_id:    {}", v.video_id);
                         println!("    storj_key:   {}", v.storj_key.as_deref().unwrap_or("—"));
@@ -141,7 +161,8 @@ async fn main() {
             };
             match client.video_duplicates(vid).await {
                 Ok(Some(g)) => {
-                    println!("phash: {}", g.phash);
+                    println!("phash: {} {}", g.hash_version, g.phash);
+                    println!("kind: {}", g.hash_kind);
                     println!("count: {}", g.count);
                     for v in &g.videos {
                         println!("  {}", v.video_id);
@@ -248,6 +269,54 @@ async fn main() {
                     println!("phash_concurrency:  {}", c.phash_concurrency);
                     println!("mirror_concurrency: {}", c.mirror_concurrency);
                     println!("scan_page_size:     {}", c.scan_page_size);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "media-import" => client
+            .media_import(limit)
+            .await
+            .map(|_| println!("media-import accepted")),
+        "media-phash" => client
+            .media_phash(limit)
+            .await
+            .map(|_| println!("media-phash accepted")),
+        "media-cancel" => match client.media_cancel().await {
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "media-status" => match client.media_status().await {
+            Ok(s) => {
+                println!(
+                    "import: {}",
+                    if s.import_running { "running" } else { "idle" }
+                );
+                println!(
+                    "phash:  {}",
+                    if s.phash_running { "running" } else { "idle" }
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "media-audit" => match client.media_audit().await {
+            Ok(r) => {
+                println!("total_servable:         {}", r.total_servable);
+                println!("with_canonical_phash:   {}", r.with_canonical_phash);
+                println!("missing_canonical_phash:{}", r.missing_canonical_phash);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "media-feed" => {
+            let after = parse_after(&args);
+            match client.media_feed(after, limit).await {
+                Ok(r) => {
+                    println!("{:#?}", r);
                     Ok(())
                 }
                 Err(e) => Err(e),
@@ -393,5 +462,13 @@ mod tests {
             parse_full_scan(&args(&["mirror-client", "scan-hetzner"])),
             None
         );
+    }
+
+    #[test]
+    fn parses_after_flag() {
+        let a = args(&["bin", "media-feed", "--after", "42"]);
+        assert_eq!(parse_after(&a), Some(42));
+        let none = args(&["bin", "media-feed"]);
+        assert_eq!(parse_after(&none), None);
     }
 }

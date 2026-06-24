@@ -207,7 +207,7 @@ impl HetznerBackend {
     async fn list_objects(&self, prefix: Option<&str>) -> Result<Vec<ObjectInfo>> {
         let objects = self
             .client
-            .list_objects(prefix)
+            .list_objects(prefix, None)
             .await
             .map_err(anyhow::Error::msg)?;
         Ok(objects

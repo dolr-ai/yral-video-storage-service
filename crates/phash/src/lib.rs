@@ -1,7 +1,31 @@
-use anyhow::{Context, Result};
+use anyhow::Context;
 use image::DynamicImage;
 use image_hasher::{HasherConfig, ImageHash};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+pub type PHashError = anyhow::Error;
+
+pub const HASH_KIND: &str = "phash";
+pub const HASH_VERSION: &str = "offchain_binary_10x8_v1";
+pub const EXPECTED_BINARY_HASH_LEN: usize = 640;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoMetadata {
+    pub duration_seconds: f64,
+    pub frame_count: usize,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoHashResult {
+    pub hash: String,
+    pub metadata: VideoMetadata,
+    pub hash_kind: &'static str,
+    pub hash_version: &'static str,
+}
 
 #[derive(Debug, Clone)]
 pub struct PHasher {
@@ -23,141 +47,291 @@ impl PHasher {
         }
     }
 
-    /// Compute perceptual hash for a video file.
-    /// Returns concatenated hex-encoded hashes — one per sampled frame.
-    /// Output length = num_frames × (hash_size² / 4) hex chars (deterministic).
-    pub fn compute_hash(&self, path: &Path) -> Result<String> {
-        use ffmpeg_next as ffmpeg;
+    pub fn compute_hash(&self, path: &Path) -> Result<String, PHashError> {
+        self.hash_video(path)
+    }
 
-        ffmpeg::init().context("ffmpeg init")?;
+    /// Compute off-chain-compatible pHash for a video file.
+    ///
+    /// Returns ten 8x8 pHashes concatenated as a 640-character binary string.
+    pub fn hash_video(&self, path: impl AsRef<Path>) -> Result<String, PHashError> {
+        Ok(self.hash_video_with_metadata(path)?.hash)
+    }
 
-        let mut ictx = ffmpeg::format::input(path)
-            .with_context(|| format!("open video: {}", path.display()))?;
+    pub fn hash_video_with_metadata(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<VideoHashResult, PHashError> {
+        let (frames, metadata) = self
+            .extract_frames_with_metadata(path.as_ref())
+            .context("Failed to extract frames")?;
 
-        let video_stream_index = ictx
-            .streams()
-            .best(ffmpeg::media::Type::Video)
-            .context("no video stream")?
-            .index();
+        if frames.is_empty() {
+            log::warn!("No frames extracted from video: {:?}", path.as_ref());
+            anyhow::bail!("No frames extracted from video");
+        }
 
-        let stream = ictx.stream(video_stream_index).context("stream")?;
+        let frame_hashes: Vec<String> = frames
+            .iter()
+            .map(|frame| {
+                self.compute_image_hash(frame)
+                    .map(|hash| self.hash_to_binary_string(&hash))
+            })
+            .collect::<Result<Vec<_>, PHashError>>()?;
 
-        let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-            .context("codec context")?
-            .decoder()
-            .video()
-            .context("video decoder")?;
+        let mut hashes = Vec::with_capacity(self.num_frames);
+        for i in 0..self.num_frames {
+            hashes.push(frame_hashes[i % frame_hashes.len()].clone());
+        }
 
-        // AV_NOPTS_VALUE = i64::MIN — stream duration absent for fragmented/truncated files
-        let duration_ts = if stream.duration() == i64::MIN {
-            // Fall back to format-context duration (in AV_TIME_BASE = 1_000_000 units)
-            let fmt_duration = ictx.duration();
-            if fmt_duration <= 0 {
-                anyhow::bail!("Cannot determine video duration for {}", path.display());
-            }
-            // Convert from AV_TIME_BASE to stream time_base units
-            let tb = stream.time_base();
-            (fmt_duration as f64 * tb.denominator() as f64
-                / (ffmpeg_next::ffi::AV_TIME_BASE as f64 * tb.numerator() as f64))
-                as i64
-        } else {
-            stream.duration()
+        if frame_hashes.len() < self.num_frames {
+            log::debug!(
+                "Video has {} frames, repeating cyclically to fill {} slots",
+                frame_hashes.len(),
+                self.num_frames
+            );
+        }
+
+        Ok(VideoHashResult {
+            hash: hashes.join(""),
+            metadata,
+            hash_kind: HASH_KIND,
+            hash_version: HASH_VERSION,
+        })
+    }
+
+    fn extract_frames_with_metadata(
+        &self,
+        video_path: &Path,
+    ) -> Result<(Vec<DynamicImage>, VideoMetadata), PHashError> {
+        ffmpeg_next::init().context("ffmpeg init")?;
+
+        let mut ictx =
+            ffmpeg_next::format::input(video_path).context("Failed to open video file")?;
+
+        let (stream_index, total_frames, mut decoder, mut metadata) = {
+            let stream = ictx
+                .streams()
+                .best(ffmpeg_next::media::Type::Video)
+                .context("No video stream found")?;
+            let stream_index = stream.index();
+            let total_frames = stream.frames() as usize;
+
+            let context_decoder =
+                ffmpeg_next::codec::context::Context::from_parameters(stream.parameters())
+                    .context("Failed to create codec context")?;
+            let decoder = context_decoder
+                .decoder()
+                .video()
+                .context("Failed to create video decoder")?;
+
+            let metadata = VideoMetadata {
+                duration_seconds: duration_seconds(stream.duration(), stream.time_base(), &ictx),
+                frame_count: total_frames,
+                width: decoder.width(),
+                height: decoder.height(),
+                fps: rational_to_f64(stream.avg_frame_rate()),
+            };
+
+            (stream_index, total_frames, decoder, metadata)
         };
 
-        // Compute evenly-spaced timestamps (in stream time_base units)
-        let timestamps: Vec<i64> = (0..self.num_frames)
-            .map(|i| {
-                let frac = if self.num_frames > 1 {
-                    i as f64 / (self.num_frames - 1) as f64
-                } else {
-                    0.5
-                };
-                (frac * duration_ts as f64) as i64
-            })
+        let frame_interval = if total_frames > 1 {
+            (total_frames - 1) as f64 / (self.num_frames - 1) as f64
+        } else {
+            0.0
+        };
+
+        // Preserve off-chain_binary_10x8_v1 behavior: when FFmpeg does not
+        // report frame count, all target indices collapse to frame 0.
+        let target_indices: Vec<usize> = (0..self.num_frames)
+            .map(|i| (i as f64 * frame_interval).round() as usize)
             .collect();
 
+        let mut frames = Vec::new();
+        let mut frame_count = 0usize;
+        let mut decoded_frame = ffmpeg_next::util::frame::video::Video::empty();
+
+        for (stream, packet) in ictx.packets() {
+            if stream.index() == stream_index {
+                if let Err(e) = decoder.send_packet(&packet) {
+                    log::warn!("Skipping corrupt packet at frame {}: {}", frame_count, e);
+                    continue;
+                }
+
+                while decoder.receive_frame(&mut decoded_frame).is_ok() {
+                    if target_indices.contains(&frame_count) {
+                        match self.convert_to_rgb(&decoded_frame) {
+                            Ok(rgb_frame) => {
+                                frames.push(rgb_frame);
+                                if frames.len() >= self.num_frames {
+                                    metadata.frame_count =
+                                        metadata_frame_count(total_frames, frame_count);
+                                    return Ok((frames, metadata));
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to convert frame {} to RGB, skipping: {}",
+                                    frame_count,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    frame_count += 1;
+                }
+            }
+        }
+
+        if let Err(e) = decoder.send_eof() {
+            log::warn!("Failed to send EOF to decoder: {}", e);
+        }
+
+        while decoder.receive_frame(&mut decoded_frame).is_ok() {
+            if target_indices.contains(&frame_count) {
+                match self.convert_to_rgb(&decoded_frame) {
+                    Ok(rgb_frame) => {
+                        frames.push(rgb_frame);
+                        if frames.len() >= self.num_frames {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to convert frame {} to RGB during flush, skipping: {}",
+                            frame_count,
+                            e
+                        );
+                    }
+                }
+            }
+            frame_count += 1;
+        }
+
+        metadata.frame_count = metadata_frame_count(total_frames, frame_count);
+        Ok((frames, metadata))
+    }
+
+    fn convert_to_rgb(
+        &self,
+        frame: &ffmpeg_next::util::frame::video::Video,
+    ) -> Result<DynamicImage, PHashError> {
+        let width = frame.width();
+        let height = frame.height();
+
+        let mut scaler = ffmpeg_next::software::scaling::context::Context::get(
+            frame.format(),
+            width,
+            height,
+            ffmpeg_next::format::Pixel::RGB24,
+            width,
+            height,
+            ffmpeg_next::software::scaling::flag::Flags::BILINEAR,
+        )
+        .context("Failed to create scaler")?;
+
+        let mut rgb_frame = ffmpeg_next::util::frame::video::Video::empty();
+        scaler
+            .run(frame, &mut rgb_frame)
+            .context("Failed to scale frame")?;
+
+        let data = rgb_frame.data(0);
+        let stride = rgb_frame.stride(0);
+        let img_data = copy_rgb24_frame_data(data, stride, width, height)?;
+
+        let img = image::RgbImage::from_raw(width, height, img_data)
+            .context("Failed to create image from raw data")?;
+
+        Ok(DynamicImage::ImageRgb8(img))
+    }
+
+    fn compute_image_hash(&self, img: &DynamicImage) -> Result<ImageHash, PHashError> {
         let hasher = HasherConfig::new()
             .hash_size(self.hash_size, self.hash_size)
             .to_hasher();
 
-        let mut result = String::new();
+        let gray = img.to_luma8();
+        Ok(hasher.hash_image(&gray))
+    }
 
-        for &ts in &timestamps {
-            ictx.seek(ts, ..ts).context("seek")?;
-            decoder.flush();
+    fn hash_to_binary_string(&self, hash: &ImageHash) -> String {
+        let bytes = hash.as_bytes();
+        let mut binary = String::with_capacity(bytes.len() * 8);
 
-            let mut found = false;
-            'packet_loop: for (stream, packet) in ictx.packets() {
-                if stream.index() != video_stream_index {
-                    continue;
-                }
-                decoder.send_packet(&packet).context("send packet")?;
-                let mut frame = ffmpeg::frame::Video::empty();
-                if decoder.receive_frame(&mut frame).is_ok() {
-                    let image = frame_to_image(&frame)?;
-                    let hash: ImageHash = hasher.hash_image(&image);
-                    result.push_str(&bytes_to_hex(hash.as_bytes()));
-                    found = true;
-                    break 'packet_loop;
-                }
-            }
-
-            if !found {
-                log::warn!("No frame found at timestamp {ts}, using zero hash");
-                // hash_size bits = hash_size * hash_size bits = hash_size^2 / 8 bytes
-                let zero_bytes = vec![0u8; (self.hash_size * self.hash_size / 8) as usize];
-                result.push_str(&bytes_to_hex(&zero_bytes));
+        for byte in bytes {
+            for i in (0..8).rev() {
+                binary.push(if (byte >> i) & 1 == 1 { '1' } else { '0' });
             }
         }
 
-        if result.is_empty() {
-            anyhow::bail!("Could not extract any frames from {}", path.display());
-        }
-
-        Ok(result)
+        binary
     }
 }
 
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
+fn duration_seconds(
+    stream_duration: i64,
+    time_base: ffmpeg_next::Rational,
+    ictx: &ffmpeg_next::format::context::Input,
+) -> f64 {
+    if stream_duration > 0 {
+        stream_duration as f64 * rational_to_f64(time_base)
+    } else if ictx.duration() > 0 {
+        ictx.duration() as f64 / ffmpeg_next::ffi::AV_TIME_BASE as f64
+    } else {
+        0.0
     }
-    s
 }
 
-fn frame_to_image(frame: &ffmpeg_next::frame::Video) -> Result<DynamicImage> {
-    use ffmpeg_next::format::Pixel;
-    use ffmpeg_next::software::scaling::{context::Context as ScalingContext, flag::Flags};
+fn rational_to_f64(value: ffmpeg_next::Rational) -> f64 {
+    if value.denominator() == 0 {
+        0.0
+    } else {
+        value.numerator() as f64 / value.denominator() as f64
+    }
+}
 
-    let width = frame.width();
-    let height = frame.height();
+fn metadata_frame_count(total_frames: usize, decoded_frames: usize) -> usize {
+    if total_frames > 0 {
+        total_frames
+    } else {
+        decoded_frames
+    }
+}
 
-    let mut scaler = ScalingContext::get(
-        frame.format(),
-        width,
-        height,
-        Pixel::RGB24,
-        width,
-        height,
-        Flags::BILINEAR,
-    )
-    .context("scaler")?;
+fn copy_rgb24_frame_data(
+    data: &[u8],
+    stride: usize,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, PHashError> {
+    let row_bytes = (width as usize)
+        .checked_mul(3)
+        .context("RGB24 row byte count overflow")?;
+    anyhow::ensure!(
+        stride >= row_bytes,
+        "RGB24 stride {stride} is shorter than row width {row_bytes}"
+    );
 
-    let mut rgb_frame = ffmpeg_next::frame::Video::empty();
-    scaler.run(frame, &mut rgb_frame).context("scale frame")?;
+    let capacity = row_bytes
+        .checked_mul(height as usize)
+        .context("RGB24 image byte count overflow")?;
+    let mut img_data = Vec::with_capacity(capacity);
 
-    let data = rgb_frame.data(0);
-    let stride = rgb_frame.stride(0);
-
-    let mut buf = Vec::with_capacity((width * height * 3) as usize);
-    for row in 0..height as usize {
-        buf.extend_from_slice(&data[row * stride..row * stride + width as usize * 3]);
+    for y in 0..height as usize {
+        let row_start = y.checked_mul(stride).context("RGB24 row offset overflow")?;
+        let row_end = row_start
+            .checked_add(row_bytes)
+            .context("RGB24 row end overflow")?;
+        anyhow::ensure!(
+            row_end <= data.len(),
+            "RGB24 frame data too short for row {y}: need {row_end} bytes, have {}",
+            data.len()
+        );
+        img_data.extend_from_slice(&data[row_start..row_end]);
     }
 
-    let img = image::RgbImage::from_raw(width, height, buf).context("RgbImage from raw")?;
-    Ok(DynamicImage::ImageRgb8(img))
+    Ok(img_data)
 }
 
 #[cfg(test)]
@@ -174,5 +348,29 @@ mod tests {
     fn phasher_default_hash_size() {
         let p = PHasher::new();
         assert_eq!(p.hash_size, 8);
+    }
+
+    #[test]
+    fn copy_rgb24_frame_data_rejects_short_stride() {
+        let data = vec![0; 6];
+        let result = copy_rgb24_frame_data(&data, 2, 1, 2);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn copy_rgb24_frame_data_rejects_short_data() {
+        let data = vec![0; 5];
+        let result = copy_rgb24_frame_data(&data, 3, 1, 2);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn copy_rgb24_frame_data_copies_valid_rows_without_padding() {
+        let data = vec![1, 2, 3, 99, 4, 5, 6, 88];
+        let result = copy_rgb24_frame_data(&data, 4, 1, 2).expect("valid RGB24 frame data");
+
+        assert_eq!(result, vec![1, 2, 3, 4, 5, 6]);
     }
 }

@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS video_index (
     storj_key   TEXT,
     hetzner_key TEXT,
     phash       TEXT,
+    phash_kind  TEXT,
+    phash_version TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -20,6 +22,16 @@ ALTER TABLE video_index DROP COLUMN IF EXISTS retry_count;
 ALTER TABLE video_index DROP COLUMN IF EXISTS status;
 ALTER TABLE video_index DROP COLUMN IF EXISTS error_message;
 ALTER TABLE video_index DROP COLUMN IF EXISTS updated_at;
+ALTER TABLE video_index ADD COLUMN IF NOT EXISTS phash_kind TEXT;
+ALTER TABLE video_index ADD COLUMN IF NOT EXISTS phash_version TEXT;
+UPDATE video_index
+SET phash_kind = COALESCE(phash_kind, 'phash'),
+    phash_version = COALESCE(phash_version, 'legacy_hex_8x8_v0')
+WHERE phash IS NOT NULL
+  AND (phash_kind IS NULL OR phash_version IS NULL);
+CREATE INDEX IF NOT EXISTS idx_phash_versioned_val
+    ON video_index (phash_kind, phash_version, phash)
+    WHERE phash IS NOT NULL;
 -- Drop stale trigger from old single-table schema.
 DROP TRIGGER IF EXISTS video_index_updated_at ON video_index;
 
@@ -94,6 +106,8 @@ pub struct DuplicateVideo {
 
 pub struct DuplicatePhash {
     pub phash: String,
+    pub hash_kind: String,
+    pub hash_version: String,
     pub videos: Vec<DuplicateVideo>,
 }
 
@@ -300,16 +314,20 @@ pub async fn update_phash_success(
     client: &Client,
     video_id: &str,
     phash: &str,
+    hash_kind: &str,
+    hash_version: &str,
 ) -> Result<(), tokio_postgres::Error> {
     client
         .execute(
             "WITH _ AS (
-                UPDATE video_index SET phash = $1 WHERE video_id = $2
+                UPDATE video_index
+                SET phash = $1, phash_kind = $3, phash_version = $4
+                WHERE video_id = $2
              )
              UPDATE mirror_jobs
              SET status = 'phash_computed', error_message = NULL
              WHERE video_id = $2 AND status = 'pending'",
-            &[&phash, &video_id],
+            &[&phash, &video_id, &hash_kind, &hash_version],
         )
         .await?;
     Ok(())
@@ -532,11 +550,17 @@ pub async fn get_duplicates_for_video(
 ) -> Result<Option<DuplicatePhash>, tokio_postgres::Error> {
     let rows = client
         .query(
-            "SELECT vi2.phash, vi2.video_id, vi2.storj_key, vi2.hetzner_key
+            "SELECT vi2.phash, vi2.phash_kind, vi2.phash_version,
+                    vi2.video_id, vi2.storj_key, vi2.hetzner_key
              FROM video_index vi1
-             JOIN video_index vi2 ON vi2.phash = vi1.phash
+             JOIN video_index vi2
+               ON vi2.phash = vi1.phash
+              AND vi2.phash_kind = vi1.phash_kind
+              AND vi2.phash_version = vi1.phash_version
              WHERE vi1.video_id = $1
                AND vi1.phash IS NOT NULL
+               AND vi1.phash_kind IS NOT NULL
+               AND vi1.phash_version IS NOT NULL
              ORDER BY vi2.video_id",
             &[&video_id],
         )
@@ -547,16 +571,23 @@ pub async fn get_duplicates_for_video(
     }
 
     let phash: String = rows[0].get(0);
+    let hash_kind: String = rows[0].get(1);
+    let hash_version: String = rows[0].get(2);
     let videos = rows
         .into_iter()
         .map(|r| DuplicateVideo {
-            video_id: r.get(1),
-            storj_key: r.get(2),
-            hetzner_key: r.get(3),
+            video_id: r.get(3),
+            storj_key: r.get(4),
+            hetzner_key: r.get(5),
         })
         .collect();
 
-    Ok(Some(DuplicatePhash { phash, videos }))
+    Ok(Some(DuplicatePhash {
+        phash,
+        hash_kind,
+        hash_version,
+        videos,
+    }))
 }
 
 pub async fn get_duplicate_phashes(
@@ -565,12 +596,16 @@ pub async fn get_duplicate_phashes(
     let rows = client
         .query(
             "SELECT vi.phash,
+                    vi.phash_kind,
+                    vi.phash_version,
                     array_agg(vi.video_id   ORDER BY vi.video_id) AS video_ids,
                     array_agg(vi.storj_key  ORDER BY vi.video_id) AS storj_keys,
                     array_agg(vi.hetzner_key ORDER BY vi.video_id) AS hetzner_keys
              FROM video_index vi
              WHERE vi.phash IS NOT NULL
-             GROUP BY vi.phash
+               AND vi.phash_kind IS NOT NULL
+               AND vi.phash_version IS NOT NULL
+             GROUP BY vi.phash, vi.phash_kind, vi.phash_version
              HAVING COUNT(*) > 1
              ORDER BY COUNT(*) DESC
              LIMIT 100",
@@ -582,9 +617,11 @@ pub async fn get_duplicate_phashes(
         .into_iter()
         .map(|r| {
             let phash: String = r.get(0);
-            let video_ids: Vec<String> = r.get(1);
-            let storj_keys: Vec<Option<String>> = r.get(2);
-            let hetzner_keys: Vec<Option<String>> = r.get(3);
+            let hash_kind: String = r.get(1);
+            let hash_version: String = r.get(2);
+            let video_ids: Vec<String> = r.get(3);
+            let storj_keys: Vec<Option<String>> = r.get(4);
+            let hetzner_keys: Vec<Option<String>> = r.get(5);
             let videos = video_ids
                 .into_iter()
                 .zip(storj_keys)
@@ -595,7 +632,12 @@ pub async fn get_duplicate_phashes(
                     hetzner_key,
                 })
                 .collect();
-            DuplicatePhash { phash, videos }
+            DuplicatePhash {
+                phash,
+                hash_kind,
+                hash_version,
+                videos,
+            }
         })
         .collect())
 }
@@ -611,6 +653,26 @@ mod tests {
 
     struct PgContainer {
         name: String,
+    }
+
+    #[test]
+    fn schema_adds_phash_version_columns_before_indexing_them() {
+        let add_kind = SCHEMA_SQL
+            .find("ALTER TABLE video_index ADD COLUMN IF NOT EXISTS phash_kind TEXT")
+            .expect("phash_kind migration");
+        let add_version = SCHEMA_SQL
+            .find("ALTER TABLE video_index ADD COLUMN IF NOT EXISTS phash_version TEXT")
+            .expect("phash_version migration");
+        let index = SCHEMA_SQL
+            .find("CREATE INDEX IF NOT EXISTS idx_phash_versioned_val")
+            .expect("versioned phash index");
+        let legacy_backfill = SCHEMA_SQL
+            .find("legacy_hex_8x8_v0")
+            .expect("legacy phash version backfill");
+
+        assert!(add_kind < index);
+        assert!(add_version < index);
+        assert!(legacy_backfill < index);
     }
 
     impl PgContainer {
@@ -794,13 +856,19 @@ mod tests {
         upsert_hetzner_key(&client, "user/vid", "user/vid.mp4", false)
             .await
             .unwrap();
-        update_phash_success(&client, "user/vid", "aabbccdd")
-            .await
-            .unwrap();
+        update_phash_success(
+            &client,
+            "user/vid",
+            "aabbccdd",
+            phash::HASH_KIND,
+            phash::HASH_VERSION,
+        )
+        .await
+        .unwrap();
 
         let row = client
             .query_one(
-                "SELECT vi.phash, mj.status FROM video_index vi
+                "SELECT vi.phash, vi.phash_kind, vi.phash_version, mj.status FROM video_index vi
                  JOIN mirror_jobs mj ON vi.video_id = mj.video_id
                  WHERE vi.video_id = $1",
                 &[&"user/vid"],
@@ -808,7 +876,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(row.get::<_, String>(0), "aabbccdd");
-        assert_eq!(row.get::<_, String>(1), "phash_computed");
+        assert_eq!(row.get::<_, String>(1), phash::HASH_KIND);
+        assert_eq!(row.get::<_, String>(2), phash::HASH_VERSION);
+        assert_eq!(row.get::<_, String>(3), "phash_computed");
         drop(pg);
     }
 
@@ -821,9 +891,15 @@ mod tests {
         upsert_hetzner_key(&client, "user/vid", "user/vid.mp4", false)
             .await
             .unwrap();
-        update_phash_success(&client, "user/vid", "aabbccdd")
-            .await
-            .unwrap();
+        update_phash_success(
+            &client,
+            "user/vid",
+            "aabbccdd",
+            phash::HASH_KIND,
+            phash::HASH_VERSION,
+        )
+        .await
+        .unwrap();
         update_mirror_success(&client, "user/vid", "user/vid.mp4")
             .await
             .unwrap();
@@ -856,8 +932,16 @@ mod tests {
             .unwrap();
         client
             .execute(
-                "UPDATE video_index SET phash = 'deadbeef' WHERE video_id = ANY($1)",
-                &[&vec!["user/a", "user/b"]],
+                "UPDATE video_index
+                 SET phash = 'deadbeef',
+                     phash_kind = $1,
+                     phash_version = $2
+                 WHERE video_id = ANY($3)",
+                &[
+                    &phash::HASH_KIND,
+                    &phash::HASH_VERSION,
+                    &vec!["user/a", "user/b"],
+                ],
             )
             .await
             .unwrap();
@@ -865,8 +949,46 @@ mod tests {
         let dups = get_duplicate_phashes(&client).await.unwrap();
         assert_eq!(dups.len(), 1);
         assert_eq!(dups[0].phash, "deadbeef");
+        assert_eq!(dups[0].hash_kind, phash::HASH_KIND);
+        assert_eq!(dups[0].hash_version, phash::HASH_VERSION);
         assert_eq!(dups[0].videos.len(), 2);
         assert!(dups[0].videos.iter().any(|v| v.video_id == "user/a"));
+        drop(pg);
+    }
+
+    #[tokio::test]
+    async fn duplicate_phashes_are_scoped_by_hash_version() {
+        let (pg, url) = PgContainer::spawn().await;
+        let client = connect(&url).await.unwrap();
+        init_schema(&client).await.unwrap();
+
+        upsert_storj_key(&client, "user/a", "user/a.mp4")
+            .await
+            .unwrap();
+        upsert_storj_key(&client, "user/b", "user/b.mp4")
+            .await
+            .unwrap();
+        client
+            .execute(
+                "UPDATE video_index
+                 SET phash = 'deadbeef',
+                     phash_kind = $1,
+                     phash_version = CASE video_id
+                         WHEN 'user/a' THEN $2
+                         ELSE 'legacy_hex_8x8_v0'
+                     END
+                 WHERE video_id = ANY($3)",
+                &[
+                    &phash::HASH_KIND,
+                    &phash::HASH_VERSION,
+                    &vec!["user/a", "user/b"],
+                ],
+            )
+            .await
+            .unwrap();
+
+        let dups = get_duplicate_phashes(&client).await.unwrap();
+        assert!(dups.is_empty());
         drop(pg);
     }
 }

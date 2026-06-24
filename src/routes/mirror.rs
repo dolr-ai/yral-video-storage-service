@@ -43,6 +43,8 @@ pub struct AuditResponse {
 #[derive(Serialize, ToSchema)]
 pub struct DuplicateEntry {
     pub phash: String,
+    pub hash_kind: String,
+    pub hash_version: String,
     pub videos: Vec<VideoEntry>,
 }
 
@@ -56,6 +58,8 @@ pub struct DuplicatesResponse {
 #[derive(Serialize, ToSchema)]
 pub struct DuplicateGroup {
     pub phash: String,
+    pub hash_kind: String,
+    pub hash_version: String,
     pub count: usize,
     pub videos: Vec<VideoEntry>,
 }
@@ -432,6 +436,8 @@ pub async fn audit(State(state): State<AppState>) -> Result<Json<AuditResponse>,
             .into_iter()
             .map(|d| DuplicateEntry {
                 phash: d.phash,
+                hash_kind: d.hash_kind,
+                hash_version: d.hash_version,
                 videos: d
                     .videos
                     .into_iter()
@@ -545,6 +551,8 @@ pub async fn video_duplicates(
         let count = d.videos.len();
         DuplicateGroup {
             phash: d.phash,
+            hash_kind: d.hash_kind,
+            hash_version: d.hash_version,
             count,
             videos: d
                 .videos
@@ -586,6 +594,8 @@ pub async fn duplicates(
             let count = d.videos.len();
             DuplicateGroup {
                 phash: d.phash,
+                hash_kind: d.hash_kind,
+                hash_version: d.hash_version,
                 count,
                 videos: d
                     .videos
