@@ -335,8 +335,10 @@ async fn keyless_row_in_a_batch_is_recorded_and_rest_of_batch_commits() {
 // (c) forward progress over an all-keyless page — must terminate, not loop
 #[tokio::test]
 async fn import_makes_progress_over_keyless_rows_and_terminates() {
-    std::env::set_var("MEDIA_IMPORT_BATCH_SIZE", "2");
-    crate::consts::MEDIA_IMPORT_BATCH_SIZE.store(2, std::sync::atomic::Ordering::Relaxed);
+    use std::sync::atomic::Ordering;
+    // Force tiny batches so multiple pages of keyless rows are exercised.
+    // Swap+restore the prior value (don't hardcode the default).
+    let prev_batch = crate::consts::MEDIA_IMPORT_BATCH_SIZE.swap(2, Ordering::Relaxed);
     let (_pg, mut client) = test_client().await;
     init_test_schema(&client).await;
     for vid in ["k1","k2","k3","k4","k5"] {
@@ -351,7 +353,7 @@ async fn import_makes_progress_over_keyless_rows_and_terminates() {
         "SELECT status FROM media_job_runs WHERE id=$1::TEXT::UUID", &[&summary.job_run_id.to_string()],
     ).await.unwrap().get(0);
     assert_eq!(status, "succeeded_with_failures");
-    crate::consts::MEDIA_IMPORT_BATCH_SIZE.store(500, std::sync::atomic::Ordering::Relaxed);
+    crate::consts::MEDIA_IMPORT_BATCH_SIZE.store(prev_batch, Ordering::Relaxed);
 }
 
 // (d) resume after partial — second run imports only what's missing, no new feed events for done rows
@@ -375,10 +377,10 @@ async fn second_run_imports_only_missing_rows() {
 
 Keep the existing `import_honors_cancellation_and_finalizes_cancelled` and idempotency tests — they must still pass.
 
-- [ ] **Step 2: Run, verify the new tests fail** (current loop scans all rows incl. already-imported, so `second_run_imports_only_missing_rows` and the keyless test will fail on counts)
+- [ ] **Step 2: Run, verify the new tests fail**
 
 Run: `cargo test -p storj-interface --lib media_imports -- --test-threads=1`
-Expected: the new tests FAIL (resume/scanned-count assertions).
+Expected: at least `second_run_imports_only_missing_rows` FAILS — the post-Task-3 loop still uses `fetch_legacy_rows` (no skip-existing), so the re-run re-scans the already-imported row and `scanned_rows == 1` does not hold. (The keyless/forward-progress test may already pass on counts before the rewrite; the resume test is the one that reliably drives this task.)
 
 - [ ] **Step 3: Rewrite `import_current_video_index_inner`**
 
