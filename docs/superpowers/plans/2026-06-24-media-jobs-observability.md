@@ -79,9 +79,9 @@ async fn failure_summary_groups_by_phase_with_distinct_samples() {
 }
 ```
 
-- [ ] **Step 2: Run → fail** (`cargo test -p storj-interface --lib media_index::repo::tests::recent_job_runs -p storj-interface --lib`… simply `cargo test -p storj-interface --lib repo::tests::recent_job_runs repo::tests::failure_summary -- --test-threads=1`). Expected: undefined fns.
+- [ ] **Step 2: Run → fail** — `cargo test -p storj-interface --lib repo::tests::recent_job_runs repo::tests::failure_summary -- --test-threads=1`. Expected: undefined fns.
 
-- [ ] **Step 3: Implement** (add to `repo.rs`; `chrono::{DateTime,Utc}` already used here):
+- [ ] **Step 3: Implement** (add to `repo.rs`. Note: `repo.rs` has no top-level `use chrono` — use the fully-qualified `chrono::DateTime<chrono::Utc>` as written below; tokio-postgres maps TIMESTAMPTZ to it via the `with-chrono` feature, as existing tests already do):
 ```rust
 #[derive(Debug, Clone)]
 pub struct JobRunRow {
@@ -151,7 +151,7 @@ pub async fn failure_summary(
     Ok(out)
 }
 ```
-Re-export both fns + structs in `src/media_index/mod.rs`.
+Re-export in `src/media_index/mod.rs` (add to the existing `pub use repo::{...}` block) — all symbols this slice adds: `recent_job_runs`, `failure_summary`, `update_job_run_totals` (Task 2), `JobRunRow`, `FailureGroup`.
 
 - [ ] **Step 4: Run → pass.** `cargo test -p storj-interface --lib repo::tests::recent_job_runs repo::tests::failure_summary -- --test-threads=1`
 
@@ -314,6 +314,14 @@ pub struct FailureGroupView { pub phase: String, pub count: i64, pub samples: Ve
 #[derive(Serialize, ToSchema)]
 pub struct FailuresResponse { pub failures: Vec<FailureGroupView> }
 
+// Query-param structs — REQUIRED: derive IntoParams + reference via params(...) in
+// #[utoipa::path], matching the existing media handlers (inline Query{..} notation
+// is not valid Rust for Query<T>).
+#[derive(Deserialize, IntoParams)]
+pub struct JobRunsQuery { pub job_kind: Option<String>, pub limit: Option<i64> }
+#[derive(Deserialize, IntoParams)]
+pub struct FailuresQuery { pub job_kind: Option<String>, pub limit: Option<i64> }
+
 pub fn job_run_view(r: crate::media_index::JobRunRow) -> JobRunView {
     JobRunView {
         job_kind: r.job_kind, status: r.status, requested_by: r.requested_by,
@@ -323,8 +331,8 @@ pub fn job_run_view(r: crate::media_index::JobRunRow) -> JobRunView {
     }
 }
 ```
-- `media_jobs_runs(State, Query{job_kind:Option<String>, limit:Option<i64>})` — `let limit = params.limit.unwrap_or(20).clamp(1,100);` connect, `recent_job_runs(&client, params.job_kind.as_deref(), limit)`, map, `Json(JobRunsResponse{runs})`. `#[utoipa::path(get, path="/media/jobs/runs", tag="media", ...)]` 200/401/500.
-- `media_jobs_failures(State, Query{job_kind, limit})` — same shape; `failure_summary(...)` → `FailuresResponse`. Path `/media/jobs/failures`.
+- `media_jobs_runs(State, Query<JobRunsQuery>)` — `let limit = params.limit.unwrap_or(20).clamp(1,100);` connect, `recent_job_runs(&client, params.job_kind.as_deref(), limit)`, map, `Json(JobRunsResponse{runs})`. `#[utoipa::path(get, path="/media/jobs/runs", tag="media", params(JobRunsQuery), ...)]` 200/401/500.
+- `media_jobs_failures(State, Query<FailuresQuery>)` — same shape; `failure_summary(...)` → `FailuresResponse`. Path `/media/jobs/failures`, `params(FailuresQuery)`.
 - Error mapping: `map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)`.
 - `main.rs`: register both routes with `.with_state(...).layer(middleware::from_fn(authorize))`; add the 2 paths + 4 schemas to `ApiDoc`.
 
