@@ -498,6 +498,114 @@ pub async fn canonical_phash_coverage(
     })
 }
 
+/// A single row from `media_job_runs`, returned by [`recent_job_runs`].
+#[derive(Debug, Clone)]
+pub struct JobRunRow {
+    pub job_kind: String,
+    pub status: String,
+    pub requested_by: String,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub totals: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+}
+
+/// Return the most-recent job runs, newest first.
+///
+/// `job_kind` — when `Some`, filters to that job kind only.
+/// `limit` — maximum number of rows to return (passed as `LIMIT`).
+pub async fn recent_job_runs(
+    client: &Client,
+    job_kind: Option<&str>,
+    limit: i64,
+) -> Result<Vec<JobRunRow>, tokio_postgres::Error> {
+    let rows = client
+        .query(
+            "SELECT job_kind, status, requested_by, started_at, finished_at, totals, error_message
+             FROM media_job_runs
+             WHERE ($1::TEXT IS NULL OR job_kind = $1)
+             ORDER BY started_at DESC
+             LIMIT $2",
+            &[&job_kind, &limit],
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| JobRunRow {
+            job_kind: r.get(0),
+            status: r.get(1),
+            requested_by: r.get(2),
+            started_at: r.get(3),
+            finished_at: r.get(4),
+            totals: r.get(5),
+            error_message: r.get(6),
+        })
+        .collect())
+}
+
+/// A group of failures sharing the same `phase`, returned by [`failure_summary`].
+#[derive(Debug, Clone)]
+pub struct FailureGroup {
+    pub phase: String,
+    pub count: i64,
+    /// Up to 5 distinct `last_error` snippets (≤200 chars each), most-recent first.
+    pub samples: Vec<String>,
+}
+
+/// Summarise `media_job_failures` by phase.
+///
+/// Uses two queries per phase to avoid the invalid
+/// `SELECT DISTINCT … ORDER BY created_at` form in Postgres:
+/// first a `GROUP BY` for counts, then a `LIMIT 50` fetch whose results are
+/// deduped to at most 5 distinct error strings in Rust.
+pub async fn failure_summary(
+    client: &Client,
+    job_kind: Option<&str>,
+    limit: i64,
+) -> Result<Vec<FailureGroup>, tokio_postgres::Error> {
+    // Query 1: counts per phase.
+    let count_rows = client
+        .query(
+            "SELECT phase, COUNT(*) FROM media_job_failures
+             WHERE ($1::TEXT IS NULL OR job_kind = $1)
+             GROUP BY phase ORDER BY COUNT(*) DESC LIMIT $2",
+            &[&job_kind, &limit],
+        )
+        .await?;
+
+    let mut out = Vec::with_capacity(count_rows.len());
+    for cr in count_rows {
+        let phase: String = cr.get(0);
+        let count: i64 = cr.get(1);
+        // Query 2: recent rows for this phase; dedup to <=5 distinct in Rust
+        // (avoids the invalid `SELECT DISTINCT ... ORDER BY created_at` form).
+        let sample_rows = client
+            .query(
+                "SELECT left(last_error, 200) FROM media_job_failures
+                 WHERE phase = $1 AND ($2::TEXT IS NULL OR job_kind = $2)
+                 ORDER BY created_at DESC LIMIT 50",
+                &[&phase, &job_kind],
+            )
+            .await?;
+        let mut samples: Vec<String> = Vec::with_capacity(5);
+        for sr in sample_rows {
+            let s: String = sr.get(0);
+            if !samples.contains(&s) {
+                samples.push(s);
+            }
+            if samples.len() == 5 {
+                break;
+            }
+        }
+        out.push(FailureGroup {
+            phase,
+            count,
+            samples,
+        });
+    }
+    Ok(out)
+}
+
 pub async fn find_exact_duplicates(
     client: &Client,
     query: ExactDuplicateQuery<'_>,
@@ -551,6 +659,71 @@ mod tests {
     use serde_json::json;
 
     use crate::media_index::test_support::test_client;
+
+    #[tokio::test]
+    async fn recent_job_runs_returns_newest_first_with_totals() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        for (i, kind) in ["legacy_video_index_import", "media_phash", "media_phash"]
+            .iter()
+            .enumerate()
+        {
+            client
+                .execute(
+                    "INSERT INTO media_job_runs (id, job_kind, status, requested_by, started_at, totals)
+                     VALUES (gen_random_uuid(), $1, 'succeeded', 't', now() + ($2 || ' seconds')::interval, '{\"scanned_rows\":7}'::jsonb)",
+                    &[kind, &i.to_string()],
+                )
+                .await
+                .unwrap();
+        }
+        let all = super::recent_job_runs(&client, None, 10).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(all[0].started_at >= all[1].started_at, "newest first");
+        assert_eq!(all[0].totals.as_ref().unwrap()["scanned_rows"], 7);
+        let phash = super::recent_job_runs(&client, Some("media_phash"), 10)
+            .await
+            .unwrap();
+        assert_eq!(phash.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn failure_summary_groups_by_phase_with_distinct_samples() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        // 3 phash_download failures (2 distinct errors), 1 phash_decode
+        let rows = [
+            ("v1", "phash_download", "storj download a.mp4: 404"),
+            ("v2", "phash_download", "storj download b.mp4: 404"),
+            ("v3", "phash_download", "storj download a.mp4: 404"),
+            ("v4", "phash_decode", "phash: no video stream"),
+        ];
+        for (vid, phase, err) in rows {
+            client
+                .execute(
+                    "INSERT INTO media_job_failures (job_kind, item_key, video_id, phase, last_error)
+                     VALUES ('media_phash', $1, $1, $2, $3)",
+                    &[&vid, &phase, &err],
+                )
+                .await
+                .unwrap();
+        }
+        let groups = super::failure_summary(&client, Some("media_phash"), 10)
+            .await
+            .unwrap();
+        let dl = groups.iter().find(|g| g.phase == "phash_download").unwrap();
+        assert_eq!(dl.count, 3);
+        // exactly 2 distinct error strings were inserted for phash_download
+        assert_eq!(dl.samples.len(), 2);
+        // samples are distinct
+        let mut s = dl.samples.clone();
+        s.sort();
+        s.dedup();
+        assert_eq!(s.len(), dl.samples.len(), "samples must be distinct");
+        assert!(groups
+            .iter()
+            .any(|g| g.phase == "phash_decode" && g.count == 1));
+    }
 
     fn video_input(video_id: &str) -> crate::media_index::ServableVideoInput<'_> {
         crate::media_index::ServableVideoInput {
