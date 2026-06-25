@@ -11,8 +11,8 @@ pub use feed::{append_feed_event_txn, list_feed_events_after, FeedReadError};
 #[allow(unused_imports)]
 pub use repo::{
     canonical_phash_coverage, failure_summary, find_exact_duplicates, recent_job_runs,
-    upsert_hash_record_txn, upsert_servable_video_txn, videos_missing_canonical_phash,
-    CoverageStats, FailureGroup, JobRunRow, MissingHashRow,
+    update_job_run_totals, upsert_hash_record_txn, upsert_servable_video_txn,
+    videos_missing_canonical_phash, CoverageStats, FailureGroup, JobRunRow, MissingHashRow,
 };
 pub use schema::init_schema;
 pub use types::*;

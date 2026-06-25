@@ -606,6 +606,25 @@ pub async fn failure_summary(
     Ok(out)
 }
 
+/// Flush live progress totals into an in-progress `media_job_runs` row.
+///
+/// Called best-effort after each page (never aborts the job on failure).
+/// The final accurate totals are written by `complete_job_run`; this helper
+/// makes the row readable while the job is still running.
+pub async fn update_job_run_totals(
+    client: &Client,
+    job_run_id: uuid::Uuid,
+    totals: &serde_json::Value,
+) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute(
+            "UPDATE media_job_runs SET totals = $2 WHERE id = $1::TEXT::UUID",
+            &[&job_run_id.to_string(), totals],
+        )
+        .await?;
+    Ok(())
+}
+
 pub async fn find_exact_duplicates(
     client: &Client,
     query: ExactDuplicateQuery<'_>,
@@ -659,6 +678,42 @@ mod tests {
     use serde_json::json;
 
     use crate::media_index::test_support::test_client;
+
+    #[tokio::test]
+    async fn update_job_run_totals_reflects_progress_before_completion() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        let id = uuid::Uuid::new_v4();
+        client
+            .execute(
+                "INSERT INTO media_job_runs (id, job_kind, status, requested_by) VALUES ($1::TEXT::UUID,'media_phash','running','t')",
+                &[&id.to_string()],
+            )
+            .await
+            .unwrap();
+        super::update_job_run_totals(&client, id, &serde_json::json!({"scanned_rows": 42}))
+            .await
+            .unwrap();
+        let got: serde_json::Value = client
+            .query_one(
+                "SELECT totals FROM media_job_runs WHERE id=$1::TEXT::UUID",
+                &[&id.to_string()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(got["scanned_rows"], 42);
+        // still running (not completed)
+        let status: String = client
+            .query_one(
+                "SELECT status FROM media_job_runs WHERE id=$1::TEXT::UUID",
+                &[&id.to_string()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(status, "running");
+    }
 
     #[tokio::test]
     async fn recent_job_runs_returns_newest_first_with_totals() {

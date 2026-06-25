@@ -192,6 +192,13 @@ async fn run_inner(
             persist_one(client, job_run_id, &row, hash_result, &mut summary).await?;
             crate::jobs::log_progress(summary.scanned_rows as usize, JOB_KIND);
         }
+        // Best-effort live progress flush — never abort the job on failure.
+        let _ = crate::media_index::update_job_run_totals(
+            client,
+            job_run_id,
+            &summary_totals(&summary),
+        )
+        .await;
     }
 
     complete_job_run(
