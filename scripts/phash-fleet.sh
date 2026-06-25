@@ -65,10 +65,11 @@ LIMIT=""
 DRY_RUN=false
 
 # ── Args ──────────────────────────────────────────────────────────────────────
+need_val() { [[ $# -ge 2 ]] || { echo "error: $1 requires a value" >&2; exit 2; }; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --of)      OF="${2:-}"; shift 2 ;;
-    --limit)   LIMIT="${2:-}"; shift 2 ;;
+    --of)      need_val "$@"; OF="$2"; shift 2 ;;
+    --limit)   need_val "$@"; LIMIT="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "error: unknown arg '$1'" >&2; exit 2 ;;
@@ -98,7 +99,8 @@ for target in "${!SERVER_SHARDS[@]}"; do
     exit 2
   fi
   if [[ -n "${SEEN_IDX[$idx]:-}" ]]; then
-    echo "warning: shard ${idx} mapped to both ${SEEN_IDX[$idx]} and ${target} — they will duplicate work" >&2
+    echo "error: shard ${idx} mapped to both ${SEEN_IDX[$idx]} and ${target} — would duplicate work; fix SERVER_SHARDS" >&2
+    exit 2
   fi
   SEEN_IDX[$idx]="${target}"
 done
