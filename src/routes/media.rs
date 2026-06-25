@@ -377,6 +377,138 @@ pub async fn media_jobs_status(State(state): State<AppState>) -> Json<MediaJobsS
     ))
 }
 
+// ─── Job run + failure response types ────────────────────────────────────────
+
+#[derive(Serialize, ToSchema)]
+pub struct JobRunView {
+    pub job_kind: String,
+    pub status: String,
+    pub requested_by: String,
+    /// RFC3339 UTC timestamp
+    pub started_at: String,
+    /// RFC3339 UTC timestamp, absent while the job is still running
+    pub finished_at: Option<String>,
+    pub totals: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct JobRunsResponse {
+    pub runs: Vec<JobRunView>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct FailureGroupView {
+    pub phase: String,
+    pub count: i64,
+    pub samples: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct FailuresResponse {
+    pub failures: Vec<FailureGroupView>,
+}
+
+#[derive(Deserialize, IntoParams)]
+pub struct JobRunsQuery {
+    /// Filter by job kind (e.g. "media_phash")
+    pub job_kind: Option<String>,
+    /// Number of runs to return (default: 20, max: 100)
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, IntoParams)]
+pub struct FailuresQuery {
+    /// Filter by job kind (e.g. "media_phash")
+    pub job_kind: Option<String>,
+    /// Number of failure groups to return (default: 20, max: 100)
+    pub limit: Option<i64>,
+}
+
+/// Map a `JobRunRow` to its HTTP view, converting timestamps to RFC3339 strings.
+pub fn job_run_view(r: crate::media_index::JobRunRow) -> JobRunView {
+    JobRunView {
+        job_kind: r.job_kind,
+        status: r.status,
+        requested_by: r.requested_by,
+        started_at: r.started_at.to_rfc3339(),
+        finished_at: r.finished_at.map(|t| t.to_rfc3339()),
+        totals: r.totals,
+        error_message: r.error_message,
+    }
+}
+
+/// List recent media job runs, newest first.
+///
+/// Optionally filter by `job_kind`. Returns at most `limit` rows (default 20, max 100).
+#[utoipa::path(
+    get,
+    path = "/media/jobs/runs",
+    tag = "media",
+    params(JobRunsQuery),
+    responses(
+        (status = 200, description = "Recent job runs", body = JobRunsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
+pub async fn media_jobs_runs(
+    State(state): State<AppState>,
+    Query(params): Query<JobRunsQuery>,
+) -> Result<Json<JobRunsResponse>, StatusCode> {
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+
+    let client = db::connect(&state.db_url)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let rows = media_index::recent_job_runs(&client, params.job_kind.as_deref(), limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let runs = rows.into_iter().map(job_run_view).collect();
+    Ok(Json(JobRunsResponse { runs }))
+}
+
+/// Summarise media job failures grouped by phase, with sample error messages.
+///
+/// Optionally filter by `job_kind`. Returns at most `limit` groups (default 20, max 100).
+#[utoipa::path(
+    get,
+    path = "/media/jobs/failures",
+    tag = "media",
+    params(FailuresQuery),
+    responses(
+        (status = 200, description = "Failure groups", body = FailuresResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
+pub async fn media_jobs_failures(
+    State(state): State<AppState>,
+    Query(params): Query<FailuresQuery>,
+) -> Result<Json<FailuresResponse>, StatusCode> {
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+
+    let client = db::connect(&state.db_url)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let groups = media_index::failure_summary(&client, params.job_kind.as_deref(), limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let failures = groups
+        .into_iter()
+        .map(|g| FailureGroupView {
+            phase: g.phase,
+            count: g.count,
+            samples: g.samples,
+        })
+        .collect();
+    Ok(Json(FailuresResponse { failures }))
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -630,6 +762,24 @@ mod tests {
         phash.store(false, Ordering::Release);
         let body = super::media_jobs_status_body(&import, &phash);
         assert!(!body.phash_running);
+    }
+
+    /// `job_run_view` maps `JobRunRow` fields to `JobRunView` with RFC3339 timestamps.
+    #[test]
+    fn job_run_view_serializes_timestamps_rfc3339() {
+        let row = crate::media_index::JobRunRow {
+            job_kind: "media_phash".into(),
+            status: "running".into(),
+            requested_by: "t".into(),
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            totals: Some(serde_json::json!({"scanned_rows": 9})),
+            error_message: None,
+        };
+        let v = super::job_run_view(row);
+        assert_eq!(v.status, "running");
+        assert!(v.started_at.contains('T')); // rfc3339
+        assert!(v.finished_at.is_none());
     }
 
     /// The import running flag prevents two concurrent imports and returns 409.
