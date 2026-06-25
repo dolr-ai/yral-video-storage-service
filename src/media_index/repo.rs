@@ -408,31 +408,33 @@ pub async fn videos_missing_canonical_phash(
     input_media_version: &str,
     after: Option<&str>,
     limit: Option<i64>,
+    shard: Option<(i64, i64)>,
 ) -> Result<Vec<MissingHashRow>, tokio_postgres::Error> {
-    let sql = "SELECT v.video_id,
-                      v.storage_provider,
-                      v.object_key,
-                      v.servable_status,
-                      v.bucket
-               FROM all_servable_videos_on_yral v
-               LEFT JOIN servable_video_hashes h
-                  ON h.video_id = v.video_id
-                 AND h.hash_kind = $1
-                 AND h.hash_version = $2
-                 AND h.input_media_version = $3
-               WHERE h.video_id IS NULL
-                 AND ($4::TEXT IS NULL OR v.video_id > $4)
-               ORDER BY v.video_id";
-
+    let (shard_of, shard_idx): (Option<i64>, Option<i64>) = match shard {
+        Some((of, idx)) => (Some(of), Some(idx)),
+        None => (None, None),
+    };
+    let base = "SELECT v.video_id, v.storage_provider, v.object_key, v.servable_status, v.bucket
+                FROM all_servable_videos_on_yral v
+                LEFT JOIN servable_video_hashes h
+                   ON h.video_id = v.video_id
+                  AND h.hash_kind = $1 AND h.hash_version = $2 AND h.input_media_version = $3
+                WHERE h.video_id IS NULL
+                  AND ($4::TEXT IS NULL OR v.video_id > $4)
+                  AND ($5::BIGINT IS NULL
+                       OR (((hashtext(v.video_id)::bigint % $5) + $5) % $5) = $6)
+                ORDER BY v.video_id";
     let rows = if let Some(limit) = limit {
         client
             .query(
-                &format!("{sql} LIMIT $5"),
+                &format!("{base} LIMIT $7"),
                 &[
                     &hash_kind,
                     &hash_version,
                     &input_media_version,
                     &after,
+                    &shard_of,
+                    &shard_idx,
                     &limit,
                 ],
             )
@@ -440,12 +442,18 @@ pub async fn videos_missing_canonical_phash(
     } else {
         client
             .query(
-                sql,
-                &[&hash_kind, &hash_version, &input_media_version, &after],
+                base,
+                &[
+                    &hash_kind,
+                    &hash_version,
+                    &input_media_version,
+                    &after,
+                    &shard_of,
+                    &shard_idx,
+                ],
             )
             .await?
     };
-
     Ok(rows
         .into_iter()
         .map(|row| MissingHashRow {
@@ -778,6 +786,77 @@ mod tests {
         assert!(groups
             .iter()
             .any(|g| g.phase == "phash_decode" && g.count == 1));
+    }
+
+    fn servable_input(video_id: &str) -> crate::media_index::ServableVideoInput<'_> {
+        crate::media_index::ServableVideoInput {
+            video_id,
+            publisher_user_id: None,
+            post_id: None,
+            source_kind: "legacy_video_index",
+            source_ref: Some(video_id),
+            servable_status: "servable",
+            nsfw_state: None,
+            storage_provider: Some("storj"),
+            bucket: None,
+            object_key: Some(video_id),
+            canonical_url: None,
+            thumbnail_key: None,
+            duration_ms: None,
+            width: None,
+            height: None,
+            fps: None,
+            container: None,
+            video_codec: None,
+            audio_codec: None,
+            moov_atom_front: None,
+            canonical_encoding_version: None,
+            discovered_from: "test",
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_phash_scan_shards_are_disjoint_and_total() {
+        let (_pg, mut client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        // Seed 30 servable rows, none hashed. video_ids chosen to spread across buckets;
+        // include ones whose hashtext is negative (plain ints stringified is fine — hashtext varies in sign).
+        for i in 0..30u32 {
+            let vid = format!("shard-vid-{i:04}");
+            let tx = client.transaction().await.unwrap();
+            crate::media_index::upsert_servable_video_txn(&tx, servable_input(&vid))
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        let of = 3i64;
+        let mut all = std::collections::BTreeSet::new();
+        let mut total = 0;
+        for idx in 0..of {
+            let rows = super::videos_missing_canonical_phash(
+                &client,
+                "phash",
+                "offchain_binary_10x8_v1",
+                "current_stored_object_v1",
+                None,
+                None,
+                Some((of, idx)),
+            )
+            .await
+            .unwrap();
+            for r in &rows {
+                assert!(
+                    all.insert(r.video_id.clone()),
+                    "video {} appeared in two shards",
+                    r.video_id
+                );
+            }
+            total += rows.len();
+        }
+        assert_eq!(
+            total, 30,
+            "every row lands in exactly one shard (disjoint + total)"
+        );
     }
 
     fn video_input(video_id: &str) -> crate::media_index::ServableVideoInput<'_> {

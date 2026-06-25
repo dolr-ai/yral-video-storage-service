@@ -115,6 +115,7 @@ async fn run_inner(
             INPUT_MEDIA_VERSION,
             after.as_deref(),
             batch_limit,
+            None,
         )
         .await?;
 
@@ -886,6 +887,7 @@ mod tests {
             INPUT_MEDIA_VERSION,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -904,6 +906,7 @@ mod tests {
             INPUT_MEDIA_VERSION,
             None,
             Some(1),
+            None,
         )
         .await
         .unwrap();
@@ -985,6 +988,7 @@ mod tests {
             INPUT_MEDIA_VERSION,
             None,
             Some(2),
+            None,
         )
         .await
         .unwrap();
@@ -1000,6 +1004,7 @@ mod tests {
             INPUT_MEDIA_VERSION,
             Some("video-g2"),
             Some(2),
+            None,
         )
         .await
         .unwrap();
@@ -1014,6 +1019,7 @@ mod tests {
             INPUT_MEDIA_VERSION,
             Some("video-g3"),
             Some(2),
+            None,
         )
         .await
         .unwrap();
