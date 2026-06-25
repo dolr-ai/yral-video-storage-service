@@ -89,6 +89,8 @@ pub(crate) struct AppState {
         routes::media::run_phash,
         routes::media::cancel_media_jobs,
         routes::media::media_jobs_status,
+        routes::media::media_jobs_runs,
+        routes::media::media_jobs_failures,
         routes::videogen::drafts::get_in_progress_drafts,
         routes::videogen::generate::generate_video,
         routes::videogen::providers::get_providers,
@@ -118,6 +120,10 @@ pub(crate) struct AppState {
         routes::media::FeedResponse,
         routes::media::MediaJobsStatus,
         routes::media::MediaCancelResponse,
+        routes::media::JobRunView,
+        routes::media::JobRunsResponse,
+        routes::media::FailureGroupView,
+        routes::media::FailuresResponse,
         routes::videogen::InProgressDraftsRequest,
         routes::videogen::InProgressDraftItem,
         routes::videogen::InProgressDraftsResponse,
@@ -425,6 +431,18 @@ async fn run_server() -> anyhow::Result<()> {
         .route(
             "/media/jobs/status",
             get(routes::media::media_jobs_status)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/jobs/runs",
+            get(routes::media::media_jobs_runs)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/jobs/failures",
+            get(routes::media::media_jobs_failures)
                 .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
         )

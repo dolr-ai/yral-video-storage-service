@@ -408,31 +408,33 @@ pub async fn videos_missing_canonical_phash(
     input_media_version: &str,
     after: Option<&str>,
     limit: Option<i64>,
+    shard: Option<(i64, i64)>,
 ) -> Result<Vec<MissingHashRow>, tokio_postgres::Error> {
-    let sql = "SELECT v.video_id,
-                      v.storage_provider,
-                      v.object_key,
-                      v.servable_status,
-                      v.bucket
-               FROM all_servable_videos_on_yral v
-               LEFT JOIN servable_video_hashes h
-                  ON h.video_id = v.video_id
-                 AND h.hash_kind = $1
-                 AND h.hash_version = $2
-                 AND h.input_media_version = $3
-               WHERE h.video_id IS NULL
-                 AND ($4::TEXT IS NULL OR v.video_id > $4)
-               ORDER BY v.video_id";
-
+    let (shard_of, shard_idx): (Option<i64>, Option<i64>) = match shard {
+        Some((of, idx)) => (Some(of), Some(idx)),
+        None => (None, None),
+    };
+    let base = "SELECT v.video_id, v.storage_provider, v.object_key, v.servable_status, v.bucket
+                FROM all_servable_videos_on_yral v
+                LEFT JOIN servable_video_hashes h
+                   ON h.video_id = v.video_id
+                  AND h.hash_kind = $1 AND h.hash_version = $2 AND h.input_media_version = $3
+                WHERE h.video_id IS NULL
+                  AND ($4::TEXT IS NULL OR v.video_id > $4)
+                  AND ($5::BIGINT IS NULL
+                       OR (((hashtext(v.video_id)::bigint % $5) + $5) % $5) = $6)
+                ORDER BY v.video_id";
     let rows = if let Some(limit) = limit {
         client
             .query(
-                &format!("{sql} LIMIT $5"),
+                &format!("{base} LIMIT $7"),
                 &[
                     &hash_kind,
                     &hash_version,
                     &input_media_version,
                     &after,
+                    &shard_of,
+                    &shard_idx,
                     &limit,
                 ],
             )
@@ -440,12 +442,18 @@ pub async fn videos_missing_canonical_phash(
     } else {
         client
             .query(
-                sql,
-                &[&hash_kind, &hash_version, &input_media_version, &after],
+                base,
+                &[
+                    &hash_kind,
+                    &hash_version,
+                    &input_media_version,
+                    &after,
+                    &shard_of,
+                    &shard_idx,
+                ],
             )
             .await?
     };
-
     Ok(rows
         .into_iter()
         .map(|row| MissingHashRow {
@@ -496,6 +504,133 @@ pub async fn canonical_phash_coverage(
         with_canonical_phash: row.get(1),
         missing_canonical_phash: row.get(2),
     })
+}
+
+/// A single row from `media_job_runs`, returned by [`recent_job_runs`].
+#[derive(Debug, Clone)]
+pub struct JobRunRow {
+    pub job_kind: String,
+    pub status: String,
+    pub requested_by: String,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub totals: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+}
+
+/// Return the most-recent job runs, newest first.
+///
+/// `job_kind` — when `Some`, filters to that job kind only.
+/// `limit` — maximum number of rows to return (passed as `LIMIT`).
+pub async fn recent_job_runs(
+    client: &Client,
+    job_kind: Option<&str>,
+    limit: i64,
+) -> Result<Vec<JobRunRow>, tokio_postgres::Error> {
+    let rows = client
+        .query(
+            "SELECT job_kind, status, requested_by, started_at, finished_at, totals, error_message
+             FROM media_job_runs
+             WHERE ($1::TEXT IS NULL OR job_kind = $1)
+             ORDER BY started_at DESC
+             LIMIT $2",
+            &[&job_kind, &limit],
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| JobRunRow {
+            job_kind: r.get(0),
+            status: r.get(1),
+            requested_by: r.get(2),
+            started_at: r.get(3),
+            finished_at: r.get(4),
+            totals: r.get(5),
+            error_message: r.get(6),
+        })
+        .collect())
+}
+
+/// A group of failures sharing the same `phase`, returned by [`failure_summary`].
+#[derive(Debug, Clone)]
+pub struct FailureGroup {
+    pub phase: String,
+    pub count: i64,
+    /// Up to 5 distinct `last_error` snippets (≤200 chars each), most-recent first.
+    pub samples: Vec<String>,
+}
+
+/// Summarise `media_job_failures` by phase.
+///
+/// Uses two queries per phase to avoid the invalid
+/// `SELECT DISTINCT … ORDER BY created_at` form in Postgres:
+/// first a `GROUP BY` for counts, then a `LIMIT 50` fetch whose results are
+/// deduped to at most 5 distinct error strings in Rust.
+pub async fn failure_summary(
+    client: &Client,
+    job_kind: Option<&str>,
+    limit: i64,
+) -> Result<Vec<FailureGroup>, tokio_postgres::Error> {
+    // Query 1: counts per phase.
+    let count_rows = client
+        .query(
+            "SELECT phase, COUNT(*) FROM media_job_failures
+             WHERE ($1::TEXT IS NULL OR job_kind = $1)
+             GROUP BY phase ORDER BY COUNT(*) DESC LIMIT $2",
+            &[&job_kind, &limit],
+        )
+        .await?;
+
+    let mut out = Vec::with_capacity(count_rows.len());
+    for cr in count_rows {
+        let phase: String = cr.get(0);
+        let count: i64 = cr.get(1);
+        // Query 2: recent rows for this phase; dedup to <=5 distinct in Rust
+        // (avoids the invalid `SELECT DISTINCT ... ORDER BY created_at` form).
+        let sample_rows = client
+            .query(
+                "SELECT left(last_error, 200) FROM media_job_failures
+                 WHERE phase = $1 AND ($2::TEXT IS NULL OR job_kind = $2)
+                 ORDER BY created_at DESC LIMIT 50",
+                &[&phase, &job_kind],
+            )
+            .await?;
+        let mut samples: Vec<String> = Vec::with_capacity(5);
+        for sr in sample_rows {
+            let s: String = sr.get(0);
+            if !samples.contains(&s) {
+                samples.push(s);
+            }
+            if samples.len() == 5 {
+                break;
+            }
+        }
+        out.push(FailureGroup {
+            phase,
+            count,
+            samples,
+        });
+    }
+    Ok(out)
+}
+
+/// Flush live progress totals into an in-progress `media_job_runs` row.
+///
+/// Called best-effort after each page (never aborts the job on failure).
+/// The final accurate totals are written by `complete_job_run`; this helper
+/// makes the row readable while the job is still running.
+pub async fn update_job_run_totals(
+    client: &Client,
+    job_run_id: uuid::Uuid,
+    totals: &serde_json::Value,
+) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute(
+            "UPDATE media_job_runs SET totals = $2 WHERE id = $1::TEXT::UUID",
+            &[&job_run_id.to_string(), totals],
+        )
+        .await?;
+    Ok(())
 }
 
 pub async fn find_exact_duplicates(
@@ -551,6 +686,178 @@ mod tests {
     use serde_json::json;
 
     use crate::media_index::test_support::test_client;
+
+    #[tokio::test]
+    async fn update_job_run_totals_reflects_progress_before_completion() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        let id = uuid::Uuid::new_v4();
+        client
+            .execute(
+                "INSERT INTO media_job_runs (id, job_kind, status, requested_by) VALUES ($1::TEXT::UUID,'media_phash','running','t')",
+                &[&id.to_string()],
+            )
+            .await
+            .unwrap();
+        super::update_job_run_totals(&client, id, &serde_json::json!({"scanned_rows": 42}))
+            .await
+            .unwrap();
+        let got: serde_json::Value = client
+            .query_one(
+                "SELECT totals FROM media_job_runs WHERE id=$1::TEXT::UUID",
+                &[&id.to_string()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(got["scanned_rows"], 42);
+        // still running (not completed)
+        let status: String = client
+            .query_one(
+                "SELECT status FROM media_job_runs WHERE id=$1::TEXT::UUID",
+                &[&id.to_string()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(status, "running");
+    }
+
+    #[tokio::test]
+    async fn recent_job_runs_returns_newest_first_with_totals() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        for (i, kind) in ["legacy_video_index_import", "media_phash", "media_phash"]
+            .iter()
+            .enumerate()
+        {
+            client
+                .execute(
+                    "INSERT INTO media_job_runs (id, job_kind, status, requested_by, started_at, totals)
+                     VALUES (gen_random_uuid(), $1, 'succeeded', 't', now() + ($2 || ' seconds')::interval, '{\"scanned_rows\":7}'::jsonb)",
+                    &[kind, &i.to_string()],
+                )
+                .await
+                .unwrap();
+        }
+        let all = super::recent_job_runs(&client, None, 10).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(all[0].started_at >= all[1].started_at, "newest first");
+        assert_eq!(all[0].totals.as_ref().unwrap()["scanned_rows"], 7);
+        let phash = super::recent_job_runs(&client, Some("media_phash"), 10)
+            .await
+            .unwrap();
+        assert_eq!(phash.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn failure_summary_groups_by_phase_with_distinct_samples() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        // 3 phash_download failures (2 distinct errors), 1 phash_decode
+        let rows = [
+            ("v1", "phash_download", "storj download a.mp4: 404"),
+            ("v2", "phash_download", "storj download b.mp4: 404"),
+            ("v3", "phash_download", "storj download a.mp4: 404"),
+            ("v4", "phash_decode", "phash: no video stream"),
+        ];
+        for (vid, phase, err) in rows {
+            client
+                .execute(
+                    "INSERT INTO media_job_failures (job_kind, item_key, video_id, phase, last_error)
+                     VALUES ('media_phash', $1, $1, $2, $3)",
+                    &[&vid, &phase, &err],
+                )
+                .await
+                .unwrap();
+        }
+        let groups = super::failure_summary(&client, Some("media_phash"), 10)
+            .await
+            .unwrap();
+        let dl = groups.iter().find(|g| g.phase == "phash_download").unwrap();
+        assert_eq!(dl.count, 3);
+        // exactly 2 distinct error strings were inserted for phash_download
+        assert_eq!(dl.samples.len(), 2);
+        // samples are distinct
+        let mut s = dl.samples.clone();
+        s.sort();
+        s.dedup();
+        assert_eq!(s.len(), dl.samples.len(), "samples must be distinct");
+        assert!(groups
+            .iter()
+            .any(|g| g.phase == "phash_decode" && g.count == 1));
+    }
+
+    fn servable_input(video_id: &str) -> crate::media_index::ServableVideoInput<'_> {
+        crate::media_index::ServableVideoInput {
+            video_id,
+            publisher_user_id: None,
+            post_id: None,
+            source_kind: "legacy_video_index",
+            source_ref: Some(video_id),
+            servable_status: "servable",
+            nsfw_state: None,
+            storage_provider: Some("storj"),
+            bucket: None,
+            object_key: Some(video_id),
+            canonical_url: None,
+            thumbnail_key: None,
+            duration_ms: None,
+            width: None,
+            height: None,
+            fps: None,
+            container: None,
+            video_codec: None,
+            audio_codec: None,
+            moov_atom_front: None,
+            canonical_encoding_version: None,
+            discovered_from: "test",
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_phash_scan_shards_are_disjoint_and_total() {
+        let (_pg, mut client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        // Seed 30 servable rows, none hashed. video_ids chosen to spread across buckets;
+        // include ones whose hashtext is negative (plain ints stringified is fine — hashtext varies in sign).
+        for i in 0..30u32 {
+            let vid = format!("shard-vid-{i:04}");
+            let tx = client.transaction().await.unwrap();
+            crate::media_index::upsert_servable_video_txn(&tx, servable_input(&vid))
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        let of = 3i64;
+        let mut all = std::collections::BTreeSet::new();
+        let mut total = 0;
+        for idx in 0..of {
+            let rows = super::videos_missing_canonical_phash(
+                &client,
+                "phash",
+                "offchain_binary_10x8_v1",
+                "current_stored_object_v1",
+                None,
+                None,
+                Some((of, idx)),
+            )
+            .await
+            .unwrap();
+            for r in &rows {
+                assert!(
+                    all.insert(r.video_id.clone()),
+                    "video {} appeared in two shards",
+                    r.video_id
+                );
+            }
+            total += rows.len();
+        }
+        assert_eq!(
+            total, 30,
+            "every row lands in exactly one shard (disjoint + total)"
+        );
+    }
 
     fn video_input(video_id: &str) -> crate::media_index::ServableVideoInput<'_> {
         crate::media_index::ServableVideoInput {

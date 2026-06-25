@@ -89,6 +89,22 @@ pub struct PhashParams {
     pub limit: Option<i64>,
     /// Optional label for who triggered the run (default: "media_phash_api")
     pub requested_by: Option<String>,
+    /// Optional shard index (0-based). Requires `of`. Selects the 1/of slice this run processes.
+    pub shard: Option<i64>,
+    /// Optional shard count (total shards). Requires `shard`. Must be >= 1.
+    pub of: Option<i64>,
+}
+
+/// Validate the `shard`/`of` query pair into the `(of, idx)` tuple the job expects.
+///
+/// Returns `Ok(None)` when neither is set (whole-set run). Both must be present
+/// together, with `of >= 1` and `0 <= shard < of`; otherwise `Err(())` (→ 400).
+fn parse_shard(shard: Option<i64>, of: Option<i64>) -> Result<Option<(i64, i64)>, ()> {
+    match (shard, of) {
+        (None, None) => Ok(None),
+        (Some(idx), Some(of)) if of >= 1 && (0..of).contains(&idx) => Ok(Some((of, idx))),
+        _ => Err(()),
+    }
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -285,6 +301,11 @@ pub async fn run_phash(
     State(state): State<AppState>,
     Query(params): Query<PhashParams>,
 ) -> StatusCode {
+    let shard = match parse_shard(params.shard, params.of) {
+        Ok(shard) => shard,
+        Err(()) => return StatusCode::BAD_REQUEST,
+    };
+
     if state
         .job_media_phash_running
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -312,7 +333,8 @@ pub async fn run_phash(
     tokio::spawn(async move {
         let _guard = guard;
         if let Err(e) =
-            crate::jobs::media_phash::run(s3, storj, db_url, cancel, limit, &requested_by).await
+            crate::jobs::media_phash::run(s3, storj, db_url, cancel, limit, &requested_by, shard)
+                .await
         {
             tracing::error!(error = %e, "media_phash: job failed");
             sentry::capture_message(
@@ -377,13 +399,173 @@ pub async fn media_jobs_status(State(state): State<AppState>) -> Json<MediaJobsS
     ))
 }
 
+// ─── Job run + failure response types ────────────────────────────────────────
+
+#[derive(Serialize, ToSchema)]
+pub struct JobRunView {
+    pub job_kind: String,
+    pub status: String,
+    pub requested_by: String,
+    /// RFC3339 UTC timestamp
+    pub started_at: String,
+    /// RFC3339 UTC timestamp, absent while the job is still running
+    pub finished_at: Option<String>,
+    pub totals: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct JobRunsResponse {
+    pub runs: Vec<JobRunView>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct FailureGroupView {
+    pub phase: String,
+    pub count: i64,
+    pub samples: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct FailuresResponse {
+    pub failures: Vec<FailureGroupView>,
+}
+
+#[derive(Deserialize, IntoParams)]
+pub struct JobRunsQuery {
+    /// Filter by job kind (e.g. "media_phash")
+    pub job_kind: Option<String>,
+    /// Number of runs to return (default: 20, max: 100)
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, IntoParams)]
+pub struct FailuresQuery {
+    /// Filter by job kind (e.g. "media_phash")
+    pub job_kind: Option<String>,
+    /// Number of failure groups to return (default: 20, max: 100)
+    pub limit: Option<i64>,
+}
+
+/// Map a `JobRunRow` to its HTTP view, converting timestamps to RFC3339 strings.
+pub fn job_run_view(r: crate::media_index::JobRunRow) -> JobRunView {
+    JobRunView {
+        job_kind: r.job_kind,
+        status: r.status,
+        requested_by: r.requested_by,
+        started_at: r.started_at.to_rfc3339(),
+        finished_at: r.finished_at.map(|t| t.to_rfc3339()),
+        totals: r.totals,
+        error_message: r.error_message,
+    }
+}
+
+/// List recent media job runs, newest first.
+///
+/// Optionally filter by `job_kind`. Returns at most `limit` rows (default 20, max 100).
+#[utoipa::path(
+    get,
+    path = "/media/jobs/runs",
+    tag = "media",
+    params(JobRunsQuery),
+    responses(
+        (status = 200, description = "Recent job runs", body = JobRunsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
+pub async fn media_jobs_runs(
+    State(state): State<AppState>,
+    Query(params): Query<JobRunsQuery>,
+) -> Result<Json<JobRunsResponse>, StatusCode> {
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+
+    let client = db::connect(&state.db_url)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let rows = media_index::recent_job_runs(&client, params.job_kind.as_deref(), limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let runs = rows.into_iter().map(job_run_view).collect();
+    Ok(Json(JobRunsResponse { runs }))
+}
+
+/// Summarise media job failures grouped by phase, with sample error messages.
+///
+/// Optionally filter by `job_kind`. Returns at most `limit` groups (default 20, max 100).
+#[utoipa::path(
+    get,
+    path = "/media/jobs/failures",
+    tag = "media",
+    params(FailuresQuery),
+    responses(
+        (status = 200, description = "Failure groups", body = FailuresResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
+pub async fn media_jobs_failures(
+    State(state): State<AppState>,
+    Query(params): Query<FailuresQuery>,
+) -> Result<Json<FailuresResponse>, StatusCode> {
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+
+    let client = db::connect(&state.db_url)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let groups = media_index::failure_summary(&client, params.job_kind.as_deref(), limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let failures = groups
+        .into_iter()
+        .map(|g| FailureGroupView {
+            phase: g.phase,
+            count: g.count,
+            samples: g.samples,
+        })
+        .collect();
+    Ok(Json(FailuresResponse { failures }))
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
+    use super::parse_shard;
     use crate::media_index::test_support::test_client;
+
+    #[test]
+    fn parse_shard_none_when_both_absent() {
+        assert_eq!(parse_shard(None, None), Ok(None));
+    }
+
+    #[test]
+    fn parse_shard_valid_pair() {
+        assert_eq!(parse_shard(Some(0), Some(3)), Ok(Some((3, 0))));
+        assert_eq!(parse_shard(Some(2), Some(3)), Ok(Some((3, 2))));
+        assert_eq!(parse_shard(Some(0), Some(1)), Ok(Some((1, 0))));
+    }
+
+    #[test]
+    fn parse_shard_rejects_partial_pair() {
+        assert_eq!(parse_shard(Some(0), None), Err(()));
+        assert_eq!(parse_shard(None, Some(3)), Err(()));
+    }
+
+    #[test]
+    fn parse_shard_rejects_out_of_range() {
+        assert_eq!(parse_shard(Some(3), Some(3)), Err(())); // idx == of
+        assert_eq!(parse_shard(Some(4), Some(3)), Err(())); // idx > of
+        assert_eq!(parse_shard(Some(-1), Some(3)), Err(())); // negative idx
+        assert_eq!(parse_shard(Some(0), Some(0)), Err(())); // of < 1
+        assert_eq!(parse_shard(Some(0), Some(-1)), Err(())); // negative of
+    }
 
     /// Seed N servable rows in `all_servable_videos_on_yral`, give M of them
     /// the canonical pHash tuple, and assert coverage counts.
@@ -630,6 +812,24 @@ mod tests {
         phash.store(false, Ordering::Release);
         let body = super::media_jobs_status_body(&import, &phash);
         assert!(!body.phash_running);
+    }
+
+    /// `job_run_view` maps `JobRunRow` fields to `JobRunView` with RFC3339 timestamps.
+    #[test]
+    fn job_run_view_serializes_timestamps_rfc3339() {
+        let row = crate::media_index::JobRunRow {
+            job_kind: "media_phash".into(),
+            status: "running".into(),
+            requested_by: "t".into(),
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            totals: Some(serde_json::json!({"scanned_rows": 9})),
+            error_message: None,
+        };
+        let v = super::job_run_view(row);
+        assert_eq!(v.status, "running");
+        assert!(v.started_at.contains('T')); // rfc3339
+        assert!(v.finished_at.is_none());
     }
 
     /// The import running flag prevents two concurrent imports and returns 409.

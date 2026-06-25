@@ -300,6 +300,13 @@ async fn import_current_video_index_inner(
         }
 
         summary.scanned_rows += page.len() as i64;
+        // Best-effort live progress flush — never abort the import on failure.
+        let _ = crate::media_index::update_job_run_totals(
+            client,
+            job_run_id,
+            &summary_totals(&summary),
+        )
+        .await;
     }
 
     let status = if cancelled {

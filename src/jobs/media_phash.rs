@@ -50,6 +50,7 @@ pub async fn run(
     cancel: CancellationToken,
     limit: Option<i64>,
     requested_by: &str,
+    shard: Option<(i64, i64)>,
 ) -> Result<()> {
     tracing::info!("media_phash: starting");
     let mut client = crate::db::connect(&db_url).await?;
@@ -57,7 +58,7 @@ pub async fn run(
     let job_run_id = Uuid::new_v4();
     insert_job_run(&client, job_run_id, requested_by).await?;
 
-    let result = run_inner(&mut client, job_run_id, &s3, &storj, &cancel, limit).await;
+    let result = run_inner(&mut client, job_run_id, &s3, &storj, &cancel, limit, shard).await;
     if let Err(err) = &result {
         let _ = mark_job_run_failed(&client, job_run_id, &err.to_string()).await;
         return Err(anyhow::anyhow!("{err}"));
@@ -72,6 +73,7 @@ async fn run_inner(
     storj: &StorjS3Client,
     cancel: &CancellationToken,
     limit: Option<i64>,
+    shard: Option<(i64, i64)>,
 ) -> Result<(), PHashJobError> {
     let mut summary = PHashSummary {
         job_run_id,
@@ -115,6 +117,7 @@ async fn run_inner(
             INPUT_MEDIA_VERSION,
             after.as_deref(),
             batch_limit,
+            shard,
         )
         .await?;
 
@@ -127,71 +130,92 @@ async fn run_inner(
 
         // Parallel download + hash; bounded by PHASH_CONCURRENCY to avoid
         // exhausting tempfile descriptors.  NEVER use join_all here.
-        let results: Vec<(MissingHashRow, Result<VideoHashResult, String>)> =
-            futures::stream::iter(rows)
-                .map(|row| {
-                    let s3 = s3.clone();
-                    let storj = storj.clone();
-                    async move {
-                        let hash_result: Result<VideoHashResult, String> = async {
-                            let tmp = NamedTempFile::new().map_err(|e| format!("tempfile: {e}"))?;
-                            {
-                                let mut f = tokio::fs::File::from_std(
-                                    tmp.as_file()
-                                        .try_clone()
-                                        .map_err(|e| format!("file clone: {e}"))?,
-                                );
-                                match row.storage_provider.as_deref() {
-                                    Some("hetzner") => {
-                                        let key = row.object_key.as_deref().ok_or_else(|| {
-                                            "hetzner row missing object_key".to_string()
-                                        })?;
-                                        s3.download_to_file(key, &mut f)
-                                            .await
-                                            .map_err(|e| format!("hetzner download {key}: {e}"))?;
-                                    }
-                                    Some("storj") | None => {
-                                        let key = row.object_key.as_deref().ok_or_else(|| {
-                                            "storj row missing object_key".to_string()
-                                        })?;
-                                        storj
-                                            .download_to_file(key, &mut f)
-                                            .await
-                                            .map_err(|e| format!("storj download {key}: {e}"))?;
-                                    }
-                                    Some(provider) => {
-                                        return Err(format!(
-                                            "unknown storage provider: {provider}"
-                                        ));
-                                    }
+        // Stream-persist: each row is persisted as soon as it completes rather
+        // than collecting the whole page first, enabling per-row cancellation.
+        let mut stream = futures::stream::iter(rows)
+            .map(|row| {
+                let s3 = s3.clone();
+                let storj = storj.clone();
+                async move {
+                    let hash_result: Result<VideoHashResult, (&'static str, String)> = async {
+                        let tmp = NamedTempFile::new()
+                            .map_err(|e| ("phash_download", format!("tempfile: {e}")))?;
+                        {
+                            let mut f = tokio::fs::File::from_std(
+                                tmp.as_file()
+                                    .try_clone()
+                                    .map_err(|e| ("phash_download", format!("file clone: {e}")))?,
+                            );
+                            match row.storage_provider.as_deref() {
+                                Some("hetzner") => {
+                                    let key = row.object_key.as_deref().ok_or_else(|| {
+                                        (
+                                            "phash_download",
+                                            "hetzner row missing object_key".to_string(),
+                                        )
+                                    })?;
+                                    s3.download_to_file(key, &mut f).await.map_err(|e| {
+                                        ("phash_download", format!("hetzner download {key}: {e}"))
+                                    })?;
+                                }
+                                Some("storj") | None => {
+                                    let key = row.object_key.as_deref().ok_or_else(|| {
+                                        (
+                                            "phash_download",
+                                            "storj row missing object_key".to_string(),
+                                        )
+                                    })?;
+                                    storj.download_to_file(key, &mut f).await.map_err(|e| {
+                                        ("phash_download", format!("storj download {key}: {e}"))
+                                    })?;
+                                }
+                                Some(provider) => {
+                                    return Err((
+                                        "phash_download",
+                                        format!("unknown storage provider: {provider}"),
+                                    ));
                                 }
                             }
-
-                            let path = tmp.path().to_owned();
-                            let result = tokio::task::spawn_blocking(move || {
-                                phash::PHasher::new().hash_video_with_metadata(&path)
-                            })
-                            .await
-                            .map_err(|e| format!("spawn_blocking panic: {e}"))
-                            .and_then(|r| r.map_err(|e| format!("phash: {e}")))?;
-
-                            drop(tmp);
-                            Ok(result)
                         }
-                        .await;
 
-                        (row, hash_result)
+                        let path = tmp.path().to_owned();
+                        let result = tokio::task::spawn_blocking(move || {
+                            phash::PHasher::new().hash_video_with_metadata(&path)
+                        })
+                        .await
+                        .map_err(|e| ("phash_decode", format!("spawn_blocking panic: {e}")))
+                        .and_then(|r| r.map_err(|e| ("phash_decode", format!("phash: {e}"))))?;
+
+                        drop(tmp);
+                        Ok(result)
                     }
-                })
-                .buffer_unordered(concurrency)
-                .collect()
-                .await;
+                    .await;
 
-        for (row, hash_result) in results {
+                    (row, hash_result)
+                }
+            })
+            .buffer_unordered(concurrency);
+
+        while let Some((row, hash_result)) = stream.next().await {
+            if cancel.is_cancelled() {
+                cancelled = true;
+                break;
+            }
             summary.scanned_rows += 1;
             persist_one(client, job_run_id, &row, hash_result, &mut summary).await?;
             crate::jobs::log_progress(summary.scanned_rows as usize, JOB_KIND);
         }
+        drop(stream);
+        if cancelled {
+            break;
+        }
+        // Best-effort live progress flush — never abort the job on failure.
+        let _ = crate::media_index::update_job_run_totals(
+            client,
+            job_run_id,
+            &summary_totals(&summary),
+        )
+        .await;
     }
 
     complete_job_run(
@@ -244,7 +268,7 @@ pub async fn persist_one(
     client: &mut Client,
     job_run_id: Uuid,
     row: &MissingHashRow,
-    hash_result: Result<VideoHashResult, String>,
+    hash_result: Result<VideoHashResult, (&'static str, String)>,
     summary: &mut PHashSummary,
 ) -> Result<(), PHashJobError> {
     let tx = client.transaction().await?;
@@ -294,13 +318,14 @@ pub async fn persist_one(
 
             tx.commit().await?;
         }
-        Err(err) => {
+        Err((phase, err)) => {
             tracing::error!(
                 video_id = %row.video_id,
+                phase,
                 error = %err,
-                "media_phash: worker failed"
+                "media_phash: row failed"
             );
-            record_row_failure_txn(&tx, job_run_id, &row.video_id, "phash_compute", &err).await?;
+            record_row_failure_txn(&tx, job_run_id, &row.video_id, phase, &err).await?;
             tx.commit().await?;
             summary.row_failures += 1;
         }
@@ -774,7 +799,7 @@ mod tests {
             &mut client,
             job_run_id,
             &row,
-            Err("ffmpeg: no video stream".to_string()),
+            Err(("phash_decode", "phash: no video stream".to_string())),
             &mut summary,
         )
         .await
@@ -803,8 +828,8 @@ mod tests {
         assert_eq!(failure_row.get::<_, String>(1), JOB_KIND);
         assert_eq!(failure_row.get::<_, String>(2), "video-e");
         assert_eq!(failure_row.get::<_, String>(3), "video-e");
-        assert_eq!(failure_row.get::<_, String>(4), "phash_compute");
-        assert_eq!(failure_row.get::<_, String>(5), "ffmpeg: no video stream");
+        assert_eq!(failure_row.get::<_, String>(4), "phash_decode");
+        assert_eq!(failure_row.get::<_, String>(5), "phash: no video stream");
         assert_eq!(failure_row.get::<_, String>(6), "pending_retry");
 
         // Verify job completes with succeeded_with_failures status
@@ -864,6 +889,7 @@ mod tests {
             INPUT_MEDIA_VERSION,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -882,6 +908,7 @@ mod tests {
             INPUT_MEDIA_VERSION,
             None,
             Some(1),
+            None,
         )
         .await
         .unwrap();
@@ -901,6 +928,43 @@ mod tests {
         assert_eq!(terminal_status(true, 5), "cancelled");
         assert_eq!(terminal_status(false, 0), "succeeded");
         assert_eq!(terminal_status(false, 3), "succeeded_with_failures");
+    }
+
+    // ── test 9: decode failures are recorded under phash_decode phase ─────────
+
+    #[tokio::test]
+    async fn persist_records_decode_failures_under_phash_decode() {
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        let row = make_row("vid-x");
+        let mut summary = PHashSummary {
+            job_run_id: make_run_id(),
+            scanned_rows: 0,
+            hash_rows_upserted: 0,
+            hash_feed_events_appended: 0,
+            row_failures: 0,
+        };
+        insert_job_run(&client, summary.job_run_id, "t")
+            .await
+            .unwrap();
+        super::persist_one(
+            &mut client,
+            summary.job_run_id,
+            &row,
+            Err(("phash_decode", "phash: no video stream".to_string())),
+            &mut summary,
+        )
+        .await
+        .unwrap();
+        let phase: String = client
+            .query_one(
+                "SELECT phase FROM media_job_failures WHERE video_id='vid-x'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(phase, "phash_decode");
     }
 
     // ── test 7: scan cursor advances past fetched rows (forward progress) ─────
@@ -926,6 +990,7 @@ mod tests {
             INPUT_MEDIA_VERSION,
             None,
             Some(2),
+            None,
         )
         .await
         .unwrap();
@@ -941,6 +1006,7 @@ mod tests {
             INPUT_MEDIA_VERSION,
             Some("video-g2"),
             Some(2),
+            None,
         )
         .await
         .unwrap();
@@ -955,9 +1021,50 @@ mod tests {
             INPUT_MEDIA_VERSION,
             Some("video-g3"),
             Some(2),
+            None,
         )
         .await
         .unwrap();
         assert!(page3.is_empty(), "cursor past the last row yields no rows");
+    }
+
+    // ── test 10: download failures are recorded under phash_download phase ────
+
+    #[tokio::test]
+    async fn persist_records_download_failures_under_phash_download() {
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        let row = make_row("vid-y");
+        let mut summary = PHashSummary {
+            job_run_id: make_run_id(),
+            scanned_rows: 0,
+            hash_rows_upserted: 0,
+            hash_feed_events_appended: 0,
+            row_failures: 0,
+        };
+        insert_job_run(&client, summary.job_run_id, "t")
+            .await
+            .unwrap();
+        super::persist_one(
+            &mut client,
+            summary.job_run_id,
+            &row,
+            Err((
+                "phash_download",
+                "storj download vid-y.mp4: 404".to_string(),
+            )),
+            &mut summary,
+        )
+        .await
+        .unwrap();
+        let phase: String = client
+            .query_one(
+                "SELECT phase FROM media_job_failures WHERE video_id='vid-y'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(phase, "phash_download");
     }
 }

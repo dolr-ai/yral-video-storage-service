@@ -20,11 +20,13 @@ Commands:
   config-set           Update configuration (use --phash, --mirror, --page)
 
   media-import         Trigger video-index import into media master table [--limit N]
-  media-phash          Trigger pHash computation for media master entries [--limit N]
+  media-phash          Trigger pHash computation for media master entries [--limit N] [--shard I --of N]
   media-cancel         Cancel any running media import / phash jobs
   media-status         Show running status of media import and phash jobs
   media-audit          Show pHash coverage stats for servable videos
   media-feed           Stream events from the media feed [--after CURSOR] [--limit N]
+  media-runs           List recent job runs [--job-kind KIND] [--limit N]
+  media-failures       List failure groups [--job-kind KIND] [--limit N]
 
 Options:
   --limit N           Stop after processing N items (scan/phash/mirror/run-pipeline/media-*)
@@ -32,6 +34,8 @@ Options:
   --full-scan         Scan entire S3 bucket and reset failed jobs instead of resuming (scan/run-pipeline)
   --video VIDEO_ID    Video ID for video-duplicates command
   --after CURSOR      Cursor (i64) for media-feed pagination
+  --job-kind KIND     Job kind filter for media-runs / media-failures (e.g. media_phash)
+  --shard I --of N    Process only shard I of N (0 <= I < N) for media-phash; both required together
 
 Environment:
   MIRROR_SERVICE_URL    Base URL of the service (required)
@@ -61,6 +65,37 @@ fn parse_after(args: &[String]) -> Option<i64> {
     args.windows(2)
         .find(|w| w[0] == "--after")
         .and_then(|w| w[1].parse().ok())
+}
+
+fn parse_job_kind(args: &[String]) -> Option<String> {
+    args.windows(2)
+        .find(|w| w[0] == "--job-kind")
+        .map(|w| w[1].clone())
+}
+
+fn parse_shard_arg(args: &[String]) -> Option<i64> {
+    args.windows(2)
+        .find(|w| w[0] == "--shard")
+        .and_then(|w| w[1].parse().ok())
+}
+
+fn parse_of(args: &[String]) -> Option<i64> {
+    args.windows(2)
+        .find(|w| w[0] == "--of")
+        .and_then(|w| w[1].parse().ok())
+}
+
+/// Resolve `--shard`/`--of` into the `(of, idx)` tuple the client expects.
+///
+/// `Ok(None)` when neither flag is set. Both must be present together with
+/// `of >= 1` and `0 <= shard < of`; otherwise `Err(msg)`.
+fn resolve_shard(args: &[String]) -> Result<Option<(i64, i64)>, String> {
+    match (parse_shard_arg(args), parse_of(args)) {
+        (None, None) => Ok(None),
+        (Some(idx), Some(of)) if of >= 1 && (0..of).contains(&idx) => Ok(Some((of, idx))),
+        (Some(_), Some(_)) => Err("--shard must satisfy 0 <= shard < of, and of >= 1".to_string()),
+        _ => Err("--shard and --of must be provided together".to_string()),
+    }
 }
 
 #[tokio::main]
@@ -278,10 +313,16 @@ async fn main() {
             .media_import(limit)
             .await
             .map(|_| println!("media-import accepted")),
-        "media-phash" => client
-            .media_phash(limit)
-            .await
-            .map(|_| println!("media-phash accepted")),
+        "media-phash" => match resolve_shard(&args) {
+            Ok(shard) => client
+                .media_phash(limit, shard)
+                .await
+                .map(|_| println!("media-phash accepted")),
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+        },
         "media-cancel" => match client.media_cancel().await {
             Ok(v) => {
                 println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
@@ -317,6 +358,53 @@ async fn main() {
             match client.media_feed(after, limit).await {
                 Ok(r) => {
                     println!("{:#?}", r);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "media-runs" => {
+            let job_kind = parse_job_kind(&args);
+            match client.media_runs(job_kind.as_deref(), limit).await {
+                Ok(r) => {
+                    if r.runs.is_empty() {
+                        println!("no runs found");
+                    }
+                    for run in &r.runs {
+                        let totals_str = run
+                            .totals
+                            .as_ref()
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "—".to_string());
+                        let finished = run.finished_at.as_deref().unwrap_or("—");
+                        let err = run
+                            .error_message
+                            .as_deref()
+                            .map(|e| format!("  error: {e}"))
+                            .unwrap_or_default();
+                        println!(
+                            "{:<20}  {:<12}  totals: {:<30}  started: {}  finished: {}{}",
+                            run.job_kind, run.status, totals_str, run.started_at, finished, err
+                        );
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "media-failures" => {
+            let job_kind = parse_job_kind(&args);
+            match client.media_failures(job_kind.as_deref(), limit).await {
+                Ok(r) => {
+                    if r.failures.is_empty() {
+                        println!("no failures found");
+                    }
+                    for group in &r.failures {
+                        println!("{:<30}  count: {}", group.phase, group.count);
+                        for sample in &group.samples {
+                            println!("    {sample}");
+                        }
+                    }
                     Ok(())
                 }
                 Err(e) => Err(e),
@@ -420,6 +508,38 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_job_kind_flag() {
+        let a = args(&["bin", "media-runs", "--job-kind", "media_phash"]);
+        assert_eq!(parse_job_kind(&a), Some("media_phash".to_string()));
+        let none: Vec<String> = args(&["bin", "media-runs"]);
+        assert_eq!(parse_job_kind(&none), None);
+    }
+
+    #[test]
+    fn resolve_shard_none_when_both_absent() {
+        assert_eq!(resolve_shard(&args(&["bin", "media-phash"])), Ok(None));
+    }
+
+    #[test]
+    fn resolve_shard_valid_pair_returns_of_idx() {
+        let a = args(&["bin", "media-phash", "--shard", "1", "--of", "3"]);
+        assert_eq!(resolve_shard(&a), Ok(Some((3, 1))));
+    }
+
+    #[test]
+    fn resolve_shard_rejects_partial_pair() {
+        assert!(resolve_shard(&args(&["bin", "media-phash", "--shard", "0"])).is_err());
+        assert!(resolve_shard(&args(&["bin", "media-phash", "--of", "3"])).is_err());
+    }
+
+    #[test]
+    fn resolve_shard_rejects_out_of_range() {
+        assert!(resolve_shard(&args(&["bin", "p", "--shard", "3", "--of", "3"])).is_err());
+        assert!(resolve_shard(&args(&["bin", "p", "--shard", "-1", "--of", "3"])).is_err());
+        assert!(resolve_shard(&args(&["bin", "p", "--shard", "0", "--of", "0"])).is_err());
     }
 
     #[test]
