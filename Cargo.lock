@@ -7026,7 +7026,7 @@ dependencies = [
 [[package]]
 name = "yral-canisters-client"
 version = "0.1.0"
-source = "git+https://github.com/dolr-ai/yral-common.git?branch=master#aa5abf3e5bd07a150978823a72bb6bf5589de69d"
+source = "git+https://github.com/dolr-ai/yral-common.git?rev=aa5abf3e#aa5abf3e5bd07a150978823a72bb6bf5589de69d"
 dependencies = [
  "anyhow",
  "candid",
@@ -7047,7 +7047,7 @@ dependencies = [
 [[package]]
 name = "yral-types"
 version = "0.1.0"
-source = "git+https://github.com/dolr-ai/yral-common.git?branch=master#aa5abf3e5bd07a150978823a72bb6bf5589de69d"
+source = "git+https://github.com/dolr-ai/yral-common.git?rev=aa5abf3e#aa5abf3e5bd07a150978823a72bb6bf5589de69d"
 dependencies = [
  "ic-agent",
  "k256",
