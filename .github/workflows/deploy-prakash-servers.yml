@@ -63,6 +63,21 @@ jobs:
       - name: Test
         run: cargo test
 
+      # The native test build above leaves a multi-GB ./target on the runner.
+      # The Docker build then does its own `cargo build --release`, so on the
+      # ~14 GB ubuntu-latest disk the two together exhaust space (build fails
+      # early with "No space left on device"). Reclaim the native target plus
+      # large preinstalled SDKs before building the image. ./target is excluded
+      # by .dockerignore, so removing it does not affect the build context.
+      - name: Reclaim disk space for Docker build
+        run: |
+          df -h /
+          rm -rf target
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
