@@ -26,7 +26,7 @@
 - **Commit only when `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green.** Conventional commits (`feat:`, `test:`, `refactor:`, `ci:`, `chore:`).
 - **Auth:** the 3 routes are PUBLIC — register with NO `authorize` layer. Body-level delegated-identity check is the only auth. **⚠️ chain-verification regression (review):** the shared `yral_types` wire's `TryFrom` uses `DelegatedIdentity::new_unchecked` (NO delegation-chain verification), whereas upload's local copy used verifying `new`. See Task 1.2c — decide explicitly: re-verify the chain or accept the weaker check with written rationale.
 - **Reuse, don't duplicate:** use the shared `yral_types::delegated_identity::DelegatedIdentityWire` (NOT upload's local copy). Reuse storage's `ic_agent` and `PUBLIC_BASE_URL`.
-- **Scope (review):** there are **THREE** storage→upload HTTP edges, not one — `draft.rs` (update-video-metadata), `generate.rs:1101 reserve_upload_destination`, and `upload_refresh.rs:322 generate_fresh_upload_url` (both → `/get-upload-url`). ALL must be internalized before decommission (Phase 2 + new Phase 2.5).
+- **Scope (review):** **exactly THREE** storage→upload HTTP edges — `draft.rs` (update-video-metadata), `generate.rs:1101 reserve_upload_destination`, `upload_refresh.rs:322 generate_fresh_upload_url` (both → `/get-upload-url`). ALL internalized before decommission (Phase 2 + 2.5). **Out of scope (confirmed not a 4th edge):** `UploadDestinationReleaseClient` uses a *separate* env `VIDEOGEN_UPLOAD_DESTINATION_RELEASE_URL` (`consts.rs:30`, disabled when unset), NOT `upload.yral.com`. `mark-post-as-published` has no internal storage caller (frontend-only) — nothing to internalize.
 
 ---
 
@@ -120,13 +120,13 @@ git commit -m "test: compile-guard for canister-client symbols used by upload me
 
 **Files:** Modify `src/consts.rs`, `Cargo.toml`
 
-- [ ] **Step 1:** Add env-key consts near the other `pub const X: &str` entries. **Note (review B4):** `PUBLIC_BASE_URL` is NOT currently a const — it's read via `std::env::var("PUBLIC_BASE_URL")` in `generate.rs`. Add a const for it so the upload module shares one definition:
+- [ ] **Step 1:** Add env-key consts near the other `pub const X: &str` entries. **Note (review):** a file-private `PUBLIC_BASE_URL_ENV = "PUBLIC_BASE_URL"` const already exists in `generate.rs:37`. **Promote/relocate** it to `consts.rs` (don't create a second name for the same env key) and update `generate.rs` to use `consts::PUBLIC_BASE_URL`:
 
 ```rust
 pub const OFFCHAIN_EVENTS_API_TOKEN: &str = "OFFCHAIN_EVENTS_API_TOKEN";
 pub const YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN: &str =
     "YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN";
-pub const PUBLIC_BASE_URL: &str = "PUBLIC_BASE_URL"; // env key; read tolerantly at call sites
+pub const PUBLIC_BASE_URL: &str = "PUBLIC_BASE_URL"; // promoted from generate.rs:37; read tolerantly at call sites
 ```
 
 - [ ] **Step 2 (review B1):** URL-encoding is needed in Tasks 1.7/1.8 but `url`/`urlencoding` are only transitive deps. Add a direct dep: `cargo add urlencoding`. (Alternatively use the already-direct `reqwest`'s `reqwest::Url::parse_with_params`, which percent-encodes — if you go that route, skip the `cargo add` and adjust 1.7/1.8.)
@@ -505,8 +505,8 @@ fn builds_upload_url_from_base() {
 
 **Files:** Modify `src/routes/videogen/generate.rs:1101`
 
-- [ ] **Step 1:** The production `reserve_upload_destination` (`:1101-1150`) POSTs `{publisher_user_id}` to `{VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL}/get-upload-url` and parses `UploadServiceResponse<UploadServiceData>{success,data:{upload_url,video_id},error_message}`. Replace the HTTP call with `get_upload_url_core(&ic_agent, &public_base_url, &request.user_principal)` and map `GetUploadUrlResp{upload_url, video_id}` → `UploadDestination`. The impl struct must reach an `ic_agent` + `PUBLIC_BASE_URL` (thread from `AppState`/config as the struct is built).
-- [ ] **Step 2:** Keep the test doubles in `generate.rs:1517,1808` compiling.
+- [ ] **Step 1:** The impl is **`RuntimeGenerateDeps`** (`generate.rs:802-816`), built via `new(state, config)` (`:810`) — it **already holds `ic_agent`** (`:804`, from `state.ic_agent:812`). Its `reserve_upload_destination` (`:1101-1150`) POSTs `{publisher_user_id}` to `{VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL}/get-upload-url` and parses `UploadServiceResponse<UploadServiceData>{success, data:{upload_url:Option<String>, video_id:Option<String>}, error_message}`. Replace the HTTP call with `get_upload_url_core(&self.ic_agent, &base, &request.user_principal)` (read `base` via `std::env::var(consts::PUBLIC_BASE_URL)`). **Preserve the full `UploadDestination` synthesis** (`:1165-1175` — `bucket_url`/`object_key`/`expires_at`/`encrypted_identity`), not just the two mapped fields. Map `AppError` → `UploadDestinationError::Unavailable` (error text changes from "upload service returned {status}" — acceptable, note it).
+- [ ] **Step 2:** Keep the trait test doubles (`generate.rs:1517,1808`) compiling — signature is unchanged so they should.
 - [ ] **Step 3:** `cargo clippy -- -D warnings && cargo test`.
 - [ ] **Step 4: Commit.** `git commit -am "refactor(videogen): reserve_upload_destination in-process"`
 
@@ -514,8 +514,8 @@ fn builds_upload_url_from_base() {
 
 **Files:** Modify `src/routes/videogen/upload_refresh.rs:322`
 
-- [ ] **⚠️ Step 0 — contract mismatch (review):** this caller POSTs `{ "video_id": ... }` (NOT `publisher_user_id`) to `/get-upload-url` (`:337-338`). The ported handler accepts only `{publisher_user_id}` and **mints a fresh uuid, ignoring incoming video_id**. So the current HTTP call is almost certainly already failing/misbehaving in prod (wrong body) — and "refresh" semantically wants to reuse the existing `video_id`, which `get_upload_url_core` does not do. **Surface this to the user/product before implementing.** Options: (a) add a `get_upload_url_core_for_existing(video_id, ...)` variant that reuses `video_id`; (b) confirm refresh actually only needs a fresh signed URL for the same object and wire accordingly; (c) confirm this path is dead and remove it.
-- [ ] **Step 1:** Implement per the chosen option, internalizing the call (no HTTP).
+- [ ] **⚠️ Step 0 — verify current behavior, then preserve it (OQ7 resolved: works in prod).** Source shows this caller POSTs `{ "video_id": ... }` (`:337-338`) while the in-repo handler reads `{publisher_user_id}` — but the owner confirms it works against deployed `upload.yral.com`. So the deployed handler reconciles it at runtime (deployed version may differ from this repo's source). **Before coding: `curl` the deployed `/get-upload-url` with `{"video_id":...}` to capture the exact request→response contract it actually honors.** Then internalize to match — likely `get_upload_url_core(&ic_agent, &base, &publisher)` where the publisher is resolved from the refresh `request_key.principal` (it's available — `generate_fresh_upload_url(_request_key, video_id, _object_key)`), not from the body. Do NOT change observable behavior.
+- [ ] **Step 1 — construction gap (review):** the impl is `RuntimeUploadRefreshDeps` (`upload_refresh.rs:288-300`), which holds only `{config, http}` and **discards state** (`new(_state: AppState, …)` at `:294`) — it has **NO `ic_agent`**. Add an `ic_agent` field and stop ignoring `_state` (`self.ic_agent = state.ic_agent`). Then internalize: replace the HTTP POST with `get_upload_url_core(&self.ic_agent, &base, &request_key.principal)` (publisher = `request_key.principal`, a `String`; `rate_limiter.rs:15`). The local `Resp`/`Data` structs (`:356-365`) get deleted — return `UploadDestination` directly. Map errors to the existing `Result<_, String>`.
 - [ ] **Step 2:** `cargo clippy -- -D warnings && cargo test`.
 - [ ] **Step 3: Commit.** `git commit -am "refactor(videogen): generate_fresh_upload_url in-process"`
 
@@ -600,10 +600,13 @@ fn builds_upload_url_from_base() {
 - **R11 — notification blocks the request:** `send_notification` is awaited inline (`notification_client.rs:18-40`, no spawn) → `metadata.yral.com` latency blocks `/update-video-metadata` AND (Phase 2) the in-process VAST-completion path. **Decision:** ported verbatim keeps the block (acceptable), OR `tokio::spawn` it fire-and-forget. Recommend spawn for the in-process path.
 - **S12 — Sentry is a NO-OP code change:** storage already inits `sentry.prakash.yral.com/7` (`main.rs:165`). Upload's `/9` events simply land in `/7` after merge. No code work — only update alerting dashboards. (Spec framed it as a change; it isn't.)
 
-## Open items (do not block Phase 0–3; needed for Phase 4)
+## Resolved decisions
 
-- **OQ6:** Who owns the `upload.yral.com` cutover, and which hostname does the frontend hit? (Infra.)
-- **OQ7 (Task 2.5c):** `generate_fresh_upload_url` sends `{video_id}` to `/get-upload-url` — incompatible with the handler's `{publisher_user_id}` contract and likely already broken. Product/eng decision needed on refresh semantics before internalizing.
+- **OQ6 — RESOLVED:** nobody else owns `upload.yral.com` → the storage/merge team owns the cutover. No cross-team handoff, no external blocker; we repoint the ingress ourselves. (Reinforces the discard decision.)
+- **OQ7 — RESOLVED (not broken):** owner confirms `generate_fresh_upload_url` works in prod today. So Task 2.5c is a straight internalization preserving current behavior — NOT a product decision. (The source-level `{video_id}` vs `{publisher_user_id}` mismatch is reconciled at runtime by the deployed service; verify the exact behavior against the deployed handler when implementing, then mirror it in-process.)
+
+## Open items
+
 - Confirm the frontend calls these endpoints same-origin or relies on storage's permissive CORS (spec S4c) — verify before cutover.
 
 ## Test strategy summary
