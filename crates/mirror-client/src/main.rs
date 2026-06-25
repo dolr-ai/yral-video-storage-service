@@ -25,6 +25,8 @@ Commands:
   media-status         Show running status of media import and phash jobs
   media-audit          Show pHash coverage stats for servable videos
   media-feed           Stream events from the media feed [--after CURSOR] [--limit N]
+  media-runs           List recent job runs [--job-kind KIND] [--limit N]
+  media-failures       List failure groups [--job-kind KIND] [--limit N]
 
 Options:
   --limit N           Stop after processing N items (scan/phash/mirror/run-pipeline/media-*)
@@ -32,6 +34,7 @@ Options:
   --full-scan         Scan entire S3 bucket and reset failed jobs instead of resuming (scan/run-pipeline)
   --video VIDEO_ID    Video ID for video-duplicates command
   --after CURSOR      Cursor (i64) for media-feed pagination
+  --job-kind KIND     Job kind filter for media-runs / media-failures (e.g. media_phash)
 
 Environment:
   MIRROR_SERVICE_URL    Base URL of the service (required)
@@ -61,6 +64,12 @@ fn parse_after(args: &[String]) -> Option<i64> {
     args.windows(2)
         .find(|w| w[0] == "--after")
         .and_then(|w| w[1].parse().ok())
+}
+
+fn parse_job_kind(args: &[String]) -> Option<String> {
+    args.windows(2)
+        .find(|w| w[0] == "--job-kind")
+        .map(|w| w[1].clone())
 }
 
 #[tokio::main]
@@ -322,6 +331,53 @@ async fn main() {
                 Err(e) => Err(e),
             }
         }
+        "media-runs" => {
+            let job_kind = parse_job_kind(&args);
+            match client.media_runs(job_kind.as_deref(), limit).await {
+                Ok(r) => {
+                    if r.runs.is_empty() {
+                        println!("no runs found");
+                    }
+                    for run in &r.runs {
+                        let totals_str = run
+                            .totals
+                            .as_ref()
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "—".to_string());
+                        let finished = run.finished_at.as_deref().unwrap_or("—");
+                        let err = run
+                            .error_message
+                            .as_deref()
+                            .map(|e| format!("  error: {e}"))
+                            .unwrap_or_default();
+                        println!(
+                            "{:<20}  {:<12}  totals: {:<30}  started: {}  finished: {}{}",
+                            run.job_kind, run.status, totals_str, run.started_at, finished, err
+                        );
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "media-failures" => {
+            let job_kind = parse_job_kind(&args);
+            match client.media_failures(job_kind.as_deref(), limit).await {
+                Ok(r) => {
+                    if r.failures.is_empty() {
+                        println!("no failures found");
+                    }
+                    for group in &r.failures {
+                        println!("{:<30}  count: {}", group.phase, group.count);
+                        for sample in &group.samples {
+                            println!("    {sample}");
+                        }
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(1);
@@ -420,6 +476,14 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_job_kind_flag() {
+        let a = args(&["bin", "media-runs", "--job-kind", "media_phash"]);
+        assert_eq!(parse_job_kind(&a), Some("media_phash".to_string()));
+        let none: Vec<String> = args(&["bin", "media-runs"]);
+        assert_eq!(parse_job_kind(&none), None);
     }
 
     #[test]

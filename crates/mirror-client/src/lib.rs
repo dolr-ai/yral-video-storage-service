@@ -149,6 +149,38 @@ pub struct RetryResponse {
     pub reset_count: i64,
 }
 
+/// A single job run record from the media/jobs/runs endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct JobRunView {
+    pub job_kind: String,
+    pub status: String,
+    pub requested_by: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub totals: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+}
+
+/// Response from the media/jobs/runs endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct JobRunsResponse {
+    pub runs: Vec<JobRunView>,
+}
+
+/// A single failure group from the media/jobs/failures endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct FailureGroupView {
+    pub phase: String,
+    pub count: i64,
+    pub samples: Vec<String>,
+}
+
+/// Response from the media/jobs/failures endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct FailuresResponse {
+    pub failures: Vec<FailureGroupView>,
+}
+
 pub struct MirrorClient {
     base_url: String,
     secret: String,
@@ -533,6 +565,70 @@ impl MirrorClient {
 
         match resp.status().as_u16() {
             200 => Ok(resp.json::<MediaFeedResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// List recent job runs, optionally filtered by job_kind and limited to N rows.
+    /// Signs the bare path only; query params are appended after signing.
+    pub async fn media_runs(
+        &self,
+        job_kind: Option<&str>,
+        limit: Option<u64>,
+    ) -> Result<JobRunsResponse, MirrorError> {
+        let path = "/media/jobs/runs";
+        let (ts, sig) = self.sign("GET", path);
+        let mut req = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"));
+        if let Some(k) = job_kind {
+            req = req.query(&[("job_kind", k)]);
+        }
+        if let Some(n) = limit {
+            req = req.query(&[("limit", n.to_string())]);
+        }
+        let resp = req.send().await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<JobRunsResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// List failure groups, optionally filtered by job_kind and limited to N rows.
+    /// Signs the bare path only; query params are appended after signing.
+    pub async fn media_failures(
+        &self,
+        job_kind: Option<&str>,
+        limit: Option<u64>,
+    ) -> Result<FailuresResponse, MirrorError> {
+        let path = "/media/jobs/failures";
+        let (ts, sig) = self.sign("GET", path);
+        let mut req = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"));
+        if let Some(k) = job_kind {
+            req = req.query(&[("job_kind", k)]);
+        }
+        if let Some(n) = limit {
+            req = req.query(&[("limit", n.to_string())]);
+        }
+        let resp = req.send().await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<FailuresResponse>().await?),
             401 | 403 => Err(MirrorError::Unauthorized),
             status => {
                 let body = resp.text().await.unwrap_or_default();
