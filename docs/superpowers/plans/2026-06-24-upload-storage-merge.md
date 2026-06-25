@@ -4,7 +4,7 @@
 
 **Goal:** Absorb the entire `yral-video-upload-service` (3 HTTP endpoints + IC orchestration) into `storj-interface`, then decommission it — one repo, one binary, one deploy, no circular HTTP coupling.
 
-**Architecture:** Port the 3 public routes into a new `src/routes/upload/` module on storage's existing axum app (public, no HMAC). Reuse storage's existing `ic_agent` (identities are the same — spec D2). Then internalize the two cross-process hops: videogen→update-metadata (Phase 2) and the storj finalize self-hop (Phase 3). Finally wire deploy secrets and cut over `upload.yral.com`.
+**Architecture:** Port the 3 public routes into a new `src/routes/upload/` module on storage's existing axum app (public, no HMAC). Reuse storage's existing `ic_agent` (identities are the same — spec D2). Then internalize the **three** storage→upload hops — videogen `complete`→update-metadata (Phase 2), `generate`/`upload_refresh`→get-upload-url (Phase 2.5) — and the storj finalize self-hop (Phase 3). Finally wire deploy secrets and cut over `upload.yral.com`. **CI gates `clippy -D warnings` + `cargo test` (no-network runner) on every PR** — prune-as-you-go, tests stay pre-network.
 
 **Tech Stack:** Rust 2021, axum 0.8, ic-agent 0.41, candid 0.10, reqwest 0.12, utoipa 5, `yral-canisters-client` (feature `full`), `yral_types::delegated_identity::DelegatedIdentityWire`.
 
@@ -16,12 +16,17 @@
 
 ## Conventions & ground rules
 
-- **Code baseline:** storage `main` (line refs in spec/plan are approximate locators — symbol names are authoritative; `grep` to re-anchor).
-- **TDD:** every behavioral change starts with a failing test. Reuse storage's existing test patterns (`#[cfg(test)] mod tests`, `#[tokio::test]`, the `FakeCompletionDeps` style in `complete.rs:631`).
+- **Code baseline:** branch `prakash/upload-storage-merge` (line refs are approximate locators — symbol names are authoritative; `grep` to re-anchor).
+- **⚠️ CI IS STRICT (verified `deploy-preview.yml`, on every `pull_request`):** `cargo fmt --check` (`:46`), **`cargo clippy -- -D warnings`** (`:49`), **`cargo test`** (`:52`). This shapes every task:
+  - **Warnings = build failure.** Remove (or use) every unused import/const/variant/fn/module in the SAME commit. You cannot land an unused symbol and prune later. (An earlier draft wrongly said "warnings not CI-gated" — false; all "warning OK" notes below are corrected.)
+  - **`cargo fmt` every commit.**
+  - **`cargo test` runs on a runner with NO IC/storj/network.** Every unit test must finish on the **pre-network branch** — never reach a canister call or `reqwest`. Canister-dependent assertions need a trait seam + fake, or are deferred to the Phase-4 live smoke.
+- **TDD:** every behavioral change starts with a failing test. Reuse storage's patterns (`#[cfg(test)] mod tests`, `#[tokio::test]`, the `FakeCompletionDeps` trait-seam in `complete.rs:631` — copy that seam approach for canister ops, Task 1.7b).
 - **No `unwrap()` on env at startup** (spec D9) — tolerant load, log + disable routes if a secret is missing.
-- **Commit after every passing task.** Conventional commits (`feat:`, `test:`, `refactor:`, `ci:`, `chore:`).
-- **Auth:** the 3 routes are PUBLIC — register with NO `authorize` layer. Body-level delegated-identity check is the only auth (preserve verbatim).
+- **Commit only when `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green.** Conventional commits (`feat:`, `test:`, `refactor:`, `ci:`, `chore:`).
+- **Auth:** the 3 routes are PUBLIC — register with NO `authorize` layer. Body-level delegated-identity check is the only auth. **⚠️ chain-verification regression (review):** the shared `yral_types` wire's `TryFrom` uses `DelegatedIdentity::new_unchecked` (NO delegation-chain verification), whereas upload's local copy used verifying `new`. See Task 1.2c — decide explicitly: re-verify the chain or accept the weaker check with written rationale.
 - **Reuse, don't duplicate:** use the shared `yral_types::delegated_identity::DelegatedIdentityWire` (NOT upload's local copy). Reuse storage's `ic_agent` and `PUBLIC_BASE_URL`.
+- **Scope (review):** there are **THREE** storage→upload HTTP edges, not one — `draft.rs` (update-video-metadata), `generate.rs:1101 reserve_upload_destination`, and `upload_refresh.rs:322 generate_fresh_upload_url` (both → `/get-upload-url`). ALL must be internalized before decommission (Phase 2 + new Phase 2.5).
 
 ---
 
@@ -125,8 +130,8 @@ pub const PUBLIC_BASE_URL: &str = "PUBLIC_BASE_URL"; // env key; read tolerantly
 ```
 
 - [ ] **Step 2 (review B1):** URL-encoding is needed in Tasks 1.7/1.8 but `url`/`urlencoding` are only transitive deps. Add a direct dep: `cargo add urlencoding`. (Alternatively use the already-direct `reqwest`'s `reqwest::Url::parse_with_params`, which percent-encodes — if you go that route, skip the `cargo add` and adjust 1.7/1.8.)
-- [ ] **Step 3:** `cargo build`. Expected: PASS (unused-const warning OK — no `-Dwarnings`).
-- [ ] **Step 4:** Commit. `git commit -am "chore: add upload env-key consts + urlencoding dep"`
+- [ ] **Step 3:** `cargo build`. ⚠️ The new consts will be **unused until a later task references them** — and CI clippy `-D warnings` rejects unused consts. So either: add `#[allow(dead_code)]` on them temporarily, OR (cleaner) fold this task INTO the first task that uses each const (1.3/1.5) so nothing lands unused. Do NOT commit an unused const on its own.
+- [ ] **Step 4:** Commit only if green. `git commit -am "chore: add upload env-key consts + urlencoding dep"`
 
 ### Task 1.2: Port the error envelope + types
 
@@ -172,6 +177,18 @@ Storage has **no** helper to build a valid signed `DelegatedIdentityWire`. `iden
 - [ ] **Step 2:** Verify required crate features: `k256` needs `jwk` (present) + `pkcs8`/`std` for `EncodePublicKey`/`OsRng`; add via `cargo add k256 --features jwk,pkcs8,std` if a feature is missing. `cargo build --tests`.
 - [ ] **Step 3:** Add `#[cfg(test)] pub mod test_support;` to `mod.rs`. Write a smoke test: `let (wire, p) = create_delegated_identity_wire(); assert_eq!(DelegatedIdentity::try_from(wire).unwrap().sender().unwrap(), p);` → PASS.
 - [ ] **Step 4: Commit.** `git commit -am "test(upload): port delegated-identity wire fixture"`
+
+### Task 1.2c: Decide delegation-chain verification (review — SECURITY)
+
+**Files:** `src/routes/upload/types.rs` (a small `verified_sender` helper) + tests
+
+The shared `yral_types` wire's `TryFrom<…> for DelegatedIdentity` calls `new_unchecked` (`aa5abf3/types/src/delegated_identity.rs:33`) — it does NOT verify the delegation chain. Upload's local copy used `DelegatedIdentity::new(...)` which validates. Reusing the shared type as-is **weakens** the `sender() == creator_principal` auth gate on the two public mutation routes: a caller could present a `from_key`/chain whose claimed `sender()` isn't actually authorized.
+
+- [ ] **Step 1: Decide (ask the user if unsure):**
+  - **Option A (safer, recommended):** add a `verified_sender(wire) -> Result<Principal, AppError>` that reconstructs the identity and **verifies the delegation chain** (port upload's verifying path, or call `ic_agent`'s delegation verification) before trusting `.sender()`. Use it in Tasks 1.7b + 1.9.
+  - **Option B:** accept `new_unchecked` and document why it's safe here (e.g. these routes only act on behalf of the sender and a forged chain can't produce a valid canister update under the admin agent). Write the rationale into the spec.
+- [ ] **Step 2: Write failing test** for the chosen option (Option A: a tampered chain → `AppError::Unauthorized`).
+- [ ] **Step 3: Implement + run → PASS. Commit.**
 
 ### Task 1.3: Port EventService
 
@@ -323,12 +340,14 @@ fn finalize_url_encodes_query() {
 
 The reusable core (called by the handler now; in-process in Phase 2). Holds `AppState` so Phase 3 can swap finalize to in-process without a signature change.
 
+**⚠️ Test-seam reality (review):** `update_metadata_impl` calls `finalize` (network) then `add_post_v_1` (live canister) — neither runs on the CI no-network runner. So tests must hit only the **pre-network branch**, and the post-details injection must be a **separately testable pure helper**. Extract `fn inject_post_details(meta: &mut HashMap<String,String>, pd: &PostDetailsFromFrontendV1) -> Result<(), AppError>` so it's unit-testable without touching the network.
+
 - [ ] **Step 1: Write failing tests** (use the Task 1.2b fixture):
-  - `sender_mismatch_returns_403`: `UpdateMetadataRequest` whose `delegated_identity_wire.sender() != post_details.creator_principal` → `AppError::Unauthorized`.
-  - `meta_gets_post_details_injected`: after injection, `meta["post_details"]` equals the JSON of `RequestPostDetails`.
+  - `sender_mismatch_returns_403`: `UpdateMetadataRequest` whose `delegated_identity_wire.sender() != post_details.creator_principal` → `AppError::Unauthorized`. (Runs entirely pre-network — the check precedes finalize/canister.) ✓ feasible.
+  - `inject_post_details_writes_request_post_details_json`: call the pure helper directly; assert `meta["post_details"]` equals JSON of `RequestPostDetails`. (Do NOT try to assert this by calling `update_metadata_impl` — it would proceed into the network.)
 - [ ] **Step 2: Run** → FAIL.
-- [ ] **Step 3: Implement** `UpdateMetadataRequest { delegated_identity_wire, meta: HashMap<String,String>, post_details: PostDetailsFromFrontendV1 }` (manual deser; for swagger see C2 note) and:
-  - `async fn update_metadata_impl(state: &AppState, events: &EventService, notif: &NotificationClient, req) -> Result<(), AppError>` — body: `DelegatedIdentity::try_from(wire).map_err(|e| AppError::InvalidDelegatedIdentity(e.to_string()))` → `sender()` check (403 on mismatch) → inject `meta["post_details"]` → **finalize**: Phase 1 calls `storj_finalize::finalize_via_http(&public_base_url(), &publisher, &req.post_details.id, false, req.meta.clone())` where `public_base_url()` reads `std::env::var(consts::PUBLIC_BASE_URL)` → `UserPostService(USER_POST_SERVICE_ID, &state.ic_agent).add_post_v_1(post_details)` (returns bare `Result_::Ok` — no payload) → on Ok fire `events.send_video_upload_successful_event(...)` (Published only) + `notif.send_notification(...)`; on Err fire `send_video_event_unsuccessful`. Keep `is_nsfw=false`, `enable_hot_or_not=true` literals.
+- [ ] **Step 3: Implement** `UpdateMetadataRequest { delegated_identity_wire, meta: HashMap<String,String>, post_details: PostDetailsFromFrontendV1 }` (manual deser; for swagger see C2 note + N5: `#[derive(ToSchema)]` requires `PostDetailsFromFrontendV1: ToSchema` — if the generated type lacks it, annotate the field `#[schema(value_type = Object)]`), the pure `inject_post_details` helper, and:
+  - `async fn update_metadata_impl(state: &AppState, events: &EventService, notif: &NotificationClient, req) -> Result<(), AppError>` — body: `DelegatedIdentity::try_from(wire).map_err(|e| AppError::InvalidDelegatedIdentity(e.to_string()))` → `sender()` check (403 on mismatch) → inject `meta["post_details"]` → **finalize**: Phase 1 calls `storj_finalize::finalize_via_http(&base, &publisher, &req.post_details.id, false, req.meta.clone())` where `base = std::env::var(consts::PUBLIC_BASE_URL).map_err(|_| AppError::InternalError("PUBLIC_BASE_URL not set".into()))?` (review: do NOT build a URL against an empty base — error instead of a malformed self-POST) → `UserPostService(USER_POST_SERVICE_ID, &state.ic_agent).add_post_v_1(post_details)` (returns bare `Result_::Ok` — no payload) → on Ok fire `events.send_video_upload_successful_event(...)` (Published only) + `notif.send_notification(...)`; on Err fire `send_video_event_unsuccessful`. Keep `is_nsfw=false`, `enable_hot_or_not=true` literals.
 - [ ] **Step 4: Run** → PASS. `cargo build`.
 - [ ] **Step 5: Commit.** `git commit -am "feat(upload): update_metadata_impl core (holds AppState)"`
 
@@ -406,14 +425,15 @@ fn builds_upload_url_from_base() {
 - [ ] **Step 4:** Manual smoke (local): `cargo run`, then `curl -s localhost:3000/get-upload-url -d '{"publisher_user_id":"aaaaa-aa"}' -H 'content-type: application/json'` → expect a JSON envelope (will 400/canister-error without a real principal, but proves routing + public access).
 - [ ] **Step 5: Commit.** `git commit -am "feat(upload): register 3 public routes + swagger"`
 
-### Task 1.11: Integration test (hurl) + docs
+### Task 1.11: Docs + (optional) e2e cases
 
-**Files:** Create `tests/upload_routes.hurl` (match existing `e2e-tests.yml` style if present); Modify `README.md`, `.env.example`
+**Files:** Modify `README.md`, `.env.example`; (optional) `tests/*.hurl`
 
-- [ ] **Step 1:** Add hurl cases hitting the 3 routes, asserting the `{success,data,error_message}` envelope + status codes (use a stub/fake identity; assert 403 on sender mismatch).
-- [ ] **Step 2:** Update `README.md` (new endpoints) + `.env.example` (the 2 new tokens). Do NOT copy upload's stale README.
-- [ ] **Step 3:** `cargo build && cargo test`. Run hurl if wired in CI.
-- [ ] **Step 4: Commit.** `git commit -am "test(upload): integration cases + docs for merged routes"`
+- [ ] **⚠️ Step 0 (review):** `e2e-tests.yml` is `workflow_call`, runs only **post-deploy against a live preview URL** with real storj/IC — it is NOT a PR-local harness, and a static hurl 403-sender-mismatch case isn't expressible without an offline signer. So do NOT rely on hurl for the 403/auth logic (that's covered by the Task 1.7b/1.9 unit tests). If adding e2e cases, limit them to `/get-upload-url` happy-path + envelope shape, and generate any signed identity offline via `--variables-file`.
+- [ ] **Step 1:** Update `README.md` (3 new endpoints) + `.env.example` (the 2 new tokens). Do NOT copy upload's stale README.
+- [ ] **Step 2 (optional):** add `/get-upload-url` e2e case to the existing harness if it provides a publisher principal.
+- [ ] **Step 3:** `cargo clippy -- -D warnings && cargo test`.
+- [ ] **Step 4: Commit.** `git commit -am "docs(upload): document merged routes + new env tokens"`
 
 **✅ Phase 1 done = mergeable. The binary now serves all 3 routes. Upload-service still runs in parallel (no cutover).**
 
@@ -451,7 +471,8 @@ fn builds_upload_url_from_base() {
 
 **Files:** Modify `src/routes/videogen/complete.rs`
 
-- [ ] **Step 1:** Change `RuntimeCompletionDeps::create_draft` (`:539-541`) to: if `self.state.upload` is `Some`, build `InProcessDraftServiceClient { state: self.state.clone(), events, notif }` and call it; else `LoggingDraftServiceClient` (disabled fallback). Remove `draft_client_from_env()` from the production path.
+- [ ] **Step 1:** Change `RuntimeCompletionDeps::create_draft` (`:539-541`) to: if `self.state.upload` is `Some`, build `InProcessDraftServiceClient { state: self.state.clone(), events, notif }` and call it; else fallback. Remove `draft_client_from_env()` from the production path.
+  - **⚠️ silent-data-loss (review):** the `None` fallback (`LoggingDraftServiceClient`) returns `Ok(())` and only logs — so a missing token would make **videogen drafts silently never register** (no `add_post_v_1`, success returned to the VAST caller). Today missing tokens panic upload-service (loud). To preserve loudness, the fallback here must `tracing::error!` + `sentry::capture_message(Level::Error)` ("videogen draft registration DISABLED — upload tokens missing"), not just `info`. Update `LoggingDraftServiceClient` accordingly (or use a distinct error-logging stub).
 - [ ] **Step 2:** Keep `FakeCompletionDeps` (tests `:631`) compiling — its `create_draft` returns canned results, untouched.
 - [ ] **Step 3:** `cargo build && cargo test` → PASS.
 - [ ] **Step 4: Commit.** `git commit -am "refactor(videogen): register draft in-process (no HTTP hop)"`
@@ -461,10 +482,44 @@ fn builds_upload_url_from_base() {
 **Files:** Modify `src/videogen/draft.rs`
 
 - [ ] **Step 1 (review N3 — delete, don't deprecate):** `rg draft_client_from_env` to confirm Task 2.2b removed the last production caller, then **delete** `UpdateVideoMetadataDraftClient` + `draft_client_from_env()`. Deleting (not deprecating) is what kills the `VIDEOGEN_UPLOAD_SERVICE_URL` unset→`upload.yral.com` default for good. Keep `LoggingDraftServiceClient` as the disabled-fallback.
-- [ ] **Step 2:** `cargo build` (warnings OK). `cargo test`.
+- [ ] **Step 2:** `cargo clippy -- -D warnings && cargo test` — must be clean (delete, don't deprecate, so no dead-code warning).
 - [ ] **Step 3: Commit.** `git commit -am "chore(videogen): remove HTTP draft client (replaced by in-process)"`
 
-**✅ Phase 2 done = the videogen→upload hop is gone. Cutover is now safe (see Phase 4).**
+**✅ Phase 2 done = the videogen→update-metadata hop is gone.**
+
+---
+
+# PHASE 2.5 — Internalize the two `/get-upload-url` callers (review — REQUIRED before decommission)
+
+*Goal: `generate.rs` and `upload_refresh.rs` stop HTTP-POSTing to `{upload}/get-upload-url`. Without this, decommissioning upload.yral.com breaks videogen generation + upload-URL refresh.*
+
+### Task 2.5a: Extract an in-process get-upload-url core
+
+**Files:** Modify `src/routes/upload/get_upload_url.rs`
+
+- [ ] **Step 1:** Refactor the Task 1.8 handler so its body is `async fn get_upload_url_core(ic_agent: &Agent, base: &str, publisher_user_id: &str) -> Result<GetUploadUrlResp, AppError>` (validate principal → mint uuid → `build_upload_url`). The axum handler becomes a thin wrapper.
+- [ ] **Step 2:** `cargo clippy -- -D warnings && cargo test` (the existing 1.8 test still passes via the wrapper).
+- [ ] **Step 3: Commit.** `git commit -am "refactor(upload): extract get_upload_url_core"`
+
+### Task 2.5b: Internalize `reserve_upload_destination` (generate.rs)
+
+**Files:** Modify `src/routes/videogen/generate.rs:1101`
+
+- [ ] **Step 1:** The production `reserve_upload_destination` (`:1101-1150`) POSTs `{publisher_user_id}` to `{VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL}/get-upload-url` and parses `UploadServiceResponse<UploadServiceData>{success,data:{upload_url,video_id},error_message}`. Replace the HTTP call with `get_upload_url_core(&ic_agent, &public_base_url, &request.user_principal)` and map `GetUploadUrlResp{upload_url, video_id}` → `UploadDestination`. The impl struct must reach an `ic_agent` + `PUBLIC_BASE_URL` (thread from `AppState`/config as the struct is built).
+- [ ] **Step 2:** Keep the test doubles in `generate.rs:1517,1808` compiling.
+- [ ] **Step 3:** `cargo clippy -- -D warnings && cargo test`.
+- [ ] **Step 4: Commit.** `git commit -am "refactor(videogen): reserve_upload_destination in-process"`
+
+### Task 2.5c: Internalize `generate_fresh_upload_url` (upload_refresh.rs)
+
+**Files:** Modify `src/routes/videogen/upload_refresh.rs:322`
+
+- [ ] **⚠️ Step 0 — contract mismatch (review):** this caller POSTs `{ "video_id": ... }` (NOT `publisher_user_id`) to `/get-upload-url` (`:337-338`). The ported handler accepts only `{publisher_user_id}` and **mints a fresh uuid, ignoring incoming video_id**. So the current HTTP call is almost certainly already failing/misbehaving in prod (wrong body) — and "refresh" semantically wants to reuse the existing `video_id`, which `get_upload_url_core` does not do. **Surface this to the user/product before implementing.** Options: (a) add a `get_upload_url_core_for_existing(video_id, ...)` variant that reuses `video_id`; (b) confirm refresh actually only needs a fresh signed URL for the same object and wire accordingly; (c) confirm this path is dead and remove it.
+- [ ] **Step 1:** Implement per the chosen option, internalizing the call (no HTTP).
+- [ ] **Step 2:** `cargo clippy -- -D warnings && cargo test`.
+- [ ] **Step 3: Commit.** `git commit -am "refactor(videogen): generate_fresh_upload_url in-process"`
+
+**✅ Phase 2.5 done = all THREE storage→upload edges internalized. Cutover/decommission now safe.**
 
 ---
 
@@ -486,8 +541,9 @@ fn builds_upload_url_from_base() {
 
 **Files:** Modify `src/routes/upload/update_video_metadata.rs`
 
-- [ ] **Step 1:** `update_metadata_impl` already takes `&AppState` (Task 1.7b / C4) — no signature change. Just replace the `storj_finalize::finalize_via_http(...)` call with `finalize_core(state, &publisher, &req.post_details.id, false, req.meta.clone().into_iter().collect())` (`HashMap` → `BTreeMap` via `.into_iter().collect()`).
-- [ ] **Step 2:** Delete `src/routes/upload/storj_finalize.rs` and its `mod` decl (no longer used). `cargo build && cargo test` → PASS.
+- [ ] **Step 0 — error bridge (review):** `finalize_core`/`handler_raw_finalize` return `duplicate::Error` (variants Network/Io/Hyper/Clouflare/S3 — `duplicate.rs:234`), but `update_metadata_impl` returns `Result<(), AppError>`. There is no `From<duplicate::Error> for AppError`. Add one (map to `AppError::StorageError(e.to_string())`), or `.map_err(|e| AppError::StorageError(e.to_string()))` at the call site.
+- [ ] **Step 1:** `update_metadata_impl` already takes `&AppState` (Task 1.7b / C4) — no signature change. Replace the `storj_finalize::finalize_via_http(...)` call with `finalize_core(state, &publisher, &req.post_details.id, false, req.meta.clone().into_iter().collect()).await.map_err(AppError::from)?` (`HashMap` → `BTreeMap` via `.into_iter().collect()`).
+- [ ] **Step 2:** Delete `src/routes/upload/storj_finalize.rs` AND remove `pub mod storj_finalize;` from `mod.rs` in the SAME commit (clippy `-D warnings` fails on an unused module). `cargo clippy -- -D warnings && cargo test` → PASS.
 - [ ] **Step 3: Commit.** `git commit -am "feat(upload): finalize in-process (remove self-HTTP hop)"`
 
 **✅ Phase 3 done = zero internal HTTP hops. Both circular edges collapsed.**
@@ -531,16 +587,23 @@ fn builds_upload_url_from_base() {
 ### Task 4.5: Decommission upload-service
 
 - [ ] **Step 1:** After soak: tear down upload-service — its `docker-compose` service, Coolify app, `docker-publish.yml`, and DNS record.
-- [ ] **Step 2:** Confirm no remaining references to `upload.yral.com` in storage repo (`rg upload.yral.com`).
-- [ ] **Step 3: Commit** any cleanup. `git commit -am "chore: decommission yral-video-upload-service"`
+- [ ] **Step 2:** Confirm no remaining LIVE references to `upload.yral.com`: `rg upload.yral.com`. The const `VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL` (`consts.rs:32`) will match — confirm it is **no longer used** (Phases 2/2.5 removed all callers: `draft.rs`, `generate.rs:1106`, `upload_refresh.rs:333`) and DELETE the const + `VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL`/`VIDEOGEN_UPLOAD_SERVICE_URL` references. `cargo clippy -- -D warnings` enforces it's truly dead.
+- [ ] **Step 3: Commit** any cleanup. `git commit -am "chore: decommission yral-video-upload-service + drop dead upload-url const"`
 
 **✅ Phase 4 done = upload-service discarded. Goal met.**
 
 ---
 
+## Cross-cutting surfaces (decide, don't skip)
+
+- **R10 — rate-limit/DoS on public `/get-upload-url`:** mints UUIDs + hits IC unauthenticated, co-located with admin jobs. No app-level limit exists. **Decision (record it):** rely on upstream LB/Caddy rate-limiting, OR add a per-IP limit. Default = LB; state it explicitly so it's not a silent omission.
+- **R11 — notification blocks the request:** `send_notification` is awaited inline (`notification_client.rs:18-40`, no spawn) → `metadata.yral.com` latency blocks `/update-video-metadata` AND (Phase 2) the in-process VAST-completion path. **Decision:** ported verbatim keeps the block (acceptable), OR `tokio::spawn` it fire-and-forget. Recommend spawn for the in-process path.
+- **S12 — Sentry is a NO-OP code change:** storage already inits `sentry.prakash.yral.com/7` (`main.rs:165`). Upload's `/9` events simply land in `/7` after merge. No code work — only update alerting dashboards. (Spec framed it as a change; it isn't.)
+
 ## Open items (do not block Phase 0–3; needed for Phase 4)
 
 - **OQ6:** Who owns the `upload.yral.com` cutover, and which hostname does the frontend hit? (Infra.)
+- **OQ7 (Task 2.5c):** `generate_fresh_upload_url` sends `{video_id}` to `/get-upload-url` — incompatible with the handler's `{publisher_user_id}` contract and likely already broken. Product/eng decision needed on refresh semantics before internalizing.
 - Confirm the frontend calls these endpoints same-origin or relies on storage's permissive CORS (spec S4c) — verify before cutover.
 
 ## Test strategy summary
@@ -548,6 +611,7 @@ fn builds_upload_url_from_base() {
 - Phase 0: compile-guard (permanent).
 - Phase 1: unit (envelope, event body, notification tag, sender-mismatch 403, URL build) + hurl integration + manual curl.
 - Phase 2: in-process draft mapping + complete.rs no-outbound-HTTP.
-- Phase 3: finalize_core callable without HTTP.
+- Phase 2.5: reserve_upload_destination + generate_fresh_upload_url no-outbound-HTTP (the other two edges).
+- Phase 3: finalize_core callable without HTTP; `From<duplicate::Error> for AppError` bridge.
 - Phase 4: real-publish preview smoke (the R2 gate).
-- Build green under edition 2021 (warnings not CI-gated — dead-code pruning is hygiene).
+- Build green under edition 2021 with `cargo clippy -- -D warnings` (CI-gated) + `cargo fmt --check` + `cargo test` (no-network runner) on every commit.
