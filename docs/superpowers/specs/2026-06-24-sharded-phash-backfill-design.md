@@ -56,7 +56,8 @@ A bash script (run from a workstation/CI with the deploy SSH key + `SERVICE_SECR
 - Takes a configurable server→shard map and a single `--of N` (the map is the operator's "which servers" config).
 - For each server: SSH in, compute an HMAC signature inline (no `mirror-client` binary needed on the box), and:
   1. signed `GET localhost:3005/media/jobs/status` → **skip the box if `phash_running` is true** (avoids a wasteful retrigger; the server-side `job_media_phash_running` 409 guard backs this up).
-  2. signed `POST localhost:3005/media/phash/run?shard=<idx>&of=<N>`.
+  2. signed `POST localhost:3005/media/phash/run?shard=<idx>&of=<N>&requested_by=phash-shard-<idx>-of-<N>`.
+- The `requested_by=phash-shard-<idx>-of-<N>` label makes the 3 concurrent `media_phash` runs **distinguishable in `media-runs`** (otherwise they're identical "running" rows). Free disambiguation; no per-run shard column needed.
 - Reuses the deploy's SSH key + access pattern; no new network path (boxes are not made mutually HTTP-reachable). The script enforces a single consistent `--of` across the chosen servers (prevents mis-aligned shard partitions).
 
 ### 5. Monitoring (from the observability slice, same PR)
@@ -65,6 +66,9 @@ The pHash job already writes per-run rows to the shared `media_job_runs` (one pe
 
 ## Surfaces
 
+- **DB writes from all 3 boxes (verified):** each box reaches the Patroni **leader** for writes via local `pgbouncer → postgres-router` (haproxy `backend patroni_primary`, `option httpchk GET /primary` across all nodes). So the app on a non-leader box still writes to the primary — sharding to 3 boxes is write-safe. Post-deploy, confirm with a signed write check on each box's `localhost:3005` (e.g. a `media-phash --limit 1` shard, or `media-status` + a tiny import) before launching the full fleet.
+- **Feed-append serialization:** all boxes' `hash_upserted` appends contend on the global `pg_advisory_xact_lock` (by design — cursor monotonicity). Brief per row; download+ffmpeg dominate, so not a throughput bottleneck. Single fleet-wide serialization point, noted.
+- **DB connection pressure:** 3 app instances ≈ 3× the per-request `db::connect` load (the tracked no-pool gap, now ×3). Acceptable for a bounded backfill; reinforces the connection-pool follow-up.
 - **Safety of 3× app:** confirmed no auto-start consumers/schedulers; routes are demand-driven; 2/3 receive no public traffic. server_1's behavior is unchanged. Videogen publisher/moderation are per-request only — never invoked on 2/3 (no traffic).
 - **No duplicate work:** disjoint shards via the modulo predicate; per-box `job_media_phash_running` 409 guard prevents two pHash jobs on one box; the script skips busy boxes and enforces one `--of`.
 - **Resumability:** each shard is independently resumable — re-run a shard, its missing-hash scan skips done rows (the skip-existing anti-join already shipped).
