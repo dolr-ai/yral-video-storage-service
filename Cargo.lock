@@ -3348,7 +3348,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.53.5",
 ]
 
 [[package]]
@@ -7026,7 +7026,7 @@ dependencies = [
 [[package]]
 name = "yral-canisters-client"
 version = "0.1.0"
-source = "git+https://github.com/dolr-ai/yral-common.git?rev=aa5abf3e#aa5abf3e5bd07a150978823a72bb6bf5589de69d"
+source = "git+https://github.com/dolr-ai/yral-common.git?branch=main#55e7ec1d1cff6ff19b74f45714c21a1cc4fff15d"
 dependencies = [
  "anyhow",
  "candid",
@@ -7047,7 +7047,7 @@ dependencies = [
 [[package]]
 name = "yral-types"
 version = "0.1.0"
-source = "git+https://github.com/dolr-ai/yral-common.git?rev=aa5abf3e#aa5abf3e5bd07a150978823a72bb6bf5589de69d"
+source = "git+https://github.com/dolr-ai/yral-common.git?branch=main#55e7ec1d1cff6ff19b74f45714c21a1cc4fff15d"
 dependencies = [
  "ic-agent",
  "k256",
