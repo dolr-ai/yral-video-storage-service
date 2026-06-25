@@ -50,6 +50,7 @@ pub async fn run(
     cancel: CancellationToken,
     limit: Option<i64>,
     requested_by: &str,
+    shard: Option<(i64, i64)>,
 ) -> Result<()> {
     tracing::info!("media_phash: starting");
     let mut client = crate::db::connect(&db_url).await?;
@@ -57,7 +58,7 @@ pub async fn run(
     let job_run_id = Uuid::new_v4();
     insert_job_run(&client, job_run_id, requested_by).await?;
 
-    let result = run_inner(&mut client, job_run_id, &s3, &storj, &cancel, limit).await;
+    let result = run_inner(&mut client, job_run_id, &s3, &storj, &cancel, limit, shard).await;
     if let Err(err) = &result {
         let _ = mark_job_run_failed(&client, job_run_id, &err.to_string()).await;
         return Err(anyhow::anyhow!("{err}"));
@@ -72,6 +73,7 @@ async fn run_inner(
     storj: &StorjS3Client,
     cancel: &CancellationToken,
     limit: Option<i64>,
+    shard: Option<(i64, i64)>,
 ) -> Result<(), PHashJobError> {
     let mut summary = PHashSummary {
         job_run_id,
@@ -115,7 +117,7 @@ async fn run_inner(
             INPUT_MEDIA_VERSION,
             after.as_deref(),
             batch_limit,
-            None,
+            shard,
         )
         .await?;
 

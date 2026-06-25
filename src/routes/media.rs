@@ -312,7 +312,8 @@ pub async fn run_phash(
     tokio::spawn(async move {
         let _guard = guard;
         if let Err(e) =
-            crate::jobs::media_phash::run(s3, storj, db_url, cancel, limit, &requested_by).await
+            crate::jobs::media_phash::run(s3, storj, db_url, cancel, limit, &requested_by, None)
+                .await
         {
             tracing::error!(error = %e, "media_phash: job failed");
             sentry::capture_message(
