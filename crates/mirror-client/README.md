@@ -35,6 +35,23 @@ set -a && source .env && set +a && cargo run -p mirror-client -- <command> [opti
 
 *Note: S3 scanning jobs (`scan-storj`, `scan-hetzner`, `run-pipeline`) automatically resume from the last successfully indexed key by default. Use `--full-scan` to disable this and perform a full scan from the beginning (which also resets failed jobs).*
 
+### Media ownership commands
+
+Operate the media-ownership subsystem (canonical master table + pHash + feed outbox). The import and pHash jobs are resumable (skip-existing) and share a dedicated cancellation token, separate from the mirror jobs above.
+
+| Command | Description | Background Job | Options |
+|---------|-------------|:--------------:|---------|
+| `media-import` | Import legacy `video_index` rows into the master table (skip-existing, resumable) | Yes | `--limit N` |
+| `media-phash` | Compute canonical pHash for master rows missing it (resumable) | Yes | `--limit N` |
+| `media-cancel` | Cancel the running media jobs (import + pHash) | No | — |
+| `media-status` | Show whether the media import / pHash jobs are running | No | — |
+| `media-audit` | pHash coverage: `total_servable` / `with_canonical_phash` / `missing` | No | — |
+| `media-feed` | Page the denormalized media outbox feed (`cursor > after`) | No | `--after N`, `--limit N` |
+| `media-runs` | Recent media job runs with live totals (scanned/failed) — derive rate/ETA | No | `--job-kind K`, `--limit N` |
+| `media-failures` | Failure summary grouped by phase, with counts + sample errors | No | `--job-kind K`, `--limit N` |
+
+*Note: media job concurrency/page size reuse the same `config-set --phash`/`--page` knobs (and `PHASH_CONCURRENCY`/`SCAN_PAGE_SIZE` env). Lower `--phash` to cap CPU during a backfill. Config set via `config-set` is in-memory and resets on redeploy.*
+
 ## Examples
 
 ```bash
@@ -73,6 +90,24 @@ set -a && source .env && set +a && cargo run -p mirror-client -- config
 
 # Update concurrency config dynamically (without restarting the server)
 set -a && source .env && set +a && cargo run -p mirror-client -- config-set --phash 10 --mirror 30 --page 2500
+
+# --- Media ownership backfill ---
+
+# Import legacy video_index into the master table (resumable; re-run to continue)
+set -a && source .env && set +a && cargo run -p mirror-client -- media-import
+
+# Compute canonical pHash (validate small first, then scale; lower --phash to cap CPU)
+set -a && source .env && set +a && cargo run -p mirror-client -- config-set --phash 2
+set -a && source .env && set +a && cargo run -p mirror-client -- media-phash --limit 50
+set -a && source .env && set +a && cargo run -p mirror-client -- media-phash          # full, resumable
+
+# Monitor coverage, live run progress, and failure reasons
+set -a && source .env && set +a && cargo run -p mirror-client -- media-audit
+set -a && source .env && set +a && cargo run -p mirror-client -- media-runs --job-kind media_phash
+set -a && source .env && set +a && cargo run -p mirror-client -- media-failures --job-kind media_phash
+
+# Cancel the running media jobs
+set -a && source .env && set +a && cargo run -p mirror-client -- media-cancel
 ```
 
 ## Notes
