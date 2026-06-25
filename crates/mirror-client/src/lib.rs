@@ -216,6 +216,7 @@ impl MirrorClient {
         limit: Option<u64>,
         prefix: Option<&str>,
         full_scan: Option<bool>,
+        shard: Option<(i64, i64)>,
     ) -> Result<(), MirrorError> {
         let mut url = self.http.post(format!("{}{}", self.base_url, path));
         if let Some(n) = limit {
@@ -226,6 +227,9 @@ impl MirrorClient {
         }
         if let Some(f) = full_scan {
             url = url.query(&[("full_scan", f.to_string())]);
+        }
+        if let Some((of, idx)) = shard {
+            url = url.query(&[("shard", idx.to_string()), ("of", of.to_string())]);
         }
         let (ts, sig) = self.sign("POST", path);
         let resp = url
@@ -258,7 +262,7 @@ impl MirrorClient {
         prefix: Option<&str>,
         full_scan: Option<bool>,
     ) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/scan-storj", limit, prefix, full_scan)
+        self.post_job("/mirror/jobs/scan-storj", limit, prefix, full_scan, None)
             .await
     }
 
@@ -268,16 +272,17 @@ impl MirrorClient {
         prefix: Option<&str>,
         full_scan: Option<bool>,
     ) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/scan-hetzner", limit, prefix, full_scan)
+        self.post_job("/mirror/jobs/scan-hetzner", limit, prefix, full_scan, None)
             .await
     }
 
     pub async fn phash_backfill(&self, limit: Option<u64>) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/phash", limit, None, None).await
+        self.post_job("/mirror/jobs/phash", limit, None, None, None)
+            .await
     }
 
     pub async fn mirror(&self, limit: Option<u64>) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/mirror", limit, None, None)
+        self.post_job("/mirror/jobs/mirror", limit, None, None, None)
             .await
     }
 
@@ -289,7 +294,7 @@ impl MirrorClient {
         prefix: Option<&str>,
         full_scan: Option<bool>,
     ) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/run-pipeline", limit, prefix, full_scan)
+        self.post_job("/mirror/jobs/run-pipeline", limit, prefix, full_scan, None)
             .await
     }
 
@@ -465,13 +470,18 @@ impl MirrorClient {
 
     /// Trigger video-index import job (202 accepted, 409 already running).
     pub async fn media_import(&self, limit: Option<u64>) -> Result<(), MirrorError> {
-        self.post_job("/media/import/video-index", limit, None, None)
+        self.post_job("/media/import/video-index", limit, None, None, None)
             .await
     }
 
     /// Trigger pHash computation job (202 accepted, 409 already running).
-    pub async fn media_phash(&self, limit: Option<u64>) -> Result<(), MirrorError> {
-        self.post_job("/media/phash/run", limit, None, None).await
+    pub async fn media_phash(
+        &self,
+        limit: Option<u64>,
+        shard: Option<(i64, i64)>,
+    ) -> Result<(), MirrorError> {
+        self.post_job("/media/phash/run", limit, None, None, shard)
+            .await
     }
 
     /// Cancel any running media import / phash jobs (returns 200 with JSON body).

@@ -89,6 +89,22 @@ pub struct PhashParams {
     pub limit: Option<i64>,
     /// Optional label for who triggered the run (default: "media_phash_api")
     pub requested_by: Option<String>,
+    /// Optional shard index (0-based). Requires `of`. Selects the 1/of slice this run processes.
+    pub shard: Option<i64>,
+    /// Optional shard count (total shards). Requires `shard`. Must be >= 1.
+    pub of: Option<i64>,
+}
+
+/// Validate the `shard`/`of` query pair into the `(of, idx)` tuple the job expects.
+///
+/// Returns `Ok(None)` when neither is set (whole-set run). Both must be present
+/// together, with `of >= 1` and `0 <= shard < of`; otherwise `Err(())` (→ 400).
+fn parse_shard(shard: Option<i64>, of: Option<i64>) -> Result<Option<(i64, i64)>, ()> {
+    match (shard, of) {
+        (None, None) => Ok(None),
+        (Some(idx), Some(of)) if of >= 1 && (0..of).contains(&idx) => Ok(Some((of, idx))),
+        _ => Err(()),
+    }
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -285,6 +301,11 @@ pub async fn run_phash(
     State(state): State<AppState>,
     Query(params): Query<PhashParams>,
 ) -> StatusCode {
+    let shard = match parse_shard(params.shard, params.of) {
+        Ok(shard) => shard,
+        Err(()) => return StatusCode::BAD_REQUEST,
+    };
+
     if state
         .job_media_phash_running
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -312,7 +333,7 @@ pub async fn run_phash(
     tokio::spawn(async move {
         let _guard = guard;
         if let Err(e) =
-            crate::jobs::media_phash::run(s3, storj, db_url, cancel, limit, &requested_by, None)
+            crate::jobs::media_phash::run(s3, storj, db_url, cancel, limit, &requested_by, shard)
                 .await
         {
             tracing::error!(error = %e, "media_phash: job failed");
@@ -516,7 +537,35 @@ pub async fn media_jobs_failures(
 mod tests {
     use serde_json::json;
 
+    use super::parse_shard;
     use crate::media_index::test_support::test_client;
+
+    #[test]
+    fn parse_shard_none_when_both_absent() {
+        assert_eq!(parse_shard(None, None), Ok(None));
+    }
+
+    #[test]
+    fn parse_shard_valid_pair() {
+        assert_eq!(parse_shard(Some(0), Some(3)), Ok(Some((3, 0))));
+        assert_eq!(parse_shard(Some(2), Some(3)), Ok(Some((3, 2))));
+        assert_eq!(parse_shard(Some(0), Some(1)), Ok(Some((1, 0))));
+    }
+
+    #[test]
+    fn parse_shard_rejects_partial_pair() {
+        assert_eq!(parse_shard(Some(0), None), Err(()));
+        assert_eq!(parse_shard(None, Some(3)), Err(()));
+    }
+
+    #[test]
+    fn parse_shard_rejects_out_of_range() {
+        assert_eq!(parse_shard(Some(3), Some(3)), Err(())); // idx == of
+        assert_eq!(parse_shard(Some(4), Some(3)), Err(())); // idx > of
+        assert_eq!(parse_shard(Some(-1), Some(3)), Err(())); // negative idx
+        assert_eq!(parse_shard(Some(0), Some(0)), Err(())); // of < 1
+        assert_eq!(parse_shard(Some(0), Some(-1)), Err(())); // negative of
+    }
 
     /// Seed N servable rows in `all_servable_videos_on_yral`, give M of them
     /// the canonical pHash tuple, and assert coverage counts.
