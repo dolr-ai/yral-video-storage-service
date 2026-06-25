@@ -59,19 +59,14 @@
 
 *Goal: lock the canister-client rev and prove the generated symbols resolve. No behavior change.*
 
-### Task 0.1: Pin yral-common rev
+### Task 0.1: Track yral-common `main` ✅ DONE
 
-**Files:** Modify `Cargo.toml`
+**Decision (user):** track the branch, do NOT pin a rev. yral-common renamed `master` → `main`, so the stale `branch = "master"` is fixed to `branch = "main"`. `Cargo.lock` still pins the resolved commit for reproducible builds; floating the branch means `cargo update` follows main (drift risk accepted — Task 0.2's compile-guard catches breakage).
 
-- [ ] **Step 1:** In `Cargo.toml`, change the `yral-canisters-client` and `yral-types` git deps from `branch = "master"` to `rev = "aa5abf3e"` (the rev `Cargo.lock` currently resolves). Keep `features = ["full"]` on `yral-canisters-client`.
-- [ ] **Step 2:** Run `cargo update -p yral-canisters-client --precise aa5abf3e` (and same for `yral-types` if separately pinned) or `cargo build` to refresh `Cargo.lock`. Confirm `Cargo.lock` still shows `aa5abf3e`.
-- [ ] **Step 3:** `cargo build` — expect success, no behavior change.
-- [ ] **Step 4:** Commit.
-
-```bash
-git add Cargo.toml Cargo.lock
-git commit -m "chore: pin yral-canisters-client to aa5abf3e for upload merge"
-```
+- [x] Set both `yral-canisters-client` (keep `features=["full"]`) and `yral-types` to `branch = "main"`.
+- [x] `cargo update -p yral-canisters-client -p yral-types` → lock moved `aa5abf3e` → `55e7ec1d` (latest main).
+- [x] `cargo build` + `cargo clippy -- -D warnings` + `cargo fmt --check` clean.
+- [x] Committed `c83bc60`.
 
 ### Task 0.2: Compile-guard test for canister symbols
 
