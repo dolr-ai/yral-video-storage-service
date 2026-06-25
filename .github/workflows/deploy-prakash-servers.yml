@@ -151,8 +151,11 @@ jobs:
             ssh "deploy@${NODE_IP}" "mkdir -p ${APP_DIR}"
             scp -r deploy "deploy@${NODE_IP}:${APP_DIR}/"
 
-            RUN_APP=false
-            [[ "${NODE_NAME}" == "server_1" ]] && RUN_APP=true
+            # App runs on all 3 nodes for the sharded pHash backfill.
+            # server_1 keeps the public domain + health check; server_2/3 serve
+            # localhost:3005 only (no public route). Writes from any node reach the
+            # Patroni leader via the local pgbouncer → postgres-router (haproxy).
+            RUN_APP=true
 
             APP_VARS=""
             if [[ "${RUN_APP}" == "true" ]]; then
@@ -181,6 +184,7 @@ jobs:
                 export INTERNAL_ENCRYPTION_SECRET='${INTERNAL_ENCRYPTION_SECRET}'; \
                 export MODERATION_HMAC_SECRET='${MODERATION_HMAC_SECRET}'; \
                 export PUBLIC_BASE_URL='https://storage-interface.prakash.yral.com'; \
+                export PHASH_CONCURRENCY='4'; \
                 export ENVIRONMENT='production';"
             fi
 
@@ -236,4 +240,4 @@ jobs:
           echo "**Image:** ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "**URL:** ${{ env.PREVIEW_URL }}" >> $GITHUB_STEP_SUMMARY
           echo "**Nodes:** server_1 (${{ env.SERVER_1_IP }}), server_2 (${{ env.SERVER_2_IP }}), server_3 (${{ env.SERVER_3_IP }})" >> $GITHUB_STEP_SUMMARY
-          echo "**App:** server_1 only (port ${{ env.HOST_PORT }})" >> $GITHUB_STEP_SUMMARY
+          echo "**App:** all 3 nodes (port ${{ env.HOST_PORT }}); public domain on server_1 only; PHASH_CONCURRENCY=4" >> $GITHUB_STEP_SUMMARY

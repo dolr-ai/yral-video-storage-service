@@ -14,7 +14,7 @@ set -euo pipefail
 #   APP_DIR         defaults to the deploy/ directory (parent of scripts/)
 #   IMAGE_REF       if set, pulls this image ref for storj-interface
 #   IMAGE_TAG       tag for ghcr.io/dolr-ai/storj-interface (default: latest)
-#   RUN_APP         set to "true" to start storj-interface on this node (server_1 only)
+#   RUN_APP         set to "true" to start storj-interface on this node (all 3 nodes; public domain on server_1 only)
 
 # Resolve to deploy/ directory regardless of where script is invoked from
 export APP_DIR="${APP_DIR:-$(cd "$(dirname "$0")/.." && cd .. && pwd)}"
