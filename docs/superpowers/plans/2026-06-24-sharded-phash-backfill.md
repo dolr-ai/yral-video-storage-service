@@ -46,7 +46,20 @@ async fn missing_phash_scan_shards_are_disjoint_and_total() {
     assert_eq!(total, 30, "every row lands in exactly one shard (disjoint + total)");
 }
 ```
-(Reuse the `servable_input` helper added in the observability slice; if absent, add it.)
+`servable_input` does NOT exist yet — add this helper to the `repo.rs` tests module (builds a minimal `ServableVideoInput`; all 22 fields, storj-backed):
+```rust
+fn servable_input(video_id: &str) -> crate::media_index::ServableVideoInput<'_> {
+    crate::media_index::ServableVideoInput {
+        video_id, publisher_user_id: None, post_id: None,
+        source_kind: "legacy_video_index", source_ref: Some(video_id),
+        servable_status: "servable", nsfw_state: None,
+        storage_provider: Some("storj"), bucket: None, object_key: Some(video_id),
+        canonical_url: None, thumbnail_key: None, duration_ms: None, width: None,
+        height: None, fps: None, container: None, video_codec: None, audio_codec: None,
+        moov_atom_front: None, canonical_encoding_version: None, discovered_from: "test",
+    }
+}
+```
 
 - [ ] **Step 2: Run → fail** — `cargo test -p storj-interface --lib repo::tests::missing_phash_scan_shards -- --test-threads=1`. Expected: arity error (fn takes 6 args).
 
