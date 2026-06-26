@@ -30,8 +30,6 @@ impl UploadState {
     }
 
     /// Build from the two token env vars; `None` (disabled) if either is unset.
-    // allow(dead_code): wired into AppState in the next task.
-    #[allow(dead_code)]
     pub fn from_env() -> Option<Self> {
         Self::build(
             std::env::var(crate::consts::OFFCHAIN_EVENTS_API_TOKEN).ok(),
