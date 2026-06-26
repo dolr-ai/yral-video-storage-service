@@ -426,15 +426,14 @@ pub async fn complete_video(
 
 struct RuntimeCompletionDeps {
     config: VideogenConfig,
-    ic_agent: ic_agent::Agent,
+    // Hold the whole AppState: the rate-limiter calls need `ic_agent`, and the
+    // in-process draft client (Phase 2) needs the shared agent + upload deps.
+    state: AppState,
 }
 
 impl RuntimeCompletionDeps {
     fn new(state: AppState, config: VideogenConfig) -> Self {
-        Self {
-            config,
-            ic_agent: state.ic_agent,
-        }
+        Self { config, state }
     }
 }
 
@@ -463,7 +462,7 @@ impl CompletionDeps for RuntimeCompletionDeps {
         request_key: &RateLimiterRequestKey,
         bucket_url: &str,
     ) -> Result<(), String> {
-        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
+        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.state.ic_agent);
         let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
         match rate_limits
             .update_video_generation_status(
@@ -483,7 +482,7 @@ impl CompletionDeps for RuntimeCompletionDeps {
         request_key: &RateLimiterRequestKey,
         reason: &str,
     ) -> Result<(), String> {
-        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
+        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.state.ic_agent);
         let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
         match rate_limits
             .update_video_generation_status(key, VideoGenRequestStatus::Failed(reason.to_string()))
@@ -499,7 +498,7 @@ impl CompletionDeps for RuntimeCompletionDeps {
         &self,
         request_key: &RateLimiterRequestKey,
     ) -> Result<(), String> {
-        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
+        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.state.ic_agent);
         let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
         match rate_limits
             .decrement_video_generation_counter_v_1(key, "VIDEOGEN".to_string())
@@ -537,8 +536,35 @@ impl CompletionDeps for RuntimeCompletionDeps {
     }
 
     async fn create_draft(&self, request: DraftCreationRequest) -> Result<(), DraftServiceError> {
-        use crate::videogen::draft::draft_client_from_env;
-        draft_client_from_env().create_draft(request).await
+        use crate::routes::upload::draft_client::InProcessDraftServiceClient;
+        use crate::videogen::draft::DraftServiceClient;
+
+        match &self.state.upload {
+            Some(upload) => {
+                InProcessDraftServiceClient::new(
+                    self.state.clone(),
+                    upload.events_service.clone(),
+                    upload.notification_client.clone(),
+                )
+                .create_draft(request)
+                .await
+            }
+            None => {
+                // Loud: missing upload tokens silently dropping draft registration
+                // would lose generated-video posts. Surface it (spec D9 / review).
+                tracing::error!(
+                    request_id = %request.request_id,
+                    video_id = %request.video_id,
+                    "videogen draft registration DISABLED — upload tokens \
+                     (OFFCHAIN_EVENTS_API_TOKEN / YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN) missing"
+                );
+                sentry::capture_message(
+                    "videogen draft registration disabled: upload tokens missing",
+                    sentry::Level::Error,
+                );
+                Ok(())
+            }
+        }
     }
 }
 
