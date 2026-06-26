@@ -24,20 +24,14 @@ pub struct MarkPostAsPublishedRequest {
     pub delegated_identity_wire: DelegatedIdentityWire,
 }
 
-// allow(dead_code): registered on the router in Task 1.10.
-#[allow(dead_code)]
 pub async fn mark_post_as_published(
     State(state): State<AppState>,
     Json(payload): Json<MarkPostAsPublishedRequest>,
 ) -> ApiResponse<()> {
-    let Some(upload) = state.upload.clone() else {
-        return AppError::InternalError("upload routes disabled (missing tokens)".into())
-            .to_api_response();
-    };
     mark_post_as_published_impl(
         &state,
-        &upload.events_service,
-        &upload.notification_client,
+        state.upload.events_service.as_ref(),
+        state.upload.notification_client.as_ref(),
         payload,
     )
     .await
@@ -46,8 +40,8 @@ pub async fn mark_post_as_published(
 
 async fn mark_post_as_published_impl(
     state: &AppState,
-    events_service: &EventService,
-    notification_client: &NotificationClient,
+    events_service: Option<&EventService>,
+    notification_client: Option<&NotificationClient>,
     payload: MarkPostAsPublishedRequest,
 ) -> Result<(), AppError> {
     // Chain-verified sender (rejects forged delegation chains — see auth::verified_sender).
@@ -80,30 +74,34 @@ async fn mark_post_as_published_impl(
         .update_post_status(payload.post_id.clone(), PostStatus::Uploaded)
         .await?;
 
-    let _ = events_service
-        .send_video_upload_successful_event(
-            post_details.video_uid,
-            post_details.hashtags.len(),
-            false,
-            true,
-            post_details.id.clone(),
-            post_details.creator_principal,
-            USER_INFO_SERVICE_ID,
-            String::new(),
-            None,
-        )
-        .await
-        .inspect_err(|e| tracing::error!("error sending video upload successful event {e}"));
+    if let Some(events) = events_service {
+        let _ = events
+            .send_video_upload_successful_event(
+                post_details.video_uid,
+                post_details.hashtags.len(),
+                false,
+                true,
+                post_details.id.clone(),
+                post_details.creator_principal,
+                USER_INFO_SERVICE_ID,
+                String::new(),
+                None,
+            )
+            .await
+            .inspect_err(|e| tracing::error!("error sending video upload successful event {e}"));
+    }
 
-    notification_client
-        .send_notification(
-            NotificationType::VideoPublished {
-                user_principal: post_details.creator_principal,
-                post_id: payload.post_id.clone(),
-            },
-            post_details.creator_principal,
-        )
-        .await;
+    if let Some(notif) = notification_client {
+        notif
+            .send_notification(
+                NotificationType::VideoPublished {
+                    user_principal: post_details.creator_principal,
+                    post_id: payload.post_id.clone(),
+                },
+                post_details.creator_principal,
+            )
+            .await;
+    }
 
     Ok(())
 }

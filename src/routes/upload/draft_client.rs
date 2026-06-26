@@ -13,17 +13,18 @@ use crate::routes::upload::{
 use crate::videogen::draft::{DraftCreationRequest, DraftServiceClient, DraftServiceError};
 use crate::AppState;
 
-// allow(dead_code): constructed by RuntimeCompletionDeps in Task 2.2b.
-#[allow(dead_code)]
 pub struct InProcessDraftServiceClient {
     state: AppState,
-    events: EventService,
-    notif: NotificationClient,
+    events: Option<EventService>,
+    notif: Option<NotificationClient>,
 }
 
-#[allow(dead_code)]
 impl InProcessDraftServiceClient {
-    pub fn new(state: AppState, events: EventService, notif: NotificationClient) -> Self {
+    pub fn new(
+        state: AppState,
+        events: Option<EventService>,
+        notif: Option<NotificationClient>,
+    ) -> Self {
         Self {
             state,
             events,
@@ -80,7 +81,7 @@ impl DraftServiceClient for InProcessDraftServiceClient {
             "registering draft in-process via update_metadata_impl"
         );
 
-        update_metadata_impl(&self.state, &self.events, &self.notif, req)
+        update_metadata_impl(&self.state, self.events.as_ref(), self.notif.as_ref(), req)
             .await
             .map_err(|e| DraftServiceError::Unavailable(e.to_string()))
     }

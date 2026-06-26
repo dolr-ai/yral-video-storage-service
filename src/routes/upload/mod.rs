@@ -13,45 +13,34 @@ pub mod test_support;
 
 use crate::routes::upload::{events::EventService, notification::NotificationClient};
 
-/// Upload-route dependencies that require secrets. Built tolerantly: if either token
-/// is absent, `from_env`/`build` returns `None` and the upload routes are disabled
-/// (return 503) rather than panicking the whole binary at startup (spec D9).
-// allow(dead_code): fields are read by the handlers wired in later tasks.
-#[allow(dead_code)]
-#[derive(Clone)]
+/// Optional, best-effort side-effect clients for the upload routes. Each is built
+/// independently from its token; an absent token disables ONLY that side-effect
+/// (analytics event / push notification) — it never blocks the core publish flow
+/// (Storj finalize + canister `add_post_v_1`), which needs no token. Missing tokens
+/// never panic the binary (spec D9).
+#[derive(Clone, Default)]
 pub struct UploadState {
-    pub events_service: EventService,
-    pub notification_client: NotificationClient,
+    pub events_service: Option<EventService>,
+    pub notification_client: Option<NotificationClient>,
 }
 
 impl UploadState {
-    /// Returns `None` if either token is missing.
-    pub fn build(events_token: Option<String>, notif_token: Option<String>) -> Option<Self> {
-        let (events_token, notif_token) = (events_token?, notif_token?);
-        Some(Self {
-            events_service: EventService::with_auth_token(events_token),
-            notification_client: NotificationClient::new(notif_token),
-        })
+    /// Build each client from its env token; absent token → that client is `None`.
+    pub fn from_env() -> Self {
+        Self {
+            events_service: std::env::var(crate::consts::OFFCHAIN_EVENTS_API_TOKEN)
+                .ok()
+                .map(EventService::with_auth_token),
+            notification_client: std::env::var(
+                crate::consts::YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN,
+            )
+            .ok()
+            .map(NotificationClient::new),
+        }
     }
 
-    /// Build from the two token env vars; `None` (disabled) if either is unset.
-    pub fn from_env() -> Option<Self> {
-        Self::build(
-            std::env::var(crate::consts::OFFCHAIN_EVENTS_API_TOKEN).ok(),
-            std::env::var(crate::consts::YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN).ok(),
-        )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_is_none_when_a_token_missing() {
-        assert!(UploadState::build(None, None).is_none());
-        assert!(UploadState::build(Some("a".into()), None).is_none());
-        assert!(UploadState::build(None, Some("b".into())).is_none());
-        assert!(UploadState::build(Some("a".into()), Some("b".into())).is_some());
+    /// True when neither side-effect client is configured (for a startup log).
+    pub fn is_fully_disabled(&self) -> bool {
+        self.events_service.is_none() && self.notification_client.is_none()
     }
 }

@@ -57,11 +57,10 @@ pub(crate) struct AppState {
     pub media_job_cancel: Arc<Mutex<CancellationToken>>,
     pub job_media_phash_running: Arc<AtomicBool>,
     pub ic_agent: Agent,
-    /// Upload-route deps (offchain events + notifications). `None` when the upload
-    /// secrets are absent — the 3 upload routes then return 503 (spec D9).
-    // allow(dead_code): read by the upload handlers wired in later tasks.
-    #[allow(dead_code)]
-    pub upload: Option<Arc<routes::upload::UploadState>>,
+    /// Optional best-effort upload side-effect clients (offchain events + push
+    /// notifications). Each is independently `None` when its token is unset; the
+    /// core publish flow works regardless.
+    pub upload: routes::upload::UploadState,
 }
 
 #[derive(OpenApi)]
@@ -261,11 +260,11 @@ async fn run_server() -> anyhow::Result<()> {
         }
         builder.build().context("Failed to build IC agent")?
     };
-    let upload = routes::upload::UploadState::from_env().map(Arc::new);
-    if upload.is_none() {
+    let upload = routes::upload::UploadState::from_env();
+    if upload.is_fully_disabled() {
         tracing::warn!(
-            "upload routes disabled: OFFCHAIN_EVENTS_API_TOKEN / \
-             YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN not set"
+            "upload analytics + notifications disabled: OFFCHAIN_EVENTS_API_TOKEN / \
+             YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN not set (publishing still works)"
         );
     }
 

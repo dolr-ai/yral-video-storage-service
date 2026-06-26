@@ -539,32 +539,15 @@ impl CompletionDeps for RuntimeCompletionDeps {
         use crate::routes::upload::draft_client::InProcessDraftServiceClient;
         use crate::videogen::draft::DraftServiceClient;
 
-        match &self.state.upload {
-            Some(upload) => {
-                InProcessDraftServiceClient::new(
-                    self.state.clone(),
-                    upload.events_service.clone(),
-                    upload.notification_client.clone(),
-                )
-                .create_draft(request)
-                .await
-            }
-            None => {
-                // Loud: missing upload tokens silently dropping draft registration
-                // would lose generated-video posts. Surface it (spec D9 / review).
-                tracing::error!(
-                    request_id = %request.request_id,
-                    video_id = %request.video_id,
-                    "videogen draft registration DISABLED — upload tokens \
-                     (OFFCHAIN_EVENTS_API_TOKEN / YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN) missing"
-                );
-                sentry::capture_message(
-                    "videogen draft registration disabled: upload tokens missing",
-                    sentry::Level::Error,
-                );
-                Ok(())
-            }
-        }
+        // Draft registration (finalize + canister add_post) always runs; the analytics
+        // event + push notification are optional best-effort side-effects inside.
+        InProcessDraftServiceClient::new(
+            self.state.clone(),
+            self.state.upload.events_service.clone(),
+            self.state.upload.notification_client.clone(),
+        )
+        .create_draft(request)
+        .await
     }
 }
 

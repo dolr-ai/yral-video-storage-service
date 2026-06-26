@@ -36,22 +36,17 @@ pub struct UpdateMetadataRequest {
     pub post_details: PostDetailsFromFrontendV1,
 }
 
-/// `POST /update-video-metadata`. Public route — auth is the in-body delegated
-/// identity (chain-verified). Returns 503 if upload secrets are unconfigured.
-// allow(dead_code): registered on the router in Task 1.10.
-#[allow(dead_code)]
+/// `POST /update-video-metadata`. Public route — auth is the in-body chain-verified
+/// delegated identity. Core flow (finalize + canister add_post) always runs; the
+/// analytics event + push notification fire only if their tokens are configured.
 pub async fn update_video_metadata(
     State(state): State<AppState>,
     Json(req): Json<UpdateMetadataRequest>,
 ) -> ApiResponse<()> {
-    let Some(upload) = state.upload.clone() else {
-        return AppError::InternalError("upload routes disabled (missing tokens)".into())
-            .to_api_response();
-    };
     update_metadata_impl(
         &state,
-        &upload.events_service,
-        &upload.notification_client,
+        state.upload.events_service.as_ref(),
+        state.upload.notification_client.as_ref(),
         req,
     )
     .await
@@ -84,10 +79,11 @@ fn inject_post_details(
 }
 
 /// Shared by the HTTP handler and the in-process videogen draft client (Phase 2).
+/// `events_service`/`notification_client` are optional best-effort side-effects.
 pub(crate) async fn update_metadata_impl(
     state: &AppState,
-    events_service: &EventService,
-    notification_client: &NotificationClient,
+    events_service: Option<&EventService>,
+    notification_client: Option<&NotificationClient>,
     mut req: UpdateMetadataRequest,
 ) -> Result<(), AppError> {
     let publisher = authorize_publisher(&req)?;
@@ -119,8 +115,8 @@ pub(crate) async fn update_metadata_impl(
 
 async fn upload_video_canister(
     state: &AppState,
-    events_service: &EventService,
-    notification_client: &NotificationClient,
+    events_service: Option<&EventService>,
+    notification_client: Option<&NotificationClient>,
     post_details: PostDetailsFromFrontendV1,
 ) -> Result<(), AppError> {
     let user_post_service = UserPostService(USER_POST_SERVICE_ID, &state.ic_agent);
@@ -129,56 +125,63 @@ async fn upload_video_canister(
     match user_post_service.add_post_v_1(post_details.clone()).await? {
         Result_::Ok => {
             if post_is_published {
-                let _ = events_service
-                    .send_video_upload_successful_event(
-                        post_details.video_uid,
-                        post_details.hashtags.len(),
-                        false,
-                        true,
-                        post_details.id.clone(),
-                        post_details.creator_principal,
-                        USER_INFO_SERVICE_ID,
-                        String::new(),
-                        None,
-                    )
-                    .await
-                    .inspect_err(|e| {
-                        tracing::error!("Failed to send video_upload_successful event: {e}")
-                    });
+                if let Some(events) = events_service {
+                    let _ = events
+                        .send_video_upload_successful_event(
+                            post_details.video_uid.clone(),
+                            post_details.hashtags.len(),
+                            false,
+                            true,
+                            post_details.id.clone(),
+                            post_details.creator_principal,
+                            USER_INFO_SERVICE_ID,
+                            String::new(),
+                            None,
+                        )
+                        .await
+                        .inspect_err(|e| {
+                            tracing::error!("Failed to send video_upload_successful event: {e}")
+                        });
+                }
             }
 
-            let notification_payload = if post_is_published {
-                NotificationType::VideoPublished {
-                    user_principal: post_details.creator_principal,
-                    post_id: post_details.id.clone(),
-                }
-            } else {
-                NotificationType::VideoUploadedToDraft {
-                    user_principal: post_details.creator_principal,
-                    post_id: post_details.id.clone(),
-                }
-            };
-
-            notification_client
-                .send_notification(notification_payload, post_details.creator_principal)
-                .await;
+            if let Some(notif) = notification_client {
+                let payload = if post_is_published {
+                    NotificationType::VideoPublished {
+                        user_principal: post_details.creator_principal,
+                        post_id: post_details.id.clone(),
+                    }
+                } else {
+                    NotificationType::VideoUploadedToDraft {
+                        user_principal: post_details.creator_principal,
+                        post_id: post_details.id.clone(),
+                    }
+                };
+                notif
+                    .send_notification(payload, post_details.creator_principal)
+                    .await;
+            }
 
             Ok(())
         }
         Result_::Err(user_post_service_error) => {
             let error = format!("{user_post_service_error:?}");
-            let _ = events_service
-                .send_video_event_unsuccessful(
-                    error.clone(),
-                    post_details.hashtags.len(),
-                    false,
-                    true,
-                    post_details.creator_principal,
-                    String::new(),
-                    USER_INFO_SERVICE_ID,
-                )
-                .await
-                .inspect_err(|e| tracing::error!("Failed to send video_event_unsuccessful: {e}"));
+            if let Some(events) = events_service {
+                let _ = events
+                    .send_video_event_unsuccessful(
+                        error.clone(),
+                        post_details.hashtags.len(),
+                        false,
+                        true,
+                        post_details.creator_principal,
+                        String::new(),
+                        USER_INFO_SERVICE_ID,
+                    )
+                    .await
+                    .inspect_err(|e| {
+                        tracing::error!("Failed to send video_event_unsuccessful: {e}")
+                    });
+            }
             Err(AppError::CanisterError(error))
         }
     }
