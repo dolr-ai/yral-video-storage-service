@@ -33,8 +33,6 @@ pub const OFFCHAIN_EVENTS_API_TOKEN: &str = "OFFCHAIN_EVENTS_API_TOKEN";
 pub const YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN: &str =
     "YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN";
 
-pub const VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL: &str = "https://upload.yral.com";
-
 // Storj public CDN base URL for SFW videos.
 // Full video URL: {STORJ_SFW_SHARE_URL}/{publisher_user_id}/{video_id}.mp4
 pub static STORJ_SFW_SHARE_URL: Lazy<Option<String>> =

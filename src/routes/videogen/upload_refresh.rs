@@ -287,14 +287,14 @@ pub async fn refresh_upload_url(
 
 struct RuntimeUploadRefreshDeps {
     config: VideogenConfig,
-    http: reqwest::Client,
+    ic_agent: ic_agent::Agent,
 }
 
 impl RuntimeUploadRefreshDeps {
-    fn new(_state: AppState, config: VideogenConfig) -> Self {
+    fn new(state: AppState, config: VideogenConfig) -> Self {
         Self {
             config,
-            http: reqwest::Client::new(),
+            ic_agent: state.ic_agent,
         }
     }
 }
@@ -321,65 +321,30 @@ impl UploadRefreshDeps for RuntimeUploadRefreshDeps {
 
     async fn generate_fresh_upload_url(
         &self,
-        _request_key: &RateLimiterRequestKey,
+        request_key: &RateLimiterRequestKey,
         video_id: &str,
-        _object_key: &str,
+        object_key: &str,
     ) -> Result<UploadDestination, String> {
         use chrono::Duration;
-        use reqwest::header::CONTENT_TYPE;
-        use serde_json::json;
 
-        let url = format!(
-            "{}/get-upload-url",
-            crate::consts::VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL
-        );
-
-        let body =
-            serde_json::to_vec(&json!({ "video_id": video_id })).map_err(|e| e.to_string())?;
-
-        let response = self
-            .http
-            .post(url)
-            .header(CONTENT_TYPE, "application/json")
-            .timeout(std::time::Duration::from_secs(
-                self.config.upload_destination_timeout_secs,
-            ))
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !response.status().is_success() {
-            return Err(format!("upload service returned {}", response.status()));
-        }
-
-        #[derive(serde::Deserialize)]
-        struct Resp {
-            success: bool,
-            data: Option<Data>,
-            error_message: Option<String>,
-        }
-        #[derive(serde::Deserialize)]
-        struct Data {
-            upload_url: Option<String>,
-        }
-
-        let body = response.text().await.map_err(|e| e.to_string())?;
-        let resp: Resp = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-        if !resp.success {
-            return Err(resp
-                .error_message
-                .unwrap_or_else(|| "upload service did not return success".to_string()));
-        }
-        let upload_url = resp
-            .data
-            .and_then(|d| d.upload_url)
-            .ok_or_else(|| "upload service response missing upload_url".to_string())?;
+        // In-process (Phase 2.5): mint a fresh upload URL via the merged get-upload-url
+        // logic instead of POSTing to upload.yral.com. Publisher resolves from the
+        // request key's principal. The caller's video_id/object_key are preserved in
+        // the returned destination (unchanged from the prior HTTP behavior).
+        let base = std::env::var(crate::consts::PUBLIC_BASE_URL)
+            .map_err(|_| "PUBLIC_BASE_URL not set".to_string())?;
+        let resp = crate::routes::upload::get_upload_url::get_upload_url_core(
+            &self.ic_agent,
+            &base,
+            &request_key.principal,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
 
         Ok(UploadDestination {
             video_id: video_id.to_string(),
-            object_key: _object_key.to_string(),
-            upload_url,
+            object_key: object_key.to_string(),
+            upload_url: resp.upload_url,
             expires_at: Utc::now() + Duration::seconds(self.config.upload_url_ttl_secs as i64),
             bucket_url: None,
             encrypted_identity: None,
