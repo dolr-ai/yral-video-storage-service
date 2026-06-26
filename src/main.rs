@@ -320,6 +320,22 @@ async fn run_server() -> anyhow::Result<()> {
             "/duplicate_raw/finalize",
             post(routes::duplicate::handler_raw_finalize).with_state(app_state.clone()),
         )
+        // Upload-service routes (merged in). PUBLIC — no `authorize` layer; auth is the
+        // in-body chain-verified delegated identity. Small JSON bodies → default 2MB limit.
+        .route(
+            "/get-upload-url",
+            post(routes::upload::get_upload_url::get_upload_url).with_state(app_state.clone()),
+        )
+        .route(
+            "/update-video-metadata",
+            post(routes::upload::update_video_metadata::update_video_metadata)
+                .with_state(app_state.clone()),
+        )
+        .route(
+            "/mark-post-as-published",
+            post(routes::upload::mark_post_as_published::mark_post_as_published)
+                .with_state(app_state.clone()),
+        )
         // NOTE: This will be removed as the upload happens in the very end of the pipeline and nsfw flag is passed into duplicate
         .route(
             "/move-to-nsfw",
