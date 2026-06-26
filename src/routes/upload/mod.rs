@@ -3,6 +3,7 @@ pub mod events;
 pub mod notification;
 pub mod storj_finalize;
 pub mod types;
+pub mod update_video_metadata;
 
 #[cfg(test)]
 pub mod test_support;
