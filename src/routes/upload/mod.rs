@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod events;
 pub mod get_upload_url;
+pub mod mark_post_as_published;
 pub mod notification;
 pub mod storj_finalize;
 pub mod types;
