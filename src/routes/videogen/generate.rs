@@ -1101,65 +1101,22 @@ impl GenerateDeps for RuntimeGenerateDeps {
         &self,
         request: UploadDestinationRequest,
     ) -> Result<UploadDestination, UploadDestinationError> {
-        let url = format!(
-            "{}/get-upload-url",
-            crate::consts::VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL
-        );
-        let body = serde_json::to_vec(&json!({
-            "publisher_user_id": request.user_principal,
-        }))
-        .map_err(|error| UploadDestinationError::Unavailable(error.to_string()))?;
-        tracing::info!(url = %url, user = %request.user_principal, "calling upload service");
-        let response = self
-            .http
-            .post(url)
-            .header(CONTENT_TYPE, "application/json")
-            .timeout(std::time::Duration::from_secs(
-                self.config.upload_destination_timeout_secs,
-            ))
-            .body(body)
-            .send()
-            .await
-            .map_err(|error| {
-                tracing::error!(cause = %error, is_builder = error.is_builder(), is_connect = error.is_connect(), "upload service send failed");
-                UploadDestinationError::Unavailable(error.to_string())
-            })?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|error| UploadDestinationError::Unavailable(error.to_string()))?;
-        if !status.is_success() {
-            tracing::error!(status = %status, body = %body, "upload service non-success");
-            return Err(UploadDestinationError::Unavailable(format!(
-                "upload service returned {status}: {body}"
-            )));
-        }
-        let response: UploadServiceResponse<UploadServiceData> = serde_json::from_str(&body)
-            .map_err(|error| {
-                tracing::error!(body = %body, cause = %error, "upload service response parse failed");
-                UploadDestinationError::Unavailable(error.to_string())
-            })?;
-        if !response.success {
-            let msg = response
-                .error_message
-                .unwrap_or_else(|| "upload service did not return success".to_string());
-            tracing::error!(body = %msg, "upload service returned success=false");
-            return Err(UploadDestinationError::Unavailable(msg));
-        }
-        let data = response.data.ok_or_else(|| {
-            UploadDestinationError::Unavailable("upload service response missing data".to_string())
+        // In-process (Phase 2.5): call the merged get-upload-url logic directly
+        // instead of POSTing to upload.yral.com. Same principal-validation canister
+        // call happens inside get_upload_url_core.
+        let base = std::env::var(crate::consts::PUBLIC_BASE_URL).map_err(|_| {
+            UploadDestinationError::Unavailable("PUBLIC_BASE_URL not set".to_string())
         })?;
-        let video_id = data.video_id.ok_or_else(|| {
-            UploadDestinationError::Unavailable(
-                "upload service response missing video_id".to_string(),
-            )
-        })?;
-        let upload_url = data.upload_url.ok_or_else(|| {
-            UploadDestinationError::Unavailable(
-                "upload service response missing upload_url".to_string(),
-            )
-        })?;
+        tracing::info!(user = %request.user_principal, "registering upload destination in-process");
+        let resp = crate::routes::upload::get_upload_url::get_upload_url_core(
+            &self.ic_agent,
+            &base,
+            &request.user_principal,
+        )
+        .await
+        .map_err(|e| UploadDestinationError::Unavailable(e.to_string()))?;
+        let video_id = resp.video_id;
+        let upload_url = resp.upload_url;
 
         let bucket_url = crate::consts::STORJ_SFW_SHARE_URL
             .as_ref()
@@ -1333,19 +1290,6 @@ struct VastSubmitAcceptedWire {
     request_id: String,
     status: String,
     accepted_at: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct UploadServiceResponse<T> {
-    success: bool,
-    data: Option<T>,
-    error_message: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct UploadServiceData {
-    video_id: Option<String>,
-    upload_url: Option<String>,
 }
 
 /// Build the LTX-2.3 two-pass ComfyUI workflow. Ported from off-chain-agent.
