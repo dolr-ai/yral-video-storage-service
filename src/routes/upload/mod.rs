@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod draft_client;
 pub mod events;
 pub mod get_upload_url;
 pub mod mark_post_as_published;

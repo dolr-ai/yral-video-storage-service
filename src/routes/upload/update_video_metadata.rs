@@ -83,7 +83,8 @@ fn inject_post_details(
     Ok(())
 }
 
-async fn update_metadata_impl(
+/// Shared by the HTTP handler and the in-process videogen draft client (Phase 2).
+pub(crate) async fn update_metadata_impl(
     state: &AppState,
     events_service: &EventService,
     notification_client: &NotificationClient,
