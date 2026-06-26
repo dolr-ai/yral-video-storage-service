@@ -57,9 +57,15 @@ impl From<ic_agent::agent::AgentError> for AppError {
 
 impl From<candid::error::Error> for AppError {
     fn from(error: candid::error::Error) -> Self {
-        // candid::error::Error covers encoding/decoding failures broadly,
-        // not just principal parsing — map to SerializationError.
-        AppError::SerializationError(error.to_string())
+        // Preserve the upload-service mapping (HTTP 400). This is a port; keep
+        // observable behavior identical even though candid errors are broader.
+        AppError::InvalidPrincipal(error.to_string())
+    }
+}
+
+impl From<Box<dyn std::error::Error>> for AppError {
+    fn from(error: Box<dyn std::error::Error>) -> Self {
+        AppError::InternalError(error.to_string())
     }
 }
 
