@@ -173,7 +173,10 @@ Storage has **no** helper to build a valid signed `DelegatedIdentityWire`. `iden
 - [ ] **Step 3:** Add `#[cfg(test)] pub mod test_support;` to `mod.rs`. Write a smoke test: `let (wire, p) = create_delegated_identity_wire(); assert_eq!(DelegatedIdentity::try_from(wire).unwrap().sender().unwrap(), p);` → PASS.
 - [ ] **Step 4: Commit.** `git commit -am "test(upload): port delegated-identity wire fixture"`
 
-### Task 1.2c: Decide delegation-chain verification (review — SECURITY)
+### Task 1.2c: Decide delegation-chain verification (review — SECURITY) ✅ DONE (Option A, `8b5a5d6`)
+
+**Resolved:** Option A. Verified `ic-agent` `DelegatedIdentity::new` checks chain signatures + `delegated_principal == to.sender()`, while `new_unchecked` (shared wire's `TryFrom`) skips all of it — a sender-spoofing hole. Added `routes::upload::auth::verified_sender` (verifying path); handlers must call it instead of `TryFrom`. Forged-`from_key` rejection covered by test. Original detail retained below.
+
 
 **Files:** `src/routes/upload/types.rs` (a small `verified_sender` helper) + tests
 
