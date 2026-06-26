@@ -524,6 +524,8 @@ fn builds_upload_url_from_base() {
 
 ---
 
+> **EXECUTION STATUS:** Phase 3 **DEFERRED** (not yet done). Rationale: all three storage→upload `upload.yral.com` hops are already internalized (Phases 2 + 2.5), so the merge is decommission-ready without Phase 3. The remaining self-hop (`update_metadata_impl` → its own `/duplicate_raw/finalize` via `PUBLIC_BASE_URL`) is a functional, working internal round-trip; collapsing it is a perf/cleanliness optimization. `handler_raw_finalize` is ~200 lines of critical uplink/ffmpeg logic on the real upload path with no local test coverage (needs storj/uplink) — best refactored with fresh eyes + review rather than late in a long execution. Until done, `src/routes/upload/storj_finalize.rs` (the Phase-1 helper) stays.
+
 # PHASE 3 — Internalize the storj finalize self-hop
 
 *Goal: `update_metadata_impl`'s finalize step calls `handler_raw_finalize` logic directly instead of HTTP-POSTing to `{PUBLIC_BASE_URL}/duplicate_raw/finalize`.*
