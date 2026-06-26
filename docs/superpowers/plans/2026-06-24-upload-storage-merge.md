@@ -420,6 +420,9 @@ fn builds_upload_url_from_base() {
 - [ ] **Step 2 (review M1):** the ported handlers already carry their `#[utoipa::path(...)]` + req/resp `#[derive(ToSchema)]` (done in Tasks 1.7c/1.8/1.9). Here you ONLY register them: add the 3 paths to `#[openapi(paths(...))]` and add `ApiResponse`, `UpdateMetadataRequest`, `GetUploadUrlReq/Resp`, `MarkPostAsPublishedRequest`, and the shared `DelegatedIdentityWire` (its derived schema — C2) to `components(schemas(...))` (`src/main.rs:62-158`).
 - [ ] **Step 2b (review M4 — body limit, spec R9):** leave the 3 routes at axum's default 2 MB body limit — the wire+meta JSON is small. Decision: no `DefaultBodyLimit` needed (unlike `/duplicate_raw/upload`). Confirm in code review.
 - [ ] **Step 3:** `cargo build` → PASS. Run full suite `cargo test`.
+
+> **EXECUTION NOTE (rev):** Routes registered (public, no HMAC) ✅. **OpenAPI/swagger registration for the 3 routes is DEFERRED** — the handlers return `ApiResponse<()>`/`ApiResponse<T>`; wiring utoipa needs `ToSchema` on the generic envelope + `ApiResponse<EmptyResp>` response annotations + `PostDetailsFromFrontendV1` schema overrides. Pure docs surface, zero functional impact. Tracked as a Phase-1 wrap follow-up. Endpoints are documented in README (Task 1.11).
+> **Also deferred to Phase-1 wrap:** remove the temporary `#[allow(dead_code)]` annotations across `src/routes/upload/*` (added so each task committed CI-green before its consumer landed) now that handlers are wired — keep only genuinely-unused ones (e.g. `EmptyResp` until swagger).
 - [ ] **Step 4:** Manual smoke (local): `cargo run`, then `curl -s localhost:3000/get-upload-url -d '{"publisher_user_id":"aaaaa-aa"}' -H 'content-type: application/json'` → expect a JSON envelope (will 400/canister-error without a real principal, but proves routing + public access).
 - [ ] **Step 5: Commit.** `git commit -am "feat(upload): register 3 public routes + swagger"`
 
