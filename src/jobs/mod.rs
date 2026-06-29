@@ -7,6 +7,8 @@ pub mod mirror;
 pub mod phash_backfill;
 pub mod scan_hetzner;
 pub mod scan_storj;
+#[allow(dead_code)]
+pub mod worker;
 
 use anyhow::{Context, Result};
 use std::path::Path;
