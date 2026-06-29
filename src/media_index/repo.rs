@@ -506,6 +506,46 @@ pub async fn canonical_phash_coverage(
     })
 }
 
+/// Returns true iff there is at least one servable video that is MISSING a canonical
+/// pHash AND was NOT failed within the last `failed_within` window. The recently-failed
+/// anti-join quarantines permanently-dead rows (deleted source / never-finalizing temp
+/// key) so the steady-state worker does not re-download them every tick (and does not
+/// insert an empty `media_job_runs` row each pass). Short-circuits via `EXISTS … LIMIT 1`,
+/// so it is far cheaper than a full `COUNT(*)` over the whole servable set.
+pub async fn any_eligible_for_hash(
+    client: &Client,
+    hash_kind: &str,
+    hash_version: &str,
+    input_media_version: &str,
+    failed_within: std::time::Duration,
+) -> Result<bool, tokio_postgres::Error> {
+    let row = client
+        .query_one(
+            "SELECT EXISTS (
+               SELECT 1
+               FROM all_servable_videos_on_yral v
+               LEFT JOIN servable_video_hashes h
+                 ON h.video_id = v.video_id
+                AND h.hash_kind = $1 AND h.hash_version = $2 AND h.input_media_version = $3
+               WHERE h.video_id IS NULL
+                 AND NOT EXISTS (
+                   SELECT 1 FROM media_job_failures f
+                   WHERE f.video_id = v.video_id
+                     AND f.created_at > now() - ($4::double precision * interval '1 second')
+                 )
+               LIMIT 1
+             ) AS eligible",
+            &[
+                &hash_kind,
+                &hash_version,
+                &input_media_version,
+                &(failed_within.as_secs_f64()),
+            ],
+        )
+        .await?;
+    Ok(row.get("eligible"))
+}
+
 /// A single row from `media_job_runs`, returned by [`recent_job_runs`].
 #[derive(Debug, Clone)]
 pub struct JobRunRow {
@@ -833,6 +873,67 @@ mod tests {
         set_last_discovery_at(&client, now).await.unwrap();
         let got = get_last_discovery_at(&client).await.unwrap().unwrap();
         assert!((got - now).num_seconds().abs() < 2);
+    }
+
+    #[tokio::test]
+    async fn any_eligible_for_hash_quarantines_recent_failures() {
+        use phash::{HASH_KIND, HASH_VERSION};
+        let imv = crate::jobs::media_phash::INPUT_MEDIA_VERSION;
+        let within = std::time::Duration::from_secs(86400);
+        let (_pg, mut client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+
+        // Empty set: nothing eligible.
+        assert!(
+            !super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv, within)
+                .await
+                .unwrap(),
+            "no servable rows -> not eligible"
+        );
+
+        // One missing (unhashed) servable row: eligible.
+        let tx = client.transaction().await.unwrap();
+        crate::media_index::upsert_servable_video_txn(&tx, servable_input("vid-elig"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(
+            super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv, within)
+                .await
+                .unwrap(),
+            "missing + no failure -> eligible"
+        );
+
+        // Recent failure: quarantined (not eligible).
+        client
+            .execute(
+                "INSERT INTO media_job_failures (job_kind, item_key, video_id, phase, last_error)
+                 VALUES ('media_phash','vid-elig','vid-elig','phash_download','x')",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            !super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv, within)
+                .await
+                .unwrap(),
+            "recently-failed -> not eligible"
+        );
+
+        // Failure older than the window: eligible again.
+        client
+            .execute(
+                "UPDATE media_job_failures SET created_at = now() - interval '48 hours' WHERE video_id = 'vid-elig'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv, within)
+                .await
+                .unwrap(),
+            "stale failure -> eligible again"
+        );
     }
 
     #[tokio::test]

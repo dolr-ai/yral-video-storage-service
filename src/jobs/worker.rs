@@ -90,6 +90,219 @@ where
     Some(f().await)
 }
 
+/// One sweep pass over a single DB connection: elect via the lease, then (only if
+/// this box owns it) drain eligible work and run discovery when due. The two side
+/// effects — `drain` (hashing) and `discovery` (scan + import) — are injected as
+/// closures so the control flow is unit-testable without real S3/ffmpeg.
+///
+/// Ordering:
+/// 1. `acquire_or_renew_lease` — non-owners return early (no-op).
+/// 2. Drain only when `any_eligible_for_hash` is true (missing AND not recently
+///    failed), so an idle/dead-only fleet never inserts an empty job-run row or
+///    re-downloads dead videos. Runs under heartbeat-renew + the per-box CAS guard.
+/// 3. Discovery only when due by the persisted `last_discovery_at`; on a real run
+///    (CAS not held by a manual import), persist the new cadence timestamp.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_one_pass<DF, DFut, GF, GFut>(
+    me: &str,
+    client: std::sync::Arc<tokio_postgres::Client>,
+    drain_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    import_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ttl: std::time::Duration,
+    discovery_interval: std::time::Duration,
+    failed_within: std::time::Duration,
+    drain: DF,
+    discovery: GF,
+) -> Result<(), tokio_postgres::Error>
+where
+    DF: FnOnce() -> DFut,
+    DFut: std::future::Future<Output = ()>,
+    GF: FnOnce() -> GFut,
+    GFut: std::future::Future<Output = ()>,
+{
+    if !crate::media_index::acquire_or_renew_lease(&client, me, ttl).await? {
+        return Ok(());
+    }
+
+    let eligible = crate::media_index::any_eligible_for_hash(
+        &client,
+        phash::HASH_KIND,
+        phash::HASH_VERSION,
+        crate::jobs::media_phash::INPUT_MEDIA_VERSION,
+        failed_within,
+    )
+    .await?;
+    if eligible {
+        with_heartbeat_renew(client.clone(), me.to_string(), ttl, async {
+            cas_guarded(drain_flag, drain).await;
+        })
+        .await;
+    }
+
+    let last = crate::media_index::get_last_discovery_at(&client).await?;
+    if discovery_due(last, discovery_interval, chrono::Utc::now()) {
+        let ran = with_heartbeat_renew(client.clone(), me.to_string(), ttl, async {
+            cas_guarded(import_flag, discovery).await
+        })
+        .await;
+        // Only advance the cadence if discovery actually ran (CAS not held elsewhere).
+        if ran.is_some() {
+            crate::media_index::set_last_discovery_at(&client, chrono::Utc::now()).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Runtime dependencies for the production sweep worker. Built at the spawn site
+/// (`run_server`) from `AppState`; kept as a plain struct so this module stays in
+/// the library crate (it must not reference the binary-only `AppState`).
+pub struct SweepWorker {
+    pub s3: crate::s3_client::S3Client,
+    pub storj: crate::storj_s3_client::StorjS3Client,
+    pub db_url: String,
+    pub drain_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub import_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The media-job cancellation token holder. Re-read each pass so the
+    /// `media-cancel` endpoint can interrupt an in-flight worker drain.
+    pub media_cancel: std::sync::Arc<std::sync::Mutex<tokio_util::sync::CancellationToken>>,
+    pub me: String,
+    pub drain_interval: std::time::Duration,
+    pub discovery_interval: std::time::Duration,
+    pub lease_ttl: std::time::Duration,
+    pub failed_within: std::time::Duration,
+}
+
+impl SweepWorker {
+    /// Run the resilient leased loop until `shutdown` (the graceful-shutdown token)
+    /// fires. Each pass connects its own DB client; errors/panics in a pass are
+    /// logged + reported and the loop continues — the worker never exits on error.
+    pub async fn run(self, shutdown: tokio_util::sync::CancellationToken) {
+        tracing::info!(me = %self.me, "sweep worker: started");
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                res = self.run_pass() => {
+                    if let Err(e) = res {
+                        tracing::warn!(error = %e, "sweep worker: pass error");
+                        sentry::capture_message(
+                            &format!("sweep worker pass error: {e}"),
+                            sentry::Level::Warning,
+                        );
+                    }
+                }
+            }
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                _ = tokio::time::sleep(self.drain_interval) => {}
+            }
+        }
+        // Best-effort release so a peer takes over immediately (no TTL wait).
+        if let Ok(client) = crate::db::connect(&self.db_url).await {
+            let _ = crate::media_index::release_lease(&client, &self.me).await;
+        }
+        tracing::info!(me = %self.me, "sweep worker: stopped");
+    }
+
+    async fn run_pass(&self) -> Result<(), tokio_postgres::Error> {
+        let client = std::sync::Arc::new(crate::db::connect(&self.db_url).await?);
+
+        // Current media-job cancel token — so `media-cancel` can halt the worker drain.
+        let media_cancel = self
+            .media_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
+        let drain = {
+            let s3 = self.s3.clone();
+            let storj = self.storj.clone();
+            let db_url = self.db_url.clone();
+            let cancel = media_cancel.clone();
+            move || async move {
+                if let Err(e) = crate::jobs::media_phash::run(
+                    s3,
+                    storj,
+                    db_url,
+                    cancel,
+                    None,
+                    "sweep_drain",
+                    None,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "sweep drain: media_phash failed");
+                }
+            }
+        };
+
+        let discovery = {
+            let s3 = self.s3.clone();
+            let storj = self.storj.clone();
+            let db_url = self.db_url.clone();
+            let cancel = media_cancel.clone();
+            move || async move {
+                // Full-scan both buckets (UUID keys are non-monotonic, so incremental
+                // scan is lossy), then import the newly discovered rows into the master.
+                if let Err(e) = crate::jobs::scan_hetzner::run(
+                    s3,
+                    db_url.clone(),
+                    cancel.clone(),
+                    None,
+                    None,
+                    true,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "sweep discovery: scan_hetzner failed");
+                }
+                if let Err(e) = crate::jobs::scan_storj::run(
+                    storj,
+                    db_url.clone(),
+                    cancel.clone(),
+                    None,
+                    None,
+                    true,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "sweep discovery: scan_storj failed");
+                }
+                match crate::db::connect(&db_url).await {
+                    Ok(mut c) => {
+                        if let Err(e) = crate::jobs::media_imports::import_current_video_index(
+                            &mut c,
+                            "sweep_discovery",
+                            None,
+                            &cancel,
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = %e, "sweep discovery: import failed");
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "sweep discovery: db connect failed"),
+                }
+            }
+        };
+
+        run_one_pass(
+            &self.me,
+            client,
+            &self.drain_flag,
+            &self.import_flag,
+            self.lease_ttl,
+            self.discovery_interval,
+            self.failed_within,
+            drain,
+            discovery,
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +378,72 @@ mod tests {
                 .await
                 .unwrap(),
             "peer cannot steal — heartbeat kept fresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn pass_skips_everything_when_not_lease_owner() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        let client = Arc::new(client);
+        // Another box owns a fresh lease.
+        acquire_or_renew_lease(&client, "other-box", Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        let drained = Arc::new(AtomicBool::new(false));
+        let dflag = Arc::new(AtomicBool::new(false));
+        let iflag = Arc::new(AtomicBool::new(false));
+        run_one_pass(
+            "me",
+            client.clone(),
+            &dflag,
+            &iflag,
+            Duration::from_secs(60),
+            Duration::from_secs(86400),
+            Duration::from_secs(86400),
+            {
+                let d = drained.clone();
+                move || async move { d.store(true, Ordering::Release) }
+            },
+            || async {},
+        )
+        .await
+        .unwrap();
+
+        assert!(!drained.load(Ordering::Acquire), "non-owner must not drain");
+    }
+
+    #[tokio::test]
+    async fn pass_skips_drain_when_nothing_eligible() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        let client = Arc::new(client);
+        // We own the lease, but there are no servable rows -> nothing eligible.
+        let drained = Arc::new(AtomicBool::new(false));
+        let dflag = Arc::new(AtomicBool::new(false));
+        let iflag = Arc::new(AtomicBool::new(false));
+        run_one_pass(
+            "me",
+            client.clone(),
+            &dflag,
+            &iflag,
+            Duration::from_secs(60),
+            // discovery_interval huge so discovery never fires in this focused test
+            Duration::from_secs(u32::MAX as u64),
+            Duration::from_secs(86400),
+            {
+                let d = drained.clone();
+                move || async move { d.store(true, Ordering::Release) }
+            },
+            || async {},
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !drained.load(Ordering::Acquire),
+            "no eligible rows -> drain must not run"
         );
     }
 }
