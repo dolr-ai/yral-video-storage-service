@@ -129,6 +129,10 @@ pub trait CompletionDeps: Send + Sync {
     ) -> Result<(), String>;
 
     async fn create_draft(&self, request: DraftCreationRequest) -> Result<(), DraftServiceError>;
+
+    /// Register a completed video into the master table for steady-state pHash.
+    /// Best-effort; default no-op so test fakes need no change.
+    async fn register_ingested(&self, _video_id: &str, _object_key: &str, _bucket_url: &str) {}
 }
 
 // ─── Core logic (testable) ───────────────────────────────────────────────────
@@ -239,6 +243,10 @@ async fn handle_success_completion<D: CompletionDeps>(
     if let Err(e) = deps.mark_rate_limit_complete(request_key, bucket_url).await {
         tracing::warn!("mark_rate_limit_complete failed (best-effort): {e}");
     }
+
+    // Register into master table for steady-state pHash (best-effort; swallows its own errors)
+    deps.register_ingested(video_id, object_key, bucket_url)
+        .await;
 
     tracing::info!(
         principal = %request_key.principal,
@@ -427,12 +435,14 @@ pub async fn complete_video(
 struct RuntimeCompletionDeps {
     config: VideogenConfig,
     ic_agent: ic_agent::Agent,
+    db_url: String,
 }
 
 impl RuntimeCompletionDeps {
     fn new(state: AppState, config: VideogenConfig) -> Self {
         Self {
             config,
+            db_url: state.db_url.clone(),
             ic_agent: state.ic_agent,
         }
     }
@@ -539,6 +549,11 @@ impl CompletionDeps for RuntimeCompletionDeps {
     async fn create_draft(&self, request: DraftCreationRequest) -> Result<(), DraftServiceError> {
         use crate::videogen::draft::draft_client_from_env;
         draft_client_from_env().create_draft(request).await
+    }
+
+    async fn register_ingested(&self, video_id: &str, object_key: &str, bucket_url: &str) {
+        crate::jobs::ingest::on_video_ingested(&self.db_url, video_id, object_key, bucket_url)
+            .await;
     }
 }
 
