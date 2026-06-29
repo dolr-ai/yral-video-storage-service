@@ -10,6 +10,20 @@
 set -e
 
 EXT_IF=$(ip -4 route show default | awk '{print $5; exit}')
+READONLY_CHAIN="YRAL_POSTGRES_READONLY"
+POSTGRES_READONLY_ALLOWLIST="${POSTGRES_READONLY_ALLOWLIST:-}"
+
+iptables -N "$READONLY_CHAIN" 2>/dev/null || true
+iptables -F "$READONLY_CHAIN"
+
+for CIDR in $POSTGRES_READONLY_ALLOWLIST; do
+  case "$CIDR" in
+    */*) ;;
+    *) CIDR="${CIDR}/32" ;;
+  esac
+
+  iptables -A "$READONLY_CHAIN" -s "$CIDR" -j ACCEPT
+done
 
 for PORT in 15432 18008 12379 12380; do
   # Remove stale rules to avoid duplicates on restart
@@ -21,11 +35,15 @@ for PORT in 15432 18008 12379 12380; do
   iptables -D DOCKER-USER -p tcp -i "$EXT_IF" --dport "$PORT" -s "$SERVER_1_IP" -j ACCEPT 2>/dev/null || true
   iptables -D DOCKER-USER -p tcp -i "$EXT_IF" --dport "$PORT" -s "$SERVER_2_IP" -j ACCEPT 2>/dev/null || true
   iptables -D DOCKER-USER -p tcp -i "$EXT_IF" --dport "$PORT" -s "$SERVER_3_IP" -j ACCEPT 2>/dev/null || true
+  iptables -D DOCKER-USER -p tcp -i "$EXT_IF" --dport "$PORT" -j "$READONLY_CHAIN" 2>/dev/null || true
 
-  # Allow only cluster nodes, drop all other inbound traffic on this port
+  # Allow only cluster nodes, plus explicit readonly clients for Postgres.
   iptables -A DOCKER-USER -p tcp -i "$EXT_IF" --dport "$PORT" -s "$SERVER_1_IP" -j ACCEPT
   iptables -A DOCKER-USER -p tcp -i "$EXT_IF" --dport "$PORT" -s "$SERVER_2_IP" -j ACCEPT
   iptables -A DOCKER-USER -p tcp -i "$EXT_IF" --dport "$PORT" -s "$SERVER_3_IP" -j ACCEPT
+  if [ "$PORT" = "15432" ] && [ -n "$POSTGRES_READONLY_ALLOWLIST" ]; then
+    iptables -A DOCKER-USER -p tcp -i "$EXT_IF" --dport "$PORT" -j "$READONLY_CHAIN"
+  fi
   iptables -A DOCKER-USER -p tcp -i "$EXT_IF" --dport "$PORT" -j DROP
 done
 
