@@ -808,12 +808,17 @@ pub async fn get_last_discovery_at(
 /// `sweep_lease` row (`id = 1`).
 pub async fn set_last_discovery_at(
     client: &Client,
+    owner: &str,
     ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), tokio_postgres::Error> {
+    // Owner-guarded: only the current lease holder advances the cadence. Prevents a
+    // box that lost the lease mid-cycle (e.g. a transient renew failure → peer steal)
+    // from fast-forwarding `last_discovery_at` on the new owner and suppressing its
+    // discovery for a full interval. A 0-row update is benign (next pass self-corrects).
     client
         .execute(
-            "UPDATE sweep_lease SET last_discovery_at = $1 WHERE id = 1",
-            &[&ts],
+            "UPDATE sweep_lease SET last_discovery_at = $1 WHERE id = 1 AND owner = $2",
+            &[&ts, &owner],
         )
         .await?;
     Ok(())
@@ -870,7 +875,16 @@ mod tests {
             .unwrap();
         assert!(get_last_discovery_at(&client).await.unwrap().is_none());
         let now = chrono::Utc::now();
-        set_last_discovery_at(&client, now).await.unwrap();
+        // owner-guarded: matches the lease owner from the acquire above
+        set_last_discovery_at(&client, "box-a", now).await.unwrap();
+        // a non-owner update is a no-op (owner guard)
+        set_last_discovery_at(
+            &client,
+            "intruder",
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        )
+        .await
+        .unwrap();
         let got = get_last_discovery_at(&client).await.unwrap().unwrap();
         assert!((got - now).num_seconds().abs() < 2);
     }

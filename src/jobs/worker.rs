@@ -52,9 +52,18 @@ where
                 crate::media_index::acquire_or_renew_lease(&renew_client, &renew_owner, ttl).await;
         }
     });
-    let out = fut.await;
-    renew.abort();
-    out
+    // Abort the renew task on ANY exit — including when this future is dropped
+    // mid-flight (e.g. graceful-shutdown cancellation in the worker's `select!`).
+    // A bare `JoinHandle` drop only *detaches* the task in tokio; the RAII guard
+    // makes the abort unconditional so the renew loop can't outlive `fut`.
+    struct RenewGuard(tokio::task::JoinHandle<()>);
+    impl Drop for RenewGuard {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _renew_guard = RenewGuard(renew);
+    fut.await
 }
 
 /// Run `f`'s future only if `flag` is currently free, guarding against overlap.
@@ -147,7 +156,7 @@ where
         .await;
         // Only advance the cadence if discovery actually ran (CAS not held elsewhere).
         if ran.is_some() {
-            crate::media_index::set_last_discovery_at(&client, chrono::Utc::now()).await?;
+            crate::media_index::set_last_discovery_at(&client, me, chrono::Utc::now()).await?;
         }
     }
 
@@ -175,21 +184,35 @@ pub struct SweepWorker {
 
 impl SweepWorker {
     /// Run the resilient leased loop until `shutdown` (the graceful-shutdown token)
-    /// fires. Each pass connects its own DB client; errors/panics in a pass are
-    /// logged + reported and the loop continues — the worker never exits on error.
+    /// fires. Each pass connects its own DB client; errors AND panics in a pass are
+    /// logged + reported and the loop continues — the worker never exits on its own.
     pub async fn run(self, shutdown: tokio_util::sync::CancellationToken) {
+        use futures::future::FutureExt;
         tracing::info!(me = %self.me, "sweep worker: started");
         loop {
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => break,
-                res = self.run_pass() => {
-                    if let Err(e) = res {
-                        tracing::warn!(error = %e, "sweep worker: pass error");
-                        sentry::capture_message(
-                            &format!("sweep worker pass error: {e}"),
-                            sentry::Level::Warning,
-                        );
+                // catch_unwind so a panic in a pass (e.g. an unwrap in a dependency)
+                // is contained and the loop survives — without it a panic would unwind
+                // and silently kill this fire-and-forget task (only signal: stale heartbeat).
+                res = std::panic::AssertUnwindSafe(self.run_pass()).catch_unwind() => {
+                    match res {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "sweep worker: pass error");
+                            sentry::capture_message(
+                                &format!("sweep worker pass error: {e}"),
+                                sentry::Level::Warning,
+                            );
+                        }
+                        Err(_panic) => {
+                            tracing::error!("sweep worker: pass PANICKED (loop continues)");
+                            sentry::capture_message(
+                                "sweep worker pass panicked",
+                                sentry::Level::Error,
+                            );
+                        }
                     }
                 }
             }
