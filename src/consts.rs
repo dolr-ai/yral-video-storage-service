@@ -153,3 +153,37 @@ pub static RATE_LIMITS_CANISTER_ID: Lazy<Principal> = Lazy::new(|| {
 // IC network URL
 pub static IC_URL: Lazy<String> =
     Lazy::new(|| std::env::var("IC_URL").unwrap_or_else(|_| "https://ic0.app".to_string()));
+
+// ─── Steady-state sweep worker ───────────────────────────────────────────────
+// Whether to start the in-app leased sweep worker on boot. Ships DISABLED;
+// flip to "true" after validating the first prod discovery.
+pub fn run_sweep_worker() -> bool {
+    std::env::var("RUN_SWEEP_WORKER")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+}
+
+// Seconds between worker drain passes (cheap no-op when nothing is eligible).
+pub fn drain_interval_secs() -> u64 {
+    std::env::var("DRAIN_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(180)
+}
+
+// Seconds between full-bucket discovery scans. Also reused as the recently-failed
+// quarantine window for the drain eligibility check.
+pub fn discovery_interval_secs() -> u64 {
+    std::env::var("DISCOVERY_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(86_400)
+}
+
+// Lease TTL in seconds; a stale heartbeat older than this can be stolen by a peer.
+pub fn sweep_lease_ttl_secs() -> u64 {
+    std::env::var("SWEEP_LEASE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120)
+}
