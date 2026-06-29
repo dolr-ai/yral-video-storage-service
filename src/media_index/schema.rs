@@ -168,6 +168,13 @@ BEGIN
     END IF;
 END;
 $$;
+
+CREATE TABLE IF NOT EXISTS sweep_lease (
+    id                SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    owner             TEXT NOT NULL,
+    heartbeat         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_discovery_at TIMESTAMPTZ
+);
 "#;
 
 pub async fn init_schema(client: &Client) -> Result<(), tokio_postgres::Error> {
@@ -285,5 +292,19 @@ mod tests {
         result_a.unwrap();
         result_b.unwrap();
         drop(pg);
+    }
+
+    #[tokio::test]
+    async fn sweep_lease_table_created_by_schema() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        let row = client
+            .query_one(
+                "SELECT to_regclass('public.sweep_lease') IS NOT NULL AS exists",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(row.get::<_, bool>("exists"), "sweep_lease must exist");
     }
 }

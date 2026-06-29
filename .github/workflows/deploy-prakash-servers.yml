@@ -218,6 +218,10 @@ jobs:
                 export MODERATION_HMAC_SECRET='${MODERATION_HMAC_SECRET}'; \
                 export PUBLIC_BASE_URL='https://storage-interface.prakash.yral.com'; \
                 export PHASH_CONCURRENCY='4'; \
+                export RUN_SWEEP_WORKER='false'; \
+                export DRAIN_INTERVAL_SECS='180'; \
+                export DISCOVERY_INTERVAL_SECS='86400'; \
+                export SWEEP_LEASE_TTL_SECS='120'; \
                 export ENVIRONMENT='production';"
             fi
 
@@ -274,4 +278,4 @@ jobs:
           echo "**Image:** ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "**URL:** ${{ env.PREVIEW_URL }}" >> $GITHUB_STEP_SUMMARY
           echo "**Nodes:** server_1 (${{ env.SERVER_1_IP }}), server_2 (${{ env.SERVER_2_IP }}), server_3 (${{ env.SERVER_3_IP }})" >> $GITHUB_STEP_SUMMARY
-          echo "**App:** all 3 nodes (port ${{ env.HOST_PORT }}); public domain on server_1 only; PHASH_CONCURRENCY=4" >> $GITHUB_STEP_SUMMARY
+          echo "**App:** all 3 nodes (port ${{ env.HOST_PORT }}); public domain on server_1 only; PHASH_CONCURRENCY=4; sweep worker RUN_SWEEP_WORKER=false (ships disabled)" >> $GITHUB_STEP_SUMMARY
