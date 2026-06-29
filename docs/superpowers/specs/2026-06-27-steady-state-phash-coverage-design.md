@@ -150,9 +150,9 @@ RETURNING owner;
 
 Bucket keys are `<canister-id>/<uuid>.mp4` — random UUIDs, **non-monotonic** — so the existing incremental scan (`start_after = max_key`) is **lossy**: a new object whose key sorts before the current max is skipped. The discovery path therefore uses the existing **`full_scan = true`** code path of `scan_hetzner` / `scan_storj` (`list_objects` from the start) + the skip-existing import. Incremental scan stays available for ad-hoc CLI use; it is **not** relied on for steady-state correctness.
 
-### 6. Shared hash helper
+### 6. Hashing stays single-pathed (no extraction)
 
-Extract the single-video hash currently embedded in the `media_phash` `buffer_unordered` stream into `hash_one_video(source: &VideoSource, clients) -> Result<VideoHashResult, (phase, msg)>`, reusing the already-clean `persist_one`. The drain uses it via `media_phash::run` (unchanged orchestration); the extraction just gives one named, testable unit and removes the embedded closure. No second copy of download+ffmpeg anywhere.
+All hashing flows through `media_phash::run` unchanged — the worker's drain calls it directly. The ingest path registers only; nothing else computes a single-video hash, so there is **no second consumer** for a standalone helper. (An earlier draft proposed extracting `hash_one_video`; dropped during plan review as YAGNI — it would be a refactor with zero new callers.)
 
 ### 7. Concurrency & resource isolation
 
@@ -206,8 +206,7 @@ An unattended worker is only safe if its liveness is visible. Surface the lease 
 ## Files to touch
 
 - `src/jobs/ingest.rs` — new: `resolve_source`, `VideoSource`, `on_video_ingested`.
-- `src/jobs/worker.rs` — new: the resilient leased loop + cadence + `with_heartbeat_renew` + `cas_guarded` + graceful-shutdown select.
-- `src/jobs/media_phash.rs` — extract `hash_one_video` (shared); orchestration otherwise unchanged.
+- `src/jobs/worker.rs` — new: the resilient leased loop + cadence + `with_heartbeat_renew` + `cas_guarded` + graceful-shutdown select. Drain gated on `missing > 0` (avoids polluting `media_job_runs`). `$me` = `NODE_NAME`.
 - `src/media_index/repo.rs` — lease acquire/renew + `last_discovery_at` read/write helpers; lease-row read for the status view. (Registration reuses the existing public `upsert_servable_video` — no new upsert needed.)
 - `src/media_index/schema.rs` — `sweep_lease` (incl. `last_discovery_at`) in `SCHEMA_SQL`.
 - `src/routes/videogen/complete.rs` — call `on_video_ingested` (best-effort) in the success branch.

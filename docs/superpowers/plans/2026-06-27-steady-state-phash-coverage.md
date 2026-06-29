@@ -25,7 +25,6 @@
 | `src/media_index/schema.rs` | `sweep_lease` table in `SCHEMA_SQL` | Modify |
 | `src/media_index/repo.rs` | lease acquire/renew/release/read + discovery-cadence helpers | Modify |
 | `src/jobs/ingest.rs` | `resolve_source`, `VideoSource`, `on_video_ingested` | Create |
-| `src/jobs/media_phash.rs` | extract `hash_one_video` (shared single-video hash) | Modify |
 | `src/jobs/worker.rs` | leased loop, `run_one_pass`, `with_heartbeat_renew`, `cas_guarded`, `discovery_due` | Create |
 | `src/jobs/mod.rs` | register `ingest` + `worker` modules | Modify |
 | `src/routes/videogen/complete.rs` | best-effort `on_video_ingested` in success branch | Modify |
@@ -252,7 +251,7 @@ async fn registers_video_into_missing_set() {
 
 - [ ] **Step 2: Run → fail.**
 
-- [ ] **Step 3: Implement** `register_master_row` (sync core) + `on_video_ingested` (best-effort wrapper). `register_master_row` calls `upsert_servable_video` with `ServableVideoInput { video_id, source_kind: "videogen", source_ref: Some(video_id), servable_status: "servable", storage_provider: Some(src.storage_provider), bucket: Some(&src.bucket), object_key: Some(&src.object_key), discovered_from: "videogen_completion", ..all None }`.
+- [ ] **Step 3: Implement** `register_master_row` (sync core) + `on_video_ingested` (best-effort wrapper). `register_master_row` calls `upsert_servable_video` with `ServableVideoInput { video_id, source_kind: "videogen", source_ref: Some(video_id), servable_status: "servable", storage_provider: Some(src.storage_provider), bucket: Some(&src.bucket), object_key: Some(&src.object_key), discovered_from: "videogen_completion", ..all None }`. **Scope note:** `upsert_servable_video` alone (writing `all_servable_videos_on_yral`) is sufficient — that's the table the missing-scan reads and it carries provider/key. Do **not** over-build a `servable_video_sources` write; the daily discovery import handles source rows, and hashing doesn't need them.
 
 ```rust
 pub async fn on_video_ingested(state: &AppState, video_id: &str, object_key: &str, bucket_url: &str) {
@@ -280,42 +279,36 @@ pub async fn on_video_ingested(state: &AppState, video_id: &str, object_key: &st
 ## Task 5: Wire `on_video_ingested` into videogen completion
 
 **Files:**
-- Modify: `src/routes/videogen/complete.rs` (`handle_success_completion`, after `create_draft` succeeds)
-- Test: existing `complete.rs` tests must still pass; add one asserting the call is best-effort (does not change the 200).
+- Modify: `src/routes/videogen/complete.rs` — the **outer** axum handler `complete_video(State(state): State<AppState>, …)` at ~line 407 (NOT `handle_success_completion`, which only has `deps: &D` and no `AppState`/`db_url`).
+- Test: existing `complete.rs` tests must still pass.
 
-- [ ] **Step 1:** Read `handle_success_completion` (success branch returns `Ok(StatusCode::OK)`). Add, before the `Ok`, a best-effort call. Completion handlers use a `CompletionDeps` trait — add `on_video_ingested` as a no-op-defaulted dep method OR call `crate::jobs::ingest::on_video_ingested(state, …)` directly if the handler has `AppState`. Inspect which is available and follow the existing pattern (the `deps` test seam).
+**Why the outer handler:** `complete_with_dependencies` / `handle_success_completion` take a `CompletionDeps` trait object — they have no `AppState`. The outer `complete_video` handler has `State(state)` plus the parsed `CompleteVideoRequest` (`video_id`, `object_key`, `bucket_url`). Wire the call there, **after** `complete_with_dependencies` returns `Ok` **and** the request `status == Success`, so ingest only fires on a real successful completion.
 
-- [ ] **Step 2: Add/confirm a test** that a success completion still returns `OK` even when ingest registration would fail (best-effort). Reuse the existing `FakeCompletionDeps` pattern.
+- [ ] **Step 1:** Read `complete_video` (~407). It parses the body into `CompleteVideoRequest` and calls `complete_with_dependencies`, returning its `StatusCode`. Identify the success point (returned `OK` for a `Success` status).
 
-- [ ] **Step 3:** Implement the wiring (spawn-free; it's a cheap awaited upsert, but must not turn a completion failure — wrap so its error never changes the response).
+- [ ] **Step 2:** After a successful completion, add the best-effort call:
 
-- [ ] **Step 4: Run** — `cargo test -p storj-interface --bin storj-interface complete -- ` → PASS (all existing + new).
+```rust
+// best-effort: register for steady-state pHash. Never affects the completion response.
+if matches!(req.status, CompletionStatus::Success) {
+    if let (Some(vid), Some(key), Some(bucket_url)) =
+        (req.video_id.as_deref(), req.object_key.as_deref(), req.bucket_url.as_deref())
+    {
+        crate::jobs::ingest::on_video_ingested(&state, vid, key, bucket_url).await;
+    }
+}
+```
+(`on_video_ingested` already swallows its own errors — §Task 4. Place it so it runs only when `complete_with_dependencies` returned the success status.)
 
-- [ ] **Step 5: Commit** — `feat: register videogen completions into master for pHash`.
+- [ ] **Step 3: Run** — `cargo test -p storj-interface --bin storj-interface complete` → PASS (existing tests unaffected; the call is additive + best-effort). Build: `SDKROOT=$(xcrun --show-sdk-path) cargo build`.
+
+- [ ] **Step 4: Commit** — `feat: register videogen completions into master for pHash`.
 
 ---
 
-## Task 6: Extract `hash_one_video` (shared helper)
+## ~~Task 6: Extract `hash_one_video`~~ — REMOVED (YAGNI)
 
-**Files:**
-- Modify: `src/jobs/media_phash.rs`
-- Test: existing `media_phash` tests must stay green; add a focused unit if feasible.
-
-This is a refactor — behavior-preserving. Lift the download+ffmpeg closure (currently embedded in the `buffer_unordered` stream, ~lines 131–205) into:
-
-```rust
-pub(crate) async fn hash_one_video(
-    s3: &S3Client,
-    storj: &StorjS3Client,
-    storage_provider: Option<&str>,
-    object_key: Option<&str>,
-) -> Result<VideoHashResult, (&'static str, String)> { /* download (hetzner|storj) + ffmpeg */ }
-```
-
-- [ ] **Step 1:** Extract, calling it from the stream closure (pass `row.storage_provider.as_deref()`, `row.object_key.as_deref()`).
-- [ ] **Step 2: Run the full media_phash suite** — `cargo test -p storj-interface --lib media_phash -- --test-threads=1` → all PASS (no behavior change).
-- [ ] **Step 3:** (optional) add a direct `hash_one_video` error-path unit (missing key → `("phash_download", _)`).
-- [ ] **Step 4: Commit** — `refactor: extract hash_one_video from media_phash stream`.
+**Dropped after plan review.** In this register-inline design the ingest path does **not** hash — hashing stays single-pathed through `media_phash::run`. The only hashing code is the `buffer_unordered` stream inside `media_phash.rs`; nothing else calls a single-video hash. Extracting `hash_one_video` would be a pure refactor with **zero new consumers** — drop it. (Spec §6 was a holdover from the abandoned "async compute at completion" model; the spec is otherwise current.)
 
 ---
 
@@ -344,6 +337,8 @@ async fn heartbeat_renew_keeps_lease_fresh_during_long_task() {
     // peer cannot steal — heartbeat kept fresh
     assert!(!acquire_or_renew_lease(&client, "box-b", Duration::from_secs(2)).await.unwrap());
 }
+// NOTE: this test uses real ~3s sleeps (the renew loop hits the real DB, so
+// tokio::time::pause won't work here). It's intentionally slow — acceptable for one test.
 
 #[test]
 fn discovery_due_logic() {
@@ -359,7 +354,7 @@ fn discovery_due_logic() {
 - [ ] **Step 3: Implement**
 - `discovery_due(last: Option<DateTime<Utc>>, interval: Duration, now) -> bool` (pure).
 - `with_heartbeat_renew(client, owner, ttl, fut)` — spawn a renew task looping `acquire_or_renew_lease` every `ttl/3` until `fut` completes; `select!`/abort on completion; return `fut`'s output.
-- `cas_guarded(flag: &Arc<AtomicBool>, fut)` — `compare_exchange(false,true)`; if held, skip (return a "skipped" marker); else run `fut`, release on drop (reuse the existing `JobGuard` pattern from `routes/media.rs`).
+- `cas_guarded(flag: &Arc<AtomicBool>, f: impl FnOnce() -> Fut)` — takes a **closure** (not a pre-built future): `compare_exchange(false,true)`; if already held, skip (return a "skipped" marker, do NOT build/run `f`); else run `f()`, release the flag on drop (reuse the existing `JobGuard` pattern from `routes/media.rs`). Passing a closure ensures the expensive drain future is never even constructed when the guard is held.
 
 - [ ] **Step 4: Run → pass.**
 
@@ -391,7 +386,14 @@ async fn pass_skips_when_not_lease_owner() {
 
 - [ ] **Step 2: Run → fail.**
 
-- [ ] **Step 3: Implement `run_one_pass` + `run_worker_loop`** per spec §3: acquire lease → (own?) drain under `with_heartbeat_renew` + `cas_guarded(job_media_phash_running)` calling `media_phash::run(.., requested_by="sweep_drain")` → if `discovery_due` (from DB) run scan(full)+scan(full)+import under renew + `cas_guarded(job_media_import_running)` then `set_last_discovery_at` → every pass wrapped so errors/panics are logged+sentry and the loop continues → `select!` on `cancel` for shutdown + `release_lease`.
+- [ ] **Step 3: Implement `run_one_pass` + `run_worker_loop`** per spec §3:
+  - acquire lease → (own?)
+  - **drain pre-check (avoid `media_job_runs` pollution):** `media_phash::run` calls `insert_job_run` *unconditionally* (media_phash.rs:59), so a drain every ~180s would insert ~480 idle run-rows/day forever. **Gate the drain on a cheap "is there work?" check first** — `canonical_phash_coverage(client)` (or a `SELECT EXISTS(... missing ...)`) → only if `missing_canonical_phash > 0` do the drain under `with_heartbeat_renew` + `cas_guarded(job_media_phash_running)` calling `media_phash::run(.., requested_by="sweep_drain")`. This also skips the empty anti-join scan on idle ticks.
+  - **discovery:** if `discovery_due` (from DB `last_discovery_at`) run scan(full)+scan(full)+import under renew + `cas_guarded(job_media_import_running)`, then `set_last_discovery_at(now())`.
+  - every pass wrapped so errors/panics are logged + sentry and the loop continues (never exits).
+  - `select!` on `cancel` for graceful shutdown + `release_lease`.
+
+- [ ] **Step 3b: Add a test** that an empty missing-set drain inserts **no** `media_job_runs` row (the gate works): seed zero missing rows, run a pass as lease owner, assert `SELECT count(*) FROM media_job_runs WHERE requested_by='sweep_drain'` is 0.
 
 - [ ] **Step 4: Run → pass.**
 
@@ -412,7 +414,8 @@ async fn pass_skips_when_not_lease_owner() {
   - `DISCOVERY_INTERVAL_SECS` → u64, default `86400`.
   - `SWEEP_LEASE_TTL_SECS` → u64, default `120`.
 
-- [ ] **Step 2:** In `run_server`, after `AppState` is built and before/around `axum::serve`, if `RUN_SWEEP_WORKER`: `tokio::spawn(crate::jobs::worker::run_worker_loop(state.clone(), cancel.clone()))`. `$me` = `hostname::get()` (add `hostname` crate or read `HOSTNAME`/`std::env`) — stable per box. Pass the existing graceful-shutdown `cancel` token.
+- [ ] **Step 2:** In `run_server`, after `AppState` is built and before/around `axum::serve`, if `RUN_SWEEP_WORKER`: `tokio::spawn(crate::jobs::worker::run_worker_loop(state.clone(), me, cancel.clone()))`. Pass the existing graceful-shutdown `cancel` token.
+  - **`$me` = `NODE_NAME`** (`server_1/2/3`), read via `std::env::var("NODE_NAME").unwrap_or_else(|_| hostname fallback)`. **Not** container hostname — in Docker the hostname is the container ID, which **changes on every redeploy** (`compose up` recreates the container) → `$me` would churn and the box couldn't renew its own lease after a deploy (waits a full TTL). `NODE_NAME` is per-box and stable across redeploys (the workflow already exports it). Requires the compose wiring in Task 11 Step 2.
 
 - [ ] **Step 3: Build** — `SDKROOT=$(xcrun --show-sdk-path) cargo build` → OK.
 
@@ -429,6 +432,7 @@ async fn pass_skips_when_not_lease_owner() {
 - Modify: `src/routes/media.rs` (new handler `media_sweep` or extend `media_jobs_status`)
 - Modify: `src/main.rs` (route + ApiDoc), HMAC-guarded like the other media routes
 - Modify: `crates/mirror-client/src/{lib,main}.rs` (`media-sweep` command)
+- Modify: `crates/mirror-client/README.md` (document `media-sweep` in the media-ownership command table + an example, like the other `media-*` commands)
 - Test: `src/routes/media.rs` `#[cfg(test)]` + mirror-client arg test
 
 - [ ] **Step 1: Write failing test** — handler returns `{owner, heartbeat, last_discovery_at}` (nullable when no lease).
@@ -446,7 +450,12 @@ async fn pass_skips_when_not_lease_owner() {
 - Not unit-testable; YAML validate + review.
 
 - [ ] **Step 1:** Add to `APP_VARS` (near `PHASH_CONCURRENCY='4'`): `export RUN_SWEEP_WORKER='true'; export DRAIN_INTERVAL_SECS='180'; export DISCOVERY_INTERVAL_SECS='86400'; export SWEEP_LEASE_TTL_SECS='120';`
-- [ ] **Step 2:** Ensure `docker-compose.ha.yml` app service passes these env (add `RUN_SWEEP_WORKER: ${RUN_SWEEP_WORKER:-true}` etc. to the app `environment:` block, mirroring `PHASH_CONCURRENCY`).
+- [ ] **Step 2:** Ensure `docker-compose.ha.yml` **app** service `environment:` block passes these (mirroring `PHASH_CONCURRENCY`):
+  - `RUN_SWEEP_WORKER: ${RUN_SWEEP_WORKER:-true}`
+  - `DRAIN_INTERVAL_SECS: ${DRAIN_INTERVAL_SECS:-180}`
+  - `DISCOVERY_INTERVAL_SECS: ${DISCOVERY_INTERVAL_SECS:-86400}`
+  - `SWEEP_LEASE_TTL_SECS: ${SWEEP_LEASE_TTL_SECS:-120}`
+  - **`NODE_NAME: ${NODE_NAME}`** — currently only on the patroni service (compose line 52); the app service needs it as the worker's stable `$me` (Task 9). The workflow already exports `NODE_NAME` per node.
 - [ ] **Step 3: Validate** — `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/deploy-prakash-servers.yml'))"`.
 - [ ] **Step 4:** Update the workflow `deployment-summary` line to mention the sweep worker.
 - [ ] **Step 5: Commit** — `ci: steady-state sweep worker env defaults (all 3 nodes)`.
@@ -465,8 +474,10 @@ async fn pass_skips_when_not_lease_owner() {
 
 ## Notes / gotchas for the implementer
 
-- **Don't double-path hashing:** the worker drains via `media_phash::run` only. No per-completion hash spawn.
+- **Single-pathed hashing:** the worker drains via `media_phash::run` only; the ingest path registers (no hash). There is no standalone hash helper (Task 6 dropped — nothing else hashes).
+- **Drain pre-check:** never call `media_phash::run` on an empty missing-set — it inserts a `media_job_runs` row unconditionally. Gate on `missing_canonical_phash > 0` first (Task 8).
+- **`$me` = `NODE_NAME`, not container hostname** — hostname churns on redeploy (new container ID) and breaks lease self-renewal. `NODE_NAME` is stable per box; wire it into the app compose env (Task 11).
 - **pgbouncer transaction pooling:** every lease op is one statement / its own txn. Never hold a session-level lock.
-- **Best-effort registration:** `on_video_ingested` must never fail a completion. The drain/discovery is the correctness guarantee.
-- **CAS guard:** `media_phash::run` is NOT self-guarded — the worker must `cas_guarded(job_media_phash_running)` itself (like `routes/media.rs::run_phash` does).
+- **Best-effort registration:** `on_video_ingested` must never fail a completion. Wire it in the **outer** `complete_video` handler (has `AppState`), not the deps-only inner handler. The drain/discovery is the correctness guarantee.
+- **CAS guard:** `media_phash::run` is NOT self-guarded — the worker must `cas_guarded(job_media_phash_running)` itself (like `routes/media.rs::run_phash` does), passing a **closure** so the drain future isn't built when skipped.
 - **`scan_storj::run`** takes the Storj client; **`scan_hetzner::run`** takes the S3 client — match each signature (read both before calling).
