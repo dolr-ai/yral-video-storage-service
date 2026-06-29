@@ -91,6 +91,7 @@ pub(crate) struct AppState {
         routes::media::media_jobs_status,
         routes::media::media_jobs_runs,
         routes::media::media_jobs_failures,
+        routes::media::media_sweep_status,
         routes::videogen::drafts::get_in_progress_drafts,
         routes::videogen::generate::generate_video,
         routes::videogen::providers::get_providers,
@@ -468,6 +469,12 @@ async fn run_server() -> anyhow::Result<()> {
         .route(
             "/media/jobs/failures",
             get(routes::media::media_jobs_failures)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/sweep/status",
+            get(routes::media::media_sweep_status)
                 .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
         )
