@@ -375,7 +375,7 @@ fn discovery_due_logic() {
 
 **Files:**
 - Modify: `src/jobs/worker.rs`
-- Modify: `src/media_index/repo.rs` (add `any_missing_canonical_phash` EXISTS helper for the drain pre-check)
+- Modify: `src/media_index/repo.rs` (add `any_eligible_for_hash` EXISTS helper — missing AND not recently-failed — for the drain pre-check)
 - Test: `src/jobs/worker.rs` `#[cfg(test)]` (integration-style with a real `PgContainer` + tiny intervals)
 
 - [ ] **Step 1: Write failing test** — drive `run_one_pass` once on a seeded missing row; assert it hashes/advances OR (since real ffmpeg is heavy) assert the *control flow*: non-owner skips; owner runs the drain CAS; `discovery_due` false → no scan; a forced error in the pass is caught (loop would continue). Prefer testing `run_one_pass` with injected closures over running real downloads.
@@ -398,15 +398,35 @@ async fn pass_skips_when_not_lease_owner() {
 
 - [ ] **Step 3: Implement `run_one_pass` + `run_worker_loop`** per spec §3:
   - acquire lease → (own?)
-  - **drain pre-check (avoid `media_job_runs` pollution):** `media_phash::run` calls `insert_job_run` *unconditionally* (media_phash.rs:59), so a drain every ~180s would insert ~480 idle run-rows/day forever. **Gate the drain on a cheap `any_missing` check first** — add `repo::any_missing_canonical_phash(client) -> Result<bool>` using `SELECT EXISTS(SELECT 1 FROM all_servable_videos_on_yral v LEFT JOIN servable_video_hashes h ON h.video_id=v.video_id AND h.hash_kind='phash' AND h.hash_version=$1 AND h.input_media_version=$2 WHERE h.video_id IS NULL LIMIT 1)` (short-circuits at the first missing row — far cheaper than `canonical_phash_coverage`'s full `COUNT(*)` over ~583k rows run every tick). Only if `true` do the drain under `with_heartbeat_renew` + `cas_guarded(job_media_phash_running)` calling `media_phash::run(.., requested_by="sweep_drain")`. This also skips the empty anti-join scan on idle ticks.
+  - **drain pre-check — `any_eligible_for_hash` (REQUIRED quarantine gate):** `media_phash::run` calls `insert_job_run` *unconditionally* (media_phash.rs:59), and at ~100% coverage the only "missing" rows are permanent failures (dead source / temp key) — so an ungated drain would re-insert a run row **and re-download the same dead videos every ~180s forever**. Add `repo::any_eligible_for_hash(client, failed_within: Duration) -> Result<bool>`:
+
+```sql
+SELECT EXISTS (
+  SELECT 1
+  FROM all_servable_videos_on_yral v
+  LEFT JOIN servable_video_hashes h
+    ON h.video_id = v.video_id
+   AND h.hash_kind = $1 AND h.hash_version = $2 AND h.input_media_version = $3
+  WHERE h.video_id IS NULL
+    AND NOT EXISTS (                                 -- quarantine: skip recently-failed
+      SELECT 1 FROM media_job_failures f
+      WHERE f.video_id = v.video_id
+        AND f.created_at > now() - ($4::double precision * interval '1 second')
+    )
+  LIMIT 1
+);
+```
+(use the same `HASH_KIND`/`HASH_VERSION`/`INPUT_MEDIA_VERSION` consts the missing-scan uses; `$4` = `DISCOVERY_INTERVAL` seconds. Short-circuits at the first eligible row — far cheaper than `canonical_phash_coverage`'s full `COUNT(*)` every tick.) Only if `true` do the drain under `with_heartbeat_renew` + `cas_guarded(job_media_phash_running)` calling `media_phash::run(.., requested_by="sweep_drain")`. **Effect:** an idle fleet whose only missing rows are dead → gate `false` → no drain, no dead-video re-download. When genuinely new work exists, the drain runs (and the dead rows tag along *once* in that pass — `media_phash::run`'s own scan is unchanged); after the failed-window (`DISCOVERY_INTERVAL`) elapses, dead rows become eligible again for one retry, then re-quarantine. Verify `media_job_failures` has `video_id` + `created_at` (it does — used by `failure_summary`).
   - **discovery:** if `discovery_due` (from DB `last_discovery_at`) run scan(full)+scan(full)+import under renew + `cas_guarded(job_media_import_running)`, then `set_last_discovery_at(now())`. `import_current_video_index` takes **`&mut Client`** — the worker connects a dedicated client for the import (the scan/phash jobs each open their own via `db_url`).
   - **cancel tokens (operability):** pass `state.media_job_cancel`'s current token to `media_phash::run` / the scan / import, so the existing **`media-cancel`** endpoint can halt a worker drain mid-incident. The **loop itself** watches the separate graceful-shutdown `cancel` (the ctrl_c token from `run_server`) for process exit — don't conflate the two.
   - every pass wrapped so errors/panics are logged + sentry and the loop continues (never exits).
   - `select!` on the graceful-shutdown `cancel` for shutdown + `release_lease`.
 
-- [ ] **Step 3b: Add a test** that an empty missing-set drain inserts **no** `media_job_runs` row (the gate works): seed zero missing rows, run a pass as lease owner, assert `SELECT count(*) FROM media_job_runs WHERE requested_by='sweep_drain'` is 0.
-
-> **Known limitation (permanent failures):** the `any_missing` gate prevents idle pollution only when `missing == 0`. A *permanently*-failing row (deleted source, temp key that never finalizes — today ≈9 such) keeps `any_missing == true`, so the drain re-runs **every tick** — re-inserting a run row and **re-downloading the dead videos every ~180s**. That's the deferred dead-letter problem (spec §Out of scope) surfacing here. For now it's bounded (small count) and acceptable. **Plan option (not required):** widen the gate to "missing AND not failed within the last `DISCOVERY_INTERVAL`" via a cheap anti-join on `media_job_failures` — a lightweight quarantine that the dead-letter follow-up would later formalize. Decide at implementation time; default is to accept the bounded waste and keep scope small.
+- [ ] **Step 3b: Add tests** for the gate:
+  - empty missing-set → no `sweep_drain` row in `media_job_runs`.
+  - **quarantine:** seed one missing row that has a recent `media_job_failures` entry → `any_eligible_for_hash` returns `false` → no drain (dead rows don't trigger re-download).
+  - a missing row with **no** recent failure → `any_eligible_for_hash` returns `true`.
+  - a missing row whose failure is **older** than `failed_within` → eligible again (`true`).
 
 - [ ] **Step 4: Run → pass.**
 
@@ -422,7 +442,7 @@ async fn pass_skips_when_not_lease_owner() {
 - Not unit-tested (wiring) — verified by build + boot.
 
 - [ ] **Step 1:** Add to `consts.rs`, following the `PHASH_CONCURRENCY` `Lazy` pattern:
-  - `RUN_SWEEP_WORKER` → bool, default `true`.
+  - `RUN_SWEEP_WORKER` → bool, **default `false`** (ship disabled; flip on after validating the first discovery on prod — see Final verification).
   - `DRAIN_INTERVAL_SECS` → u64, default `180`.
   - `DISCOVERY_INTERVAL_SECS` → u64, default `86400`.
   - `SWEEP_LEASE_TTL_SECS` → u64, default `120`.
@@ -462,9 +482,9 @@ async fn pass_skips_when_not_lease_owner() {
 - Modify: `.github/workflows/deploy-prakash-servers.yml` (the `APP_VARS` block — runs on all 3 since `RUN_APP=true`)
 - Not unit-testable; YAML validate + review.
 
-- [ ] **Step 1:** Add to `APP_VARS` (near `PHASH_CONCURRENCY='4'`): `export RUN_SWEEP_WORKER='true'; export DRAIN_INTERVAL_SECS='180'; export DISCOVERY_INTERVAL_SECS='86400'; export SWEEP_LEASE_TTL_SECS='120';`
+- [ ] **Step 1:** Add to `APP_VARS` (near `PHASH_CONCURRENCY='4'`): `export RUN_SWEEP_WORKER='false'; export DRAIN_INTERVAL_SECS='180'; export DISCOVERY_INTERVAL_SECS='86400'; export SWEEP_LEASE_TTL_SECS='120';` — **ships disabled.** To enable after validating: change to `'true'` (re-deploy) or set it per-box and restart. Until then the worker does not start, so the rest of this PR is inert in prod (safe to merge).
 - [ ] **Step 2:** Ensure `docker-compose.ha.yml` **app** service `environment:` block passes these (mirroring `PHASH_CONCURRENCY`):
-  - `RUN_SWEEP_WORKER: ${RUN_SWEEP_WORKER:-true}`
+  - `RUN_SWEEP_WORKER: ${RUN_SWEEP_WORKER:-false}`
   - `DRAIN_INTERVAL_SECS: ${DRAIN_INTERVAL_SECS:-180}`
   - `DISCOVERY_INTERVAL_SECS: ${DISCOVERY_INTERVAL_SECS:-86400}`
   - `SWEEP_LEASE_TTL_SECS: ${SWEEP_LEASE_TTL_SECS:-120}`
@@ -483,12 +503,17 @@ async fn pass_skips_when_not_lease_owner() {
 - [ ] `cargo test -p storj-interface --lib -- --test-threads=1` (Docker up)
 - [ ] `cargo test -p storj-interface --bin storj-interface`
 - [ ] `cargo test -p mirror-client`
-- [ ] Push branch + PR. **Do not enable on prod until:** the first post-deploy discovery is reviewed (clear any large backlog once via `phash-fleet.sh --of 3`, then let the worker maintain — see spec §Surfaces "Backlog vs steady-state").
+- [ ] Push branch + PR. **Ships disabled (`RUN_SWEEP_WORKER=false`) — safe to merge** (worker inert in prod). **Rollout when ready:**
+  1. Set `RUN_SWEEP_WORKER=true` on **one** box (env + restart), watch `media-sweep` (lease owner + heartbeat) + `media-runs`.
+  2. Let the first **discovery full-scan** run; review what it surfaces (`media-audit` `missing` delta).
+  3. If a large extra-bucket backlog appears, clear it once via `phash-fleet.sh --of 3` (worker drain idle meanwhile), then let the worker maintain.
+  4. Flip the default to `true` for all 3 (re-deploy) once validated.
 
 ## Notes / gotchas for the implementer
 
 - **Single-pathed hashing:** the worker drains via `media_phash::run` only; the ingest path registers (no hash). There is no standalone hash helper (Task 6 dropped — nothing else hashes).
-- **Drain pre-check:** never call `media_phash::run` on an empty missing-set — it inserts a `media_job_runs` row unconditionally. Gate on `missing_canonical_phash > 0` first (Task 8).
+- **Drain pre-check (`any_eligible_for_hash`):** never call `media_phash::run` unless there's a row that is missing AND **not** recently-failed — it inserts a `media_job_runs` row unconditionally and would re-download dead videos every tick otherwise (Task 8).
+- **Ship disabled:** `RUN_SWEEP_WORKER` defaults **false**; the PR is inert in prod until flipped on after validating the first discovery.
 - **`$me` = `NODE_NAME`, not container hostname** — hostname churns on redeploy (new container ID) and breaks lease self-renewal. `NODE_NAME` is stable per box; wire it into the app compose env (Task 11).
 - **pgbouncer transaction pooling:** every lease op is one statement / its own txn. Never hold a session-level lock.
 - **Best-effort registration:** `on_video_ingested(db_url, …)` must never fail a completion. Wire via a `CompletionDeps::register_ingested` method (default no-op; `RuntimeCompletionDeps` holds `db_url` + overrides), called from `handle_success_completion`. The outer `complete_video` handler can't host it (no parsed `req`; `state` is moved into the deps). The drain/discovery is the correctness guarantee.

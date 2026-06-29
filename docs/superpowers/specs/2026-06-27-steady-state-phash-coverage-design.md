@@ -76,7 +76,7 @@ pub async fn on_video_ingested(state: &AppState, video_id: &str, object_key: &st
 
 ### 3. Leased drain worker — `src/jobs/worker.rs`
 
-A single `tokio` task spawned once in `run_server` (gated by env `RUN_SWEEP_WORKER`, default **on**; the lease — not the env — is the single-runner mechanism, so enabling on all 3 boxes is safe). Main loop:
+A single `tokio` task spawned once in `run_server` (gated by env `RUN_SWEEP_WORKER`, **ships default off** — flip on after validating the first prod discovery; the lease — not the env — is the single-runner mechanism, so once enabled on all 3 boxes only one runs). Main loop:
 
 ```
 loop {
@@ -183,7 +183,7 @@ An unattended worker is only safe if its liveness is visible. Surface the lease 
 
 - A coordinator endpoint to fan the drain across all 3 boxes (steady-state delta is small → single-box suffices; the sharded fleet remains the bulk tool).
 - Wiring registration into the upload-merge external routes (done when that branch lands; they call the same `on_video_ingested`).
-- A dead-letter / permanent-failure quarantine (always-failing rows retried each drain — wasteful but bounded; tracked separately).
+- A *full* dead-letter quarantine. (A lightweight version IS in scope: the drain pre-check `any_eligible_for_hash` skips rows that failed within the last `DISCOVERY_INTERVAL`, so dead rows don't trigger re-downloads on idle ticks. A formal dead-letter table/status is still deferred.)
 - Mark-orphaned-`running`-rows-`interrupted` on startup (observability cleanup, tracked separately).
 - S3 bucket event-notification → queue ingestion (heavier infra; the register-inline + drain achieves near-real-time without it).
 - A **threshold alert** on rising `missing_canonical_phash` (lagging-indicator alerting if the worker silently stalls) — the `media-status` lease view (§8) is the primary liveness signal; a paging alert is a follow-up.
