@@ -145,7 +145,7 @@ async fn last_discovery_at_roundtrip() {
 
 - [ ] **Step 2: Run → fail** — `cargo test -p storj-interface --lib repo::tests::lease repo::tests::last_discovery -- --test-threads=1` → FAIL (fns missing).
 
-- [ ] **Step 3: Implement the five helpers + `LeaseRow` struct** (parameterized SQL, no string interpolation of user data).
+- [ ] **Step 3: Implement the five helpers + `LeaseRow` struct** (parameterized SQL, no string interpolation of user data). `acquire_or_renew_lease` uses **`query_opt`** (the `RETURNING` yields 0 or 1 rows) → `Ok(row.is_some())`. `LeaseRow { owner: String, heartbeat: DateTime<Utc>, last_discovery_at: Option<DateTime<Utc>> }` (chrono is enabled: `tokio-postgres` `with-chrono-0_4`).
 
 - [ ] **Step 4: Run → pass** — same command → PASS.
 
@@ -399,9 +399,10 @@ async fn pass_skips_when_not_lease_owner() {
 - [ ] **Step 3: Implement `run_one_pass` + `run_worker_loop`** per spec §3:
   - acquire lease → (own?)
   - **drain pre-check (avoid `media_job_runs` pollution):** `media_phash::run` calls `insert_job_run` *unconditionally* (media_phash.rs:59), so a drain every ~180s would insert ~480 idle run-rows/day forever. **Gate the drain on a cheap `any_missing` check first** — add `repo::any_missing_canonical_phash(client) -> Result<bool>` using `SELECT EXISTS(SELECT 1 FROM all_servable_videos_on_yral v LEFT JOIN servable_video_hashes h ON h.video_id=v.video_id AND h.hash_kind='phash' AND h.hash_version=$1 AND h.input_media_version=$2 WHERE h.video_id IS NULL LIMIT 1)` (short-circuits at the first missing row — far cheaper than `canonical_phash_coverage`'s full `COUNT(*)` over ~583k rows run every tick). Only if `true` do the drain under `with_heartbeat_renew` + `cas_guarded(job_media_phash_running)` calling `media_phash::run(.., requested_by="sweep_drain")`. This also skips the empty anti-join scan on idle ticks.
-  - **discovery:** if `discovery_due` (from DB `last_discovery_at`) run scan(full)+scan(full)+import under renew + `cas_guarded(job_media_import_running)`, then `set_last_discovery_at(now())`.
+  - **discovery:** if `discovery_due` (from DB `last_discovery_at`) run scan(full)+scan(full)+import under renew + `cas_guarded(job_media_import_running)`, then `set_last_discovery_at(now())`. `import_current_video_index` takes **`&mut Client`** — the worker connects a dedicated client for the import (the scan/phash jobs each open their own via `db_url`).
+  - **cancel tokens (operability):** pass `state.media_job_cancel`'s current token to `media_phash::run` / the scan / import, so the existing **`media-cancel`** endpoint can halt a worker drain mid-incident. The **loop itself** watches the separate graceful-shutdown `cancel` (the ctrl_c token from `run_server`) for process exit — don't conflate the two.
   - every pass wrapped so errors/panics are logged + sentry and the loop continues (never exits).
-  - `select!` on `cancel` for graceful shutdown + `release_lease`.
+  - `select!` on the graceful-shutdown `cancel` for shutdown + `release_lease`.
 
 - [ ] **Step 3b: Add a test** that an empty missing-set drain inserts **no** `media_job_runs` row (the gate works): seed zero missing rows, run a pass as lease owner, assert `SELECT count(*) FROM media_job_runs WHERE requested_by='sweep_drain'` is 0.
 
@@ -426,10 +427,10 @@ async fn pass_skips_when_not_lease_owner() {
   - `DISCOVERY_INTERVAL_SECS` → u64, default `86400`.
   - `SWEEP_LEASE_TTL_SECS` → u64, default `120`.
 
-- [ ] **Step 2:** In `run_server`, after `AppState` is built and before/around `axum::serve`, if `RUN_SWEEP_WORKER`: `tokio::spawn(crate::jobs::worker::run_worker_loop(state.clone(), me, cancel.clone()))`. Pass the existing graceful-shutdown `cancel` token.
+- [ ] **Step 2:** In `run_server`, after `AppState` is built and before/around `axum::serve`, if `RUN_SWEEP_WORKER`: `tokio::spawn(crate::jobs::worker::run_worker_loop(state.clone(), me, cancel.clone()))`. The `cancel` passed here is the **graceful-shutdown** token (the ctrl_c one the server already uses); the worker reads `state.media_job_cancel` internally for the drain's cancel token (so `media-cancel` works) — see Task 8. Confirm `cancel` in `run_server` is the ctrl_c token (main.rs ~497).
   - **`$me` = `NODE_NAME`** (`server_1/2/3`), read via `std::env::var("NODE_NAME").unwrap_or_else(|_| hostname fallback)`. **Not** container hostname — in Docker the hostname is the container ID, which **changes on every redeploy** (`compose up` recreates the container) → `$me` would churn and the box couldn't renew its own lease after a deploy (waits a full TTL). `NODE_NAME` is per-box and stable across redeploys (the workflow already exports it). Requires the compose wiring in Task 11 Step 2.
 
-- [ ] **Step 3: Build** — `SDKROOT=$(xcrun --show-sdk-path) cargo build` → OK.
+- [ ] **Step 3: Build** — `SDKROOT=$(xcrun --show-sdk-path) cargo build` → OK. (Spawn point is after `media_index::init_schema` at main.rs:243, so `sweep_lease` is guaranteed to exist before the worker's first tick. The resilient loop would survive even if it didn't.)
 
 - [ ] **Step 4:** Manual boot note (local): set `RUN_SWEEP_WORKER=false` to disable; with DB up, confirm one log line "sweep worker: started".
 
