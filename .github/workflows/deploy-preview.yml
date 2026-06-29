@@ -357,8 +357,7 @@ jobs:
                 {"key": "VIDEOGEN_SERVICE_AUTH_TOKEN", "value": $videogen_service_auth_token, "is_literal": true},
                 {"key": "BACKEND_ADMIN_IDENTITY", "value": $backend_admin_identity, "is_multiline": true},
                 {"key": "INTERNAL_ENCRYPTION_SECRET", "value": $internal_encryption_secret, "is_literal": true},
-                {"key": "MODERATION_HMAC_SECRET", "value": $moderation_hmac_secret, "is_literal": true},
-                {"key": "RUN_SWEEP_WORKER", "value": "true", "is_literal": true}
+                {"key": "MODERATION_HMAC_SECRET", "value": $moderation_hmac_secret, "is_literal": true}
               ]
             }')
 
