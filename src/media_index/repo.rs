@@ -681,11 +681,159 @@ pub async fn find_exact_duplicates(
         .collect())
 }
 
+/// A snapshot of the single-row `sweep_lease` election lease (`id = 1`),
+/// returned by [`read_lease`].
+#[derive(Debug, Clone)]
+pub struct LeaseRow {
+    pub owner: String,
+    pub heartbeat: chrono::DateTime<chrono::Utc>,
+    pub last_discovery_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Atomically acquire the `sweep_lease` for `owner`, or renew it if `owner`
+/// already holds it, or steal it if the current holder's heartbeat is older
+/// than `ttl`.
+///
+/// Implemented as a single `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`
+/// statement (one txn) so it is safe under pgbouncer transaction pooling — no
+/// multi-statement session state is required.
+///
+/// Returns `Ok(true)` iff `owner` now holds the lease. When the row exists with
+/// a *different, fresh* owner, the conditional `UPDATE` is skipped, no row is
+/// returned, and this returns `Ok(false)` ("another box holds it, skip").
+pub async fn acquire_or_renew_lease(
+    client: &Client,
+    owner: &str,
+    ttl: std::time::Duration,
+) -> Result<bool, tokio_postgres::Error> {
+    let row = client
+        .query_opt(
+            "INSERT INTO sweep_lease (id, owner, heartbeat) VALUES (1, $1, now())
+             ON CONFLICT (id) DO UPDATE
+                SET owner = $1, heartbeat = now()
+                WHERE sweep_lease.owner = $1
+                   OR sweep_lease.heartbeat < now() - ($2::double precision * interval '1 second')
+             RETURNING owner",
+            &[&owner, &(ttl.as_secs_f64())],
+        )
+        .await?;
+    Ok(row.is_some())
+}
+
+/// Release the `sweep_lease` iff it is currently held by `owner`.
+///
+/// Deletes the `id = 1` row only when `owner` matches, so a box can never
+/// release a lease that another box has since stolen.
+pub async fn release_lease(client: &Client, owner: &str) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute(
+            "DELETE FROM sweep_lease WHERE id = 1 AND owner = $1",
+            &[&owner],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Read the current `sweep_lease` row (`id = 1`), or `None` if unheld.
+pub async fn read_lease(client: &Client) -> Result<Option<LeaseRow>, tokio_postgres::Error> {
+    let row = client
+        .query_opt(
+            "SELECT owner, heartbeat, last_discovery_at FROM sweep_lease WHERE id = 1",
+            &[],
+        )
+        .await?;
+    Ok(row.map(|r| LeaseRow {
+        owner: r.get(0),
+        heartbeat: r.get(1),
+        last_discovery_at: r.get(2),
+    }))
+}
+
+/// Read `last_discovery_at` from the `sweep_lease` row (`id = 1`).
+///
+/// Returns `None` when there is no lease row OR the column is `NULL`.
+pub async fn get_last_discovery_at(
+    client: &Client,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, tokio_postgres::Error> {
+    let row = client
+        .query_opt(
+            "SELECT last_discovery_at FROM sweep_lease WHERE id = 1",
+            &[],
+        )
+        .await?;
+    Ok(row.and_then(|r| r.get(0)))
+}
+
+/// Record the timestamp of the most recent discovery sweep on the
+/// `sweep_lease` row (`id = 1`).
+pub async fn set_last_discovery_at(
+    client: &Client,
+    ts: chrono::DateTime<chrono::Utc>,
+) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute(
+            "UPDATE sweep_lease SET last_discovery_at = $1 WHERE id = 1",
+            &[&ts],
+        )
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
+    use super::{acquire_or_renew_lease, get_last_discovery_at, read_lease, set_last_discovery_at};
     use crate::media_index::test_support::test_client;
+
+    #[tokio::test]
+    async fn lease_single_owner_and_steal_after_ttl() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+
+        let ttl = std::time::Duration::from_secs(60);
+        assert!(
+            acquire_or_renew_lease(&client, "box-a", ttl).await.unwrap(),
+            "first acquire"
+        );
+        assert!(
+            !acquire_or_renew_lease(&client, "box-b", ttl).await.unwrap(),
+            "fresh foreign lease -> skip"
+        );
+        assert!(
+            acquire_or_renew_lease(&client, "box-a", ttl).await.unwrap(),
+            "owner renews own"
+        );
+
+        // Simulate staleness: backdate heartbeat beyond ttl.
+        client
+            .execute(
+                "UPDATE sweep_lease SET heartbeat = now() - interval '120 seconds' WHERE id = 1",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            acquire_or_renew_lease(&client, "box-b", ttl).await.unwrap(),
+            "stale lease stolen"
+        );
+        let lease = read_lease(&client).await.unwrap().unwrap();
+        assert_eq!(lease.owner, "box-b");
+    }
+
+    #[tokio::test]
+    async fn last_discovery_at_roundtrip() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        acquire_or_renew_lease(&client, "box-a", std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(get_last_discovery_at(&client).await.unwrap().is_none());
+        let now = chrono::Utc::now();
+        set_last_discovery_at(&client, now).await.unwrap();
+        let got = get_last_discovery_at(&client).await.unwrap().unwrap();
+        assert!((got - now).num_seconds().abs() < 2);
+    }
 
     #[tokio::test]
     async fn update_job_run_totals_reflects_progress_before_completion() {

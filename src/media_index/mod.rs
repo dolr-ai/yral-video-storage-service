@@ -10,9 +10,11 @@ pub mod types;
 pub use feed::{append_feed_event_txn, list_feed_events_after, FeedReadError};
 #[allow(unused_imports)]
 pub use repo::{
-    canonical_phash_coverage, failure_summary, find_exact_duplicates, recent_job_runs,
+    acquire_or_renew_lease, canonical_phash_coverage, failure_summary, find_exact_duplicates,
+    get_last_discovery_at, read_lease, recent_job_runs, release_lease, set_last_discovery_at,
     update_job_run_totals, upsert_hash_record_txn, upsert_servable_video_txn,
-    videos_missing_canonical_phash, CoverageStats, FailureGroup, JobRunRow, MissingHashRow,
+    videos_missing_canonical_phash, CoverageStats, FailureGroup, JobRunRow, LeaseRow,
+    MissingHashRow,
 };
 pub use schema::init_schema;
 pub use types::*;
