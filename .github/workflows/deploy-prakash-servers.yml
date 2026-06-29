@@ -133,6 +133,9 @@ jobs:
       # Space-separated public CIDRs allowed to reach Postgres :15432 as readonly clients.
       # Editable repo variable (empty default → firewall no-op). Set in repo Settings → Variables.
       POSTGRES_READONLY_ALLOWLIST: ${{ vars.POSTGRES_READONLY_ALLOWLIST }}
+      # Steady-state sweep worker on/off. Editable repo variable (default "false" = disabled).
+      # Flip to "true" in repo Settings → Variables + redeploy to enable; lease elects one runner.
+      RUN_SWEEP_WORKER: ${{ vars.RUN_SWEEP_WORKER || 'false' }}
 
     steps:
       - name: Checkout repository
@@ -218,7 +221,7 @@ jobs:
                 export MODERATION_HMAC_SECRET='${MODERATION_HMAC_SECRET}'; \
                 export PUBLIC_BASE_URL='https://storage-interface.prakash.yral.com'; \
                 export PHASH_CONCURRENCY='4'; \
-                export RUN_SWEEP_WORKER='false'; \
+                export RUN_SWEEP_WORKER='${RUN_SWEEP_WORKER}'; \
                 export DRAIN_INTERVAL_SECS='180'; \
                 export DISCOVERY_INTERVAL_SECS='86400'; \
                 export SWEEP_LEASE_TTL_SECS='120'; \
@@ -278,4 +281,4 @@ jobs:
           echo "**Image:** ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "**URL:** ${{ env.PREVIEW_URL }}" >> $GITHUB_STEP_SUMMARY
           echo "**Nodes:** server_1 (${{ env.SERVER_1_IP }}), server_2 (${{ env.SERVER_2_IP }}), server_3 (${{ env.SERVER_3_IP }})" >> $GITHUB_STEP_SUMMARY
-          echo "**App:** all 3 nodes (port ${{ env.HOST_PORT }}); public domain on server_1 only; PHASH_CONCURRENCY=4; sweep worker RUN_SWEEP_WORKER=false (ships disabled)" >> $GITHUB_STEP_SUMMARY
+          echo "**App:** all 3 nodes (port ${{ env.HOST_PORT }}); public domain on server_1 only; PHASH_CONCURRENCY=4; RUN_SWEEP_WORKER=${{ vars.RUN_SWEEP_WORKER || 'false' }} (repo variable)" >> $GITHUB_STEP_SUMMARY
