@@ -495,6 +495,23 @@ SELECT EXISTS (
 
 ---
 
+## Preview Validation Gate (REQUIRED before merge)
+
+**Validate on the isolated preview DB before merging to prod.** (Last steady-state change surfaced integration issues only visible on preview — env wiring, DB connectivity, real-cred behavior that local `PgContainer` tests don't exercise.) The preview DB is a **standalone `postgres:16-alpine`** on server_3:5433 (`deploy-preview.yml`), separate from the prod Patroni cluster — safe to exercise the worker against.
+
+- [ ] **Open the PR** → `deploy-preview.yml` auto-deploys the PR app (Coolify) pointed at the preview DB.
+- [ ] **Schema check:** confirm `init_schema` created `sweep_lease` on the preview DB (signed `media-sweep` against the preview URL, or psql to `:5433`).
+- [ ] **Registration:** the e2e suite already runs a videogen completion (`testuser-${sha}`). Confirm that completion **registers** a master row on the preview DB (appears in `media-audit` `missing` / the missing-scan) — exercises `on_video_ingested` end-to-end through the real completion path.
+- [ ] **Worker (enable on the PR app ONLY):** set `RUN_SWEEP_WORKER=true` **and** `DISCOVERY_INTERVAL_SECS=999999999` (suppress the full-bucket scan during the focused test) via **Coolify env on this PR's app** + restart. Do **NOT** hardcode `RUN_SWEEP_WORKER=true` in `deploy-preview.yml` — that would make *every* PR preview run a worker + bucket scan.
+  - Confirm `media-sweep` shows a lease `owner` + advancing `heartbeat`.
+  - Confirm the drain hashes the registered video(s) (`media-audit` `missing` drops; a `sweep_drain` row in `media-runs`).
+  - Confirm the `any_eligible_for_hash` gate: with nothing eligible, no new `sweep_drain` rows accrue.
+- [ ] **Discovery (separate, controlled):** if validating discovery, set a small `DISCOVERY_INTERVAL_SECS` on the PR app and accept one real-bucket scan into the preview DB; confirm scan→import→drain populates coverage. (Optional — discovery reuses the already-proven `scan_*`/import jobs.)
+- [ ] **Known preview ≠ prod gaps (verify separately):** preview is **plain Postgres** — no pgbouncer (transaction pooling) and no Patroni (failover). The lease is single-statement so it behaves identically, but the **pooling + failover paths are only exercised on prod** (covered by the staged prod rollout below, not preview).
+- [ ] **Only once preview is clean → merge.** Merge ships `RUN_SWEEP_WORKER=false`, so prod stays inert until the staged rollout.
+
+---
+
 ## Final verification (after all tasks)
 
 - [ ] `cargo fmt --check`
