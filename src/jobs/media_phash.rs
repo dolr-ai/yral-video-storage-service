@@ -430,15 +430,25 @@ async fn record_row_failure_txn(
             phase,
             source_ref,
             last_error,
-            status
+            status,
+            retry_count,
+            next_retry_at
          )
-         VALUES ($1::TEXT::UUID, $2, $3, $4, $5, $6, $7, 'pending_retry')
+         VALUES ($1::TEXT::UUID, $2, $3, $4, $5, $6, $7, 'pending_retry',
+                 1, now() + interval '5 minutes')
          ON CONFLICT (job_kind, item_key, phase) DO UPDATE
          SET job_run_id = EXCLUDED.job_run_id,
              video_id = EXCLUDED.video_id,
              source_ref = EXCLUDED.source_ref,
              last_error = EXCLUDED.last_error,
-             status = EXCLUDED.status",
+             status = EXCLUDED.status,
+             retry_count = media_job_failures.retry_count + 1,
+             -- exponential backoff off the PRE-increment count:
+             -- attempt 1 → +5m (the INSERT), 2 → +10m, 3 → +20m, … capped at 24h.
+             next_retry_at = now() + LEAST(
+                 interval '5 minutes' * power(2, media_job_failures.retry_count),
+                 interval '24 hours'
+             )",
         &[
             &job_run_id.to_string(),
             &JOB_KIND,
@@ -528,6 +538,52 @@ mod tests {
 
     fn make_run_id() -> Uuid {
         Uuid::new_v4()
+    }
+
+    #[tokio::test]
+    async fn record_row_failure_sets_exponential_backoff() {
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        let run_id = make_run_id();
+        insert_job_run(&client, run_id, "test-runner")
+            .await
+            .unwrap();
+
+        // attempt 1 → retry_count=1, next_retry_at ≈ now()+5m
+        let tx = client.transaction().await.unwrap();
+        record_row_failure_txn(&tx, run_id, "vid-b", "phash_download", "boom")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let r = client
+            .query_one(
+                "SELECT retry_count, EXTRACT(EPOCH FROM (next_retry_at - now()))::float8
+                 FROM media_job_failures WHERE video_id = 'vid-b'",
+                &[],
+            )
+            .await
+            .unwrap();
+        let (rc1, s1): (i32, f64) = (r.get(0), r.get(1));
+        assert_eq!(rc1, 1);
+        assert!((250.0..=350.0).contains(&s1), "≈5m, got {s1}s");
+
+        // attempt 2 (conflict) → retry_count=2, next_retry_at ≈ now()+10m
+        let tx = client.transaction().await.unwrap();
+        record_row_failure_txn(&tx, run_id, "vid-b", "phash_download", "boom again")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let r = client
+            .query_one(
+                "SELECT retry_count, EXTRACT(EPOCH FROM (next_retry_at - now()))::float8
+                 FROM media_job_failures WHERE video_id = 'vid-b'",
+                &[],
+            )
+            .await
+            .unwrap();
+        let (rc2, s2): (i32, f64) = (r.get(0), r.get(1));
+        assert_eq!(rc2, 2);
+        assert!((550.0..=650.0).contains(&s2), "≈10m, got {s2}s");
     }
 
     // ── test 1: successful compute writes a servable_video_hashes row ─────────
