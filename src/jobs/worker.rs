@@ -106,9 +106,9 @@ where
 ///
 /// Ordering:
 /// 1. `acquire_or_renew_lease` — non-owners return early (no-op).
-/// 2. Drain only when `any_eligible_for_hash` is true (missing AND not recently
-///    failed), so an idle/dead-only fleet never inserts an empty job-run row or
-///    re-downloads dead videos. Runs under heartbeat-renew + the per-box CAS guard.
+/// 2. Drain only when `any_eligible_for_hash` is true (missing AND not currently
+///    backing off), so an idle/dead-only fleet never inserts an empty job-run row or
+///    re-downloads backed-off videos. Runs under heartbeat-renew + the per-box CAS guard.
 /// 3. Discovery only when due by the persisted `last_discovery_at`; on a real run
 ///    (CAS not held by a manual import), persist the new cadence timestamp.
 #[allow(clippy::too_many_arguments)]
@@ -119,7 +119,6 @@ pub async fn run_one_pass<DF, DFut, GF, GFut>(
     import_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     ttl: std::time::Duration,
     discovery_interval: std::time::Duration,
-    failed_within: std::time::Duration,
     drain: DF,
     discovery: GF,
 ) -> Result<(), tokio_postgres::Error>
@@ -138,7 +137,6 @@ where
         phash::HASH_KIND,
         phash::HASH_VERSION,
         crate::jobs::media_phash::INPUT_MEDIA_VERSION,
-        failed_within,
     )
     .await?;
     if eligible {
@@ -179,7 +177,6 @@ pub struct SweepWorker {
     pub drain_interval: std::time::Duration,
     pub discovery_interval: std::time::Duration,
     pub lease_ttl: std::time::Duration,
-    pub failed_within: std::time::Duration,
 }
 
 impl SweepWorker {
@@ -318,7 +315,6 @@ impl SweepWorker {
             &self.import_flag,
             self.lease_ttl,
             self.discovery_interval,
-            self.failed_within,
             drain,
             discovery,
         )
@@ -424,7 +420,6 @@ mod tests {
             &iflag,
             Duration::from_secs(60),
             Duration::from_secs(86400),
-            Duration::from_secs(86400),
             {
                 let d = drained.clone();
                 move || async move { d.store(true, Ordering::Release) }
@@ -454,7 +449,6 @@ mod tests {
             Duration::from_secs(60),
             // discovery_interval huge so discovery never fires in this focused test
             Duration::from_secs(u32::MAX as u64),
-            Duration::from_secs(86400),
             {
                 let d = drained.clone();
                 move || async move { d.store(true, Ordering::Release) }
