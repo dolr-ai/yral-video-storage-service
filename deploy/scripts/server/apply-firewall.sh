@@ -47,5 +47,24 @@ for PORT in 15432 18008 12379 12380; do
   iptables -A DOCKER-USER -p tcp -i "$EXT_IF" --dport "$PORT" -j DROP
 done
 
+# Postgres readonly allowlist — applied on the CONTAINER port (5432), not the host
+# port (15432). Docker DNATs the published port 15432 -> 5432 in nat/PREROUTING, which
+# runs BEFORE the filter DOCKER-USER chain, so DOCKER-USER sees dpt:5432. The readonly
+# jump added on dpt:15432 in the loop above therefore never matches external traffic.
+# Apply it on dpt:5432, inserted immediately before that port's existing DROP rule so
+# allowlisted clients are accepted before the catch-all drop. Idempotent.
+if [ -n "$POSTGRES_READONLY_ALLOWLIST" ]; then
+  # Remove a prior jump (at most one is added per run) so re-applies stay idempotent.
+  iptables -D DOCKER-USER -p tcp --dport 5432 -j "$READONLY_CHAIN" 2>/dev/null || true
+  DROP_LINE=$(iptables -L DOCKER-USER --line-numbers -n 2>/dev/null \
+    | awk '$2 == "DROP" && /dpt:5432/ { print $1; exit }')
+  if [ -n "$DROP_LINE" ]; then
+    iptables -I DOCKER-USER "$DROP_LINE" -p tcp --dport 5432 -j "$READONLY_CHAIN"
+    echo "Readonly allowlist applied on post-DNAT Postgres port 5432 (before DROP at line ${DROP_LINE})"
+  else
+    echo "WARN: no dpt:5432 DROP found in DOCKER-USER; readonly jump NOT applied"
+  fi
+fi
+
 echo "Firewall rules applied for ports 15432 18008 12379 12380 on interface ${EXT_IF}"
 exec sleep infinity
