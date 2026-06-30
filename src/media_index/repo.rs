@@ -531,7 +531,11 @@ pub async fn any_eligible_for_hash(
                  AND NOT EXISTS (
                    SELECT 1 FROM media_job_failures f
                    WHERE f.video_id = v.video_id
-                     AND f.created_at > now() - ($4::double precision * interval '1 second')
+                     -- updated_at = LAST attempt (the failure row upserts updated_at on
+                     -- every retry; created_at is the FIRST failure and never refreshes).
+                     -- Quarantine off the last attempt so a permanently-dead row is retried
+                     -- ~once per window, not every drain tick.
+                     AND f.updated_at > now() - ($4::double precision * interval '1 second')
                  )
                LIMIT 1
              ) AS eligible",
@@ -934,10 +938,20 @@ mod tests {
             "recently-failed -> not eligible"
         );
 
-        // Failure older than the window: eligible again.
+        // Failure older than the window: eligible again. (A `BEFORE UPDATE` trigger forces
+        // updated_at = now() on any UPDATE, so re-insert with an explicit old updated_at —
+        // the trigger only fires on UPDATE, not INSERT.)
         client
             .execute(
-                "UPDATE media_job_failures SET created_at = now() - interval '48 hours' WHERE video_id = 'vid-elig'",
+                "DELETE FROM media_job_failures WHERE video_id = 'vid-elig'",
+                &[],
+            )
+            .await
+            .unwrap();
+        client
+            .execute(
+                "INSERT INTO media_job_failures (job_kind, item_key, video_id, phase, last_error, updated_at)
+                 VALUES ('media_phash','vid-elig','vid-elig','phash_download','x', now() - interval '48 hours')",
                 &[],
             )
             .await

@@ -29,6 +29,16 @@ cat > "${FAKE_BIN}/iptables" <<'IPTABLES'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'iptables %s\n' "$*" >> "${IPTABLES_LOG}"
+# Emulate the DOCKER-USER listing so the readonly-on-5432 block can locate the
+# post-DNAT dpt:5432 DROP line (Docker DNATs published 15432 -> container 5432).
+case "$*" in
+  *"-L DOCKER-USER"*)
+    echo "Chain DOCKER-USER (1 references)"
+    echo "num  target     prot opt source               destination"
+    echo "1    ACCEPT     tcp  --  0.0.0.0/0            0.0.0.0/0            tcp dpt:5432"
+    echo "2    DROP       tcp  --  0.0.0.0/0            0.0.0.0/0            tcp dpt:5432"
+    ;;
+esac
 exit 0
 IPTABLES
 chmod +x "${FAKE_BIN}/iptables"
@@ -81,5 +91,11 @@ jump_line="$(grep -n -- 'iptables -A DOCKER-USER -p tcp -i eth0 --dport 15432 -j
 
 grep -q 'POSTGRES_READONLY_ALLOWLIST: "${POSTGRES_READONLY_ALLOWLIST:-}"' "${REPO_ROOT}/deploy/docker-compose.ha.yml" \
   || fail "expected docker-compose.ha.yml to pass POSTGRES_READONLY_ALLOWLIST into firewall service"
+
+# The published Postgres port 15432 is DNAT'd to container port 5432 BEFORE DOCKER-USER,
+# so the effective readonly jump must be on dpt:5432 (the mock reports its DROP at line 2),
+# inserted before that DROP.
+grep -q -- "iptables -I DOCKER-USER 2 -p tcp --dport 5432 -j YRAL_POSTGRES_READONLY" "${IPTABLES_LOG}" \
+  || fail "expected readonly allowlist jump on post-DNAT Postgres port 5432 (before its DROP)"
 
 echo "firewall readonly allowlist test ok"
