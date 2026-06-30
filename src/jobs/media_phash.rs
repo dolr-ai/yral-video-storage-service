@@ -316,6 +316,14 @@ pub async fn persist_one(
                 summary.hash_feed_events_appended += 1;
             }
 
+            // Clean slate: a successful hash clears any prior failure backoff so
+            // retry_count resets if this video ever fails again later.
+            tx.execute(
+                "DELETE FROM media_job_failures WHERE job_kind = $1 AND video_id = $2",
+                &[&JOB_KIND, &row.video_id],
+            )
+            .await?;
+
             tx.commit().await?;
         }
         Err((phase, err)) => {
@@ -584,6 +592,55 @@ mod tests {
         let (rc2, s2): (i32, f64) = (r.get(0), r.get(1));
         assert_eq!(rc2, 2);
         assert!((550.0..=650.0).contains(&s2), "≈10m, got {s2}s");
+    }
+
+    #[tokio::test]
+    async fn successful_hash_clears_prior_failure_row() {
+        let (_pg, mut client) = test_client().await;
+        init_test_schema(&client).await;
+        seed_video(&client, "video-ok").await;
+        let job_run_id = make_run_id();
+        insert_job_run(&client, job_run_id, "test-runner")
+            .await
+            .unwrap();
+
+        // A prior transient failure exists (job_run_id defaults NULL — nullable FK).
+        client
+            .execute(
+                "INSERT INTO media_job_failures (job_kind, item_key, video_id, phase, last_error)
+                 VALUES ('media_phash','video-ok','video-ok','phash_download','earlier transient')",
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let row = make_row("video-ok");
+        let mut summary = PHashSummary {
+            job_run_id,
+            scanned_rows: 0,
+            hash_rows_upserted: 0,
+            hash_feed_events_appended: 0,
+            row_failures: 0,
+        };
+        persist_one(
+            &mut client,
+            job_run_id,
+            &row,
+            Ok(make_hash_result("1010101010")),
+            &mut summary,
+        )
+        .await
+        .unwrap();
+
+        let n: i64 = client
+            .query_one(
+                "SELECT count(*) FROM media_job_failures WHERE video_id = 'video-ok'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(n, 0, "failure row cleared on success");
     }
 
     // ── test 1: successful compute writes a servable_video_hashes row ─────────
