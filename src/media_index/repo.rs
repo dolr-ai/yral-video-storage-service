@@ -401,6 +401,16 @@ pub struct MissingHashRow {
 /// MUST advance this cursor past the last row of each batch; otherwise a row
 /// that never gets a hash (e.g. a permanent compute failure) stays "missing"
 /// and would be re-fetched forever.
+/// Shared SQL predicate: video `v` has no failure row currently backing off
+/// (`next_retry_at` in the future). Used by BOTH the drain selection
+/// ([`videos_missing_canonical_phash`]) and the eligibility gate
+/// ([`any_eligible_for_hash`]) so the two cannot diverge. Requires the outer
+/// query to alias `all_servable_videos_on_yral` as `v`. A NULL `next_retry_at`
+/// (e.g. legacy failure rows written before backoff existed) counts as due.
+const NOT_BACKING_OFF: &str = "NOT EXISTS (\
+    SELECT 1 FROM media_job_failures f \
+    WHERE f.video_id = v.video_id AND f.next_retry_at > now())";
+
 pub async fn videos_missing_canonical_phash(
     client: &Client,
     hash_kind: &str,
@@ -414,7 +424,8 @@ pub async fn videos_missing_canonical_phash(
         Some((of, idx)) => (Some(of), Some(idx)),
         None => (None, None),
     };
-    let base = "SELECT v.video_id, v.storage_provider, v.object_key, v.servable_status, v.bucket
+    let base = format!(
+        "SELECT v.video_id, v.storage_provider, v.object_key, v.servable_status, v.bucket
                 FROM all_servable_videos_on_yral v
                 LEFT JOIN servable_video_hashes h
                    ON h.video_id = v.video_id
@@ -423,7 +434,9 @@ pub async fn videos_missing_canonical_phash(
                   AND ($4::TEXT IS NULL OR v.video_id > $4)
                   AND ($5::BIGINT IS NULL
                        OR (((hashtext(v.video_id)::bigint % $5) + $5) % $5) = $6)
-                ORDER BY v.video_id";
+                  AND {NOT_BACKING_OFF}
+                ORDER BY v.video_id"
+    );
     let rows = if let Some(limit) = limit {
         client
             .query(
@@ -442,7 +455,7 @@ pub async fn videos_missing_canonical_phash(
     } else {
         client
             .query(
-                base,
+                &base,
                 &[
                     &hash_kind,
                     &hash_version,
@@ -507,45 +520,35 @@ pub async fn canonical_phash_coverage(
 }
 
 /// Returns true iff there is at least one servable video that is MISSING a canonical
-/// pHash AND was NOT failed within the last `failed_within` window. The recently-failed
-/// anti-join quarantines permanently-dead rows (deleted source / never-finalizing temp
-/// key) so the steady-state worker does not re-download them every tick (and does not
-/// insert an empty `media_job_runs` row each pass). Short-circuits via `EXISTS … LIMIT 1`,
-/// so it is far cheaper than a full `COUNT(*)` over the whole servable set.
+/// pHash AND is not currently backing off (no failure row with `next_retry_at` in the
+/// future — see [`NOT_BACKING_OFF`]). The backoff anti-join keeps the steady-state
+/// worker from re-downloading a permanently-dead row every tick (it backs off to the
+/// 24h cap) while still letting a fresh transient failure retry within minutes — and
+/// avoids inserting an empty `media_job_runs` row each idle pass. Short-circuits via
+/// `EXISTS … LIMIT 1`, far cheaper than a full `COUNT(*)` over the whole servable set.
 pub async fn any_eligible_for_hash(
     client: &Client,
     hash_kind: &str,
     hash_version: &str,
     input_media_version: &str,
-    failed_within: std::time::Duration,
 ) -> Result<bool, tokio_postgres::Error> {
-    let row = client
-        .query_one(
-            "SELECT EXISTS (
+    // Mirror of the drain selection in `videos_missing_canonical_phash`: a row is
+    // eligible iff it is missing the canonical hash AND is not currently backing
+    // off. Shares `NOT_BACKING_OFF` so the gate and the selection cannot diverge.
+    let sql = format!(
+        "SELECT EXISTS (
                SELECT 1
                FROM all_servable_videos_on_yral v
                LEFT JOIN servable_video_hashes h
                  ON h.video_id = v.video_id
                 AND h.hash_kind = $1 AND h.hash_version = $2 AND h.input_media_version = $3
                WHERE h.video_id IS NULL
-                 AND NOT EXISTS (
-                   SELECT 1 FROM media_job_failures f
-                   WHERE f.video_id = v.video_id
-                     -- updated_at = LAST attempt (the failure row upserts updated_at on
-                     -- every retry; created_at is the FIRST failure and never refreshes).
-                     -- Quarantine off the last attempt so a permanently-dead row is retried
-                     -- ~once per window, not every drain tick.
-                     AND f.updated_at > now() - ($4::double precision * interval '1 second')
-                 )
+                 AND {NOT_BACKING_OFF}
                LIMIT 1
-             ) AS eligible",
-            &[
-                &hash_kind,
-                &hash_version,
-                &input_media_version,
-                &(failed_within.as_secs_f64()),
-            ],
-        )
+             ) AS eligible"
+    );
+    let row = client
+        .query_one(&sql, &[&hash_kind, &hash_version, &input_media_version])
         .await?;
     Ok(row.get("eligible"))
 }
@@ -894,74 +897,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn any_eligible_for_hash_quarantines_recent_failures() {
+    async fn eligibility_and_selection_respect_next_retry_at() {
         use phash::{HASH_KIND, HASH_VERSION};
         let imv = crate::jobs::media_phash::INPUT_MEDIA_VERSION;
-        let within = std::time::Duration::from_secs(86400);
         let (_pg, mut client) = test_client().await;
         crate::media_index::init_schema(&client).await.unwrap();
 
         // Empty set: nothing eligible.
         assert!(
-            !super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv, within)
+            !super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv)
                 .await
                 .unwrap(),
             "no servable rows -> not eligible"
         );
 
-        // One missing (unhashed) servable row: eligible.
+        // Missing (unhashed) servable row, no failure → eligible AND selected.
         let tx = client.transaction().await.unwrap();
-        crate::media_index::upsert_servable_video_txn(&tx, servable_input("vid-elig"))
+        crate::media_index::upsert_servable_video_txn(&tx, servable_input("vid-due"))
             .await
             .unwrap();
         tx.commit().await.unwrap();
         assert!(
-            super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv, within)
+            super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv)
                 .await
                 .unwrap(),
             "missing + no failure -> eligible"
         );
+        assert!(
+            missing_has(&client, "vid-due").await,
+            "no failure -> selected"
+        );
 
-        // Recent failure: quarantined (not eligible).
+        // Failure backing off (next_retry_at in the FUTURE) → not eligible, not selected.
         client
             .execute(
-                "INSERT INTO media_job_failures (job_kind, item_key, video_id, phase, last_error)
-                 VALUES ('media_phash','vid-elig','vid-elig','phash_download','x')",
+                "INSERT INTO media_job_failures (job_kind, item_key, video_id, phase, last_error, next_retry_at)
+                 VALUES ('media_phash','vid-due','vid-due','phash_download','x', now() + interval '1 hour')",
                 &[],
             )
             .await
             .unwrap();
         assert!(
-            !super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv, within)
+            !super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv)
                 .await
                 .unwrap(),
-            "recently-failed -> not eligible"
+            "backing off -> not eligible"
+        );
+        assert!(
+            !missing_has(&client, "vid-due").await,
+            "backing off -> not selected"
         );
 
-        // Failure older than the window: eligible again. (A `BEFORE UPDATE` trigger forces
-        // updated_at = now() on any UPDATE, so re-insert with an explicit old updated_at —
-        // the trigger only fires on UPDATE, not INSERT.)
+        // next_retry_at in the PAST (due) → eligible AND selected again. (The BEFORE UPDATE
+        // trigger only touches updated_at, so updating next_retry_at directly is fine.)
         client
             .execute(
-                "DELETE FROM media_job_failures WHERE video_id = 'vid-elig'",
-                &[],
-            )
-            .await
-            .unwrap();
-        client
-            .execute(
-                "INSERT INTO media_job_failures (job_kind, item_key, video_id, phase, last_error, updated_at)
-                 VALUES ('media_phash','vid-elig','vid-elig','phash_download','x', now() - interval '48 hours')",
+                "UPDATE media_job_failures SET next_retry_at = now() - interval '1 minute' WHERE video_id = 'vid-due'",
                 &[],
             )
             .await
             .unwrap();
         assert!(
-            super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv, within)
+            super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv)
                 .await
                 .unwrap(),
-            "stale failure -> eligible again"
+            "due -> eligible"
         );
+        assert!(missing_has(&client, "vid-due").await, "due -> selected");
+    }
+
+    async fn missing_has(client: &tokio_postgres::Client, vid: &str) -> bool {
+        use phash::{HASH_KIND, HASH_VERSION};
+        let imv = crate::jobs::media_phash::INPUT_MEDIA_VERSION;
+        super::videos_missing_canonical_phash(
+            client,
+            HASH_KIND,
+            HASH_VERSION,
+            imv,
+            None,
+            Some(100),
+            None,
+        )
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.video_id == vid)
     }
 
     #[tokio::test]

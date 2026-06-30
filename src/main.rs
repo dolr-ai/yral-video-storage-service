@@ -298,8 +298,6 @@ async fn run_server() -> anyhow::Result<()> {
             drain_interval: std::time::Duration::from_secs(consts::drain_interval_secs()),
             discovery_interval: std::time::Duration::from_secs(consts::discovery_interval_secs()),
             lease_ttl: std::time::Duration::from_secs(consts::sweep_lease_ttl_secs()),
-            // Reuse the discovery interval as the recently-failed quarantine window.
-            failed_within: std::time::Duration::from_secs(consts::discovery_interval_secs()),
         };
         tokio::spawn(worker.run(cancel.clone()));
     }
