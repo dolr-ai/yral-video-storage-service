@@ -123,7 +123,7 @@ ON CONFLICT (job_kind, item_key, phase) DO UPDATE SET
 ```
 
 Backoff schedule (base 5 min, cap 24 h): attempt 1 → +5m, 2 → +10m, 3 → +20m,
-4 → +40m, 5 → +80m, … capped at +24h (reached ~attempt 9). `power()` returns
+4 → +40m, 5 → +80m, … capped at +24h (reached ~attempt 9–10). `power()` returns
 `double precision`; multiplying an `interval` by it is valid Postgres.
 
 **Eligibility + drain selection** — a missing row is *due* iff no failure row for
@@ -141,6 +141,24 @@ currently diverge:
 Keep the two as separate functions for now (the gate is a cheap `EXISTS`, the
 selection is a `LIMIT`ed fetch) but they MUST share the identical backoff
 predicate. Consider a shared SQL fragment/const to prevent drift.
+
+**NULL `next_retry_at` semantics.** The predicate `NOT EXISTS (f WHERE
+next_retry_at > now())` treats a NULL `next_retry_at` as *due* (NULL `>` now() is
+NULL → not matched → eligible). This is correct for never-failed rows (no failure
+row at all) but means **failure rows that predate this change** (the 9 dead +
+`5a08…`, all written by the old upsert with `next_retry_at=NULL`) are immediately
+eligible again. They will be re-attempted once, fail, and *then* enter backoff
+(`+5m, +10m, …`) — a brief ramp, not the old per-tick churn, but a burst on
+deploy. See Rollout step 5 for the one-off mitigation.
+
+**Caller impact (other than the worker).** `videos_missing_canonical_phash` and
+`any_eligible_for_hash` are also used by the manual/backfill `media-phash`
+command. Adding the backoff filter means manual runs also skip backed-off rows;
+a forced re-attempt now requires clearing the relevant `media_job_failures` rows
+first. Acceptable (don't hammer dead rows), but call it out so the plan updates
+all callers — notably `any_eligible_for_hash` loses its `$4` window parameter, so
+its worker call site (`run_one_pass` in `src/jobs/worker.rs`) must drop that
+argument.
 
 ### 3. Clear failure on success
 
@@ -203,12 +221,16 @@ parallelism flake.
 3. Merge → deploy to the 3 prod servers.
 4. **Re-seed `last_discovery_at = now()`** immediately before deploy (discovery
    stays suppressed).
-5. **Re-hash the stuck video**: clear `media_job_failures` for
-   `5a087732-…-f0d2.mp4` (and any other prefix-less videogen rows) so the
-   corrected path / backoff re-attempts them. Verify the `videogen_completion`
-   master row's `object_key` is corrected (re-register on next completion, or a
-   one-off UPDATE to the prefixed key).
-6. Prod videogen smoke test → confirm green.
+5. **Fix the existing `5a08…` row + tame the deploy burst** (the core fix only
+   corrects *future* completions; the existing master row still holds the bare
+   key):
+   - One-off UPDATE the `5a08…` master row's `object_key` to the prefixed key
+     `<user_principal>/5a087732-…-f0d2.mp4` (the known-good 200 path), then DELETE
+     its `media_job_failures` row so the next drain re-hashes it correctly.
+   - For the 9 permanently-dead rows (all `next_retry_at=NULL` pre-deploy): either
+     accept the short backoff ramp, or pre-set
+     `next_retry_at = now() + interval '24 hours'` to suppress the deploy burst.
+6. Prod videogen smoke test → confirm register → hash green end to end.
 
 ## Risks
 
