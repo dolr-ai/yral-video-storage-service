@@ -1,10 +1,11 @@
-//! Resolve a videogen upload's `bucket_url` + `object_key` to a storage triple.
+//! Resolve a videogen upload's `bucket_url` to a storage triple.
 //!
 //! New videos complete via a videogen "complete" webhook carrying
-//! `(video_id, object_key, bucket_url)`. The downstream pHash worker downloads
-//! the object by branching on `storage_provider` ("storj" | "hetzner") +
-//! `object_key`, so the completion's `bucket_url` must be mapped to the correct
-//! storage triple before registration.
+//! `(video_id, bucket_url)`. The downstream pHash worker downloads the object by
+//! branching on `storage_provider` ("storj" | "hetzner") + `object_key`, so the
+//! completion's `bucket_url` (the real download URL, which embeds the
+//! principal-prefixed key) is parsed into the correct storage triple before
+//! registration.
 
 use tokio_postgres::Client;
 
@@ -22,26 +23,40 @@ pub struct VideoSource {
     pub object_key: String,
 }
 
-/// Minimal resolver: videogen uploads are always Storj `yral-sfw` today.
+/// Derive the storage triple from the videogen completion's `bucket_url`.
 ///
-/// The videogen `bucket_url` is built from `STORJ_SFW_SHARE_URL`
-/// (env `SFW_SHARE_EU1_URL`, e.g.
-/// `https://link.storjshare.io/raw/<token>/yral-sfw`) as
-/// `{base}/{user_principal}/{video_id}.mp4`, so it reliably contains the
-/// bucket name `yral-sfw`. The NSFW share base ends in `yral-nsfw-videos`,
-/// which does not contain `yral-sfw` as a substring, so there is no collision.
+/// `bucket_url` is the real Storj download URL,
+/// `{share_base}/yral-sfw/{user_principal}/{video_id}.mp4` (env
+/// `SFW_SHARE_EU1_URL` = `https://link.storjshare.io/raw/<token>/yral-sfw`), so
+/// the bucket-relative object key is everything after the first `/yral-sfw/`.
+///
+/// The completion also carries a bare `object_key` request field WITHOUT the
+/// principal prefix — taking that as the key was the bug this replaces (the
+/// pHash worker GET 404'd). The URL is authoritative, so we parse the key from
+/// it instead. The NSFW share base ends in `yral-nsfw-videos`, which does not
+/// contain `/yral-sfw/`, so there is no collision.
 ///
 /// Extend (host-parse) when other upload backends are introduced.
-pub fn resolve_source(bucket_url: &str, object_key: &str) -> Result<VideoSource, ResolveError> {
-    if bucket_url.contains("yral-sfw") {
-        Ok(VideoSource {
-            storage_provider: "storj",
-            bucket: "yral-sfw".into(),
-            object_key: object_key.to_string(),
-        })
-    } else {
-        Err(ResolveError::UnknownSource(bucket_url.to_string()))
+pub fn resolve_source(bucket_url: &str) -> Result<VideoSource, ResolveError> {
+    const MARKER: &str = "/yral-sfw/";
+    let tail = bucket_url
+        .split_once(MARKER)
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| ResolveError::UnknownSource(bucket_url.to_string()))?;
+    // Strip any query string / fragment, and surrounding slashes.
+    let key = tail
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_matches('/');
+    if key.is_empty() {
+        return Err(ResolveError::UnknownSource(bucket_url.to_string()));
     }
+    Ok(VideoSource {
+        storage_provider: "storj",
+        bucket: "yral-sfw".into(),
+        object_key: key.to_string(),
+    })
 }
 
 /// Register a completed videogen video directly into the master table
@@ -96,8 +111,8 @@ pub(crate) async fn register_master_row(
 /// This MUST never panic or propagate — it is called best-effort from a request
 /// handler. Any failure is logged; the periodic discovery sweep is the backstop
 /// that will eventually register the video anyway.
-pub async fn on_video_ingested(db_url: &str, video_id: &str, object_key: &str, bucket_url: &str) {
-    let src = match resolve_source(bucket_url, object_key) {
+pub async fn on_video_ingested(db_url: &str, video_id: &str, bucket_url: &str) {
+    let src = match resolve_source(bucket_url) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(
@@ -135,11 +150,8 @@ mod tests {
         let (_pg, mut client) = test_client().await;
         crate::media_index::init_schema(&client).await.unwrap();
 
-        let src = resolve_source(
-            "https://link.storjshare.io/raw/x/yral-sfw/principal/vid-1.mp4",
-            "k/1.mp4",
-        )
-        .unwrap();
+        let src = resolve_source("https://link.storjshare.io/raw/x/yral-sfw/principal/vid-1.mp4")
+            .unwrap();
         register_master_row(&mut client, "vid-1", &src)
             .await
             .unwrap();
@@ -160,25 +172,38 @@ mod tests {
             .find(|r| r.video_id == "vid-1")
             .expect("registered row present");
         assert_eq!(r.storage_provider.as_deref(), Some("storj"));
-        assert_eq!(r.object_key.as_deref(), Some("k/1.mp4"));
+        assert_eq!(r.object_key.as_deref(), Some("principal/vid-1.mp4"));
     }
 
     #[test]
-    fn resolves_videogen_storj_sfw() {
-        // Realistic bucket_url: STORJ_SFW_SHARE_URL ("https://link.storjshare.io/raw/<token>/yral-sfw")
-        // joined with "/{user_principal}/{video_id}.mp4".
+    fn resolve_source_takes_key_from_bucket_url_not_object_key() {
+        // bucket_url is the real download URL: {base}/yral-sfw/{principal}/{uuid}.mp4.
+        // The bare `object_key` request field (no prefix) was the bug — must be ignored.
         let src = resolve_source(
-            "https://link.storjshare.io/raw/jxepcyfzxbj5mk4d676jhsfjpg5a/yral-sfw/canister/abc.mp4",
-            "canister/abc.mp4",
+            "https://link.storjshare.io/raw/tok/yral-sfw/km5ld-principal/5a08-uuid.mp4",
         )
         .unwrap();
         assert_eq!(src.storage_provider, "storj");
         assert_eq!(src.bucket, "yral-sfw");
-        assert_eq!(src.object_key, "canister/abc.mp4");
+        assert_eq!(src.object_key, "km5ld-principal/5a08-uuid.mp4");
     }
 
     #[test]
-    fn rejects_unknown_host() {
-        assert!(resolve_source("https://unknown.example/x", "k").is_err());
+    fn resolve_source_strips_query_and_fragment() {
+        let src =
+            resolve_source("https://link.storjshare.io/raw/tok/yral-sfw/p/u.mp4?download=1#x")
+                .unwrap();
+        assert_eq!(src.object_key, "p/u.mp4");
+    }
+
+    #[test]
+    fn resolve_source_rejects_missing_marker() {
+        assert!(resolve_source("https://unknown.example/p/u.mp4").is_err());
+    }
+
+    #[test]
+    fn resolve_source_rejects_empty_key_tail() {
+        // bucket base with no object path → cannot derive a key.
+        assert!(resolve_source("https://link.storjshare.io/raw/tok/yral-sfw/").is_err());
     }
 }

@@ -132,7 +132,7 @@ pub trait CompletionDeps: Send + Sync {
 
     /// Register a completed video into the master table for steady-state pHash.
     /// Best-effort; default no-op so test fakes need no change.
-    async fn register_ingested(&self, _video_id: &str, _object_key: &str, _bucket_url: &str) {}
+    async fn register_ingested(&self, _video_id: &str, _bucket_url: &str) {}
 }
 
 // ─── Core logic (testable) ───────────────────────────────────────────────────
@@ -245,8 +245,7 @@ async fn handle_success_completion<D: CompletionDeps>(
     }
 
     // Register into master table for steady-state pHash (best-effort; swallows its own errors)
-    deps.register_ingested(video_id, object_key, bucket_url)
-        .await;
+    deps.register_ingested(video_id, bucket_url).await;
 
     tracing::info!(
         principal = %request_key.principal,
@@ -551,9 +550,8 @@ impl CompletionDeps for RuntimeCompletionDeps {
         draft_client_from_env().create_draft(request).await
     }
 
-    async fn register_ingested(&self, video_id: &str, object_key: &str, bucket_url: &str) {
-        crate::jobs::ingest::on_video_ingested(&self.db_url, video_id, object_key, bucket_url)
-            .await;
+    async fn register_ingested(&self, video_id: &str, bucket_url: &str) {
+        crate::jobs::ingest::on_video_ingested(&self.db_url, video_id, bucket_url).await;
     }
 }
 
