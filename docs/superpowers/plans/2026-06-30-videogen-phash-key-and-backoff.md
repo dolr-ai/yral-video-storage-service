@@ -175,52 +175,56 @@ git commit -m "fix: derive videogen Storj key from bucket_url (prefixed path), n
 ## Task 2: Exponential backoff on failure upsert
 
 **Files:**
-- Modify: `src/jobs/media_phash.rs` (failure upsert, ~`:424`)
-- Test: `src/media_index/repo.rs` or `src/jobs/media_phash.rs` tests
+- Modify: `src/jobs/media_phash.rs` — the failure upsert is the private fn `record_row_failure_txn` (~`:417`). Its test MUST live in `media_phash.rs`'s own `#[cfg(test)] mod tests` (same module — the fn is private).
 
-- [ ] **Step 1: Write the failing test** (add to `src/media_index/repo.rs` tests, or a `media_phash` test that calls the failure upsert)
+The failure path goes through a job run (FK `media_job_failures.job_run_id → media_job_runs`), so seed one with the existing `insert_job_run` helper. Reuse existing test helpers in that module: `test_client()`, `init_test_schema()`, `insert_job_run()`, `make_run_id()`. Do NOT invent new helpers.
 
-Insert two failures for the same `(job_kind,item_key,phase)` and assert backoff:
+- [ ] **Step 1: Write the failing test** (in `src/jobs/media_phash.rs` tests)
 
 ```rust
 #[tokio::test]
-async fn failure_upsert_sets_exponential_backoff() {
-    let (_pg, client) = test_client_owned().await; // an owned Client + schema
-    crate::media_index::init_schema(&client).await.unwrap();
+async fn record_row_failure_sets_exponential_backoff() {
+    let (_pg, mut client) = test_client().await;
+    init_test_schema(&client).await;
+    let run_id = make_run_id();
+    insert_job_run(&client, run_id, "test-runner").await.unwrap();
 
-    // First failure: retry_count=1, next_retry_at ≈ now()+5m.
-    insert_phash_failure(&client, "vid-b", "boom").await;
-    let (rc1, secs1) = read_backoff(&client, "vid-b").await;
+    // helper: call the production failure upsert once, in its own tx
+    async fn fail_once(client: &mut Client, run_id: Uuid, vid: &str) {
+        let tx = client.transaction().await.unwrap();
+        record_row_failure_txn(&tx, run_id, vid, "phash_download", "boom")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    async fn backoff(client: &Client, vid: &str) -> (i32, f64) {
+        let r = client
+            .query_one(
+                "SELECT retry_count, EXTRACT(EPOCH FROM (next_retry_at - now()))::float8
+                 FROM media_job_failures WHERE video_id = $1",
+                &[&vid],
+            )
+            .await
+            .unwrap();
+        (r.get(0), r.get(1))
+    }
+
+    fail_once(&mut client, run_id, "vid-b").await; // attempt 1 → +5m
+    let (rc1, s1) = backoff(&client, "vid-b").await;
     assert_eq!(rc1, 1);
-    assert!((250.0..=350.0).contains(&secs1), "≈5m, got {secs1}s");
+    assert!((250.0..=350.0).contains(&s1), "≈5m, got {s1}s");
 
-    // Second failure (conflict): retry_count=2, next_retry_at ≈ now()+10m.
-    insert_phash_failure(&client, "vid-b", "boom again").await;
-    let (rc2, secs2) = read_backoff(&client, "vid-b").await;
+    fail_once(&mut client, run_id, "vid-b").await; // attempt 2 (conflict) → +10m
+    let (rc2, s2) = backoff(&client, "vid-b").await;
     assert_eq!(rc2, 2);
-    assert!((550.0..=650.0).contains(&secs2), "≈10m, got {secs2}s");
+    assert!((550.0..=650.0).contains(&s2), "≈10m, got {s2}s");
 }
 ```
-
-`read_backoff` helper:
-```rust
-async fn read_backoff(client: &Client, video_id: &str) -> (i32, f64) {
-    let row = client
-        .query_one(
-            "SELECT retry_count, EXTRACT(EPOCH FROM (next_retry_at - now()))::float8
-             FROM media_job_failures WHERE video_id = $1",
-            &[&video_id],
-        )
-        .await
-        .unwrap();
-    (row.get(0), row.get(1))
-}
-```
-`insert_phash_failure` wraps the production failure-upsert fn in a transaction (reuse the fn touched in Step 3; export it `pub(crate)` if needed).
+(If `record_row_failure_txn` or `insert_job_run` aren't already visible in the test module, they are in the same file — no export needed.)
 
 - [ ] **Step 2: Run, verify fail**
 
-Run: `SDKROOT=$(xcrun --show-sdk-path) cargo test -p storj-interface --lib failure_upsert_sets_exponential_backoff -- --test-threads=1`
+Run: `SDKROOT=$(xcrun --show-sdk-path) cargo test -p storj-interface --lib record_row_failure_sets_exponential_backoff -- --test-threads=1`
 Expected: FAIL — `retry_count` is 0 / `next_retry_at` is NULL (current upsert sets neither).
 
 - [ ] **Step 3: Update the failure upsert** (`src/jobs/media_phash.rs:424-452`)
@@ -278,33 +282,61 @@ git commit -m "feat: exponential backoff (retry_count/next_retry_at) on phash do
 - Modify: `src/jobs/worker.rs` (`run_one_pass:136`, `SweepWorker` field `:182` + `run_pass:321`)
 - Modify: `src/main.rs:302` (drop `failed_within`)
 
-- [ ] **Step 1: Write/replace the failing tests** (`src/media_index/repo.rs`)
+- [ ] **Step 1: Write/replace the failing test** (`src/media_index/repo.rs` tests)
 
-Replace `any_eligible_for_hash_quarantines_recent_failures` with a `next_retry_at` version, and add a selection test:
+**Replace** the existing `any_eligible_for_hash_quarantines_recent_failures` test (it is `updated_at`/`within`-based and will no longer compile). Follow that test's exact seeding style — `test_client()`, `servable_input(...)` + `upsert_servable_video_txn` to seed a missing row, raw SQL for the failure row. The `BEFORE UPDATE` trigger only touches `updated_at`, so a plain `UPDATE … SET next_retry_at = …` is fine here (unlike the earlier `updated_at` case).
 
 ```rust
 #[tokio::test]
 async fn eligibility_and_selection_respect_next_retry_at() {
-    let (_pg, client) = test_client_owned().await;
+    use phash::{HASH_KIND, HASH_VERSION};
+    let imv = crate::jobs::media_phash::INPUT_MEDIA_VERSION;
+    let (_pg, mut client) = test_client().await;
     crate::media_index::init_schema(&client).await.unwrap();
-    seed_missing_video(&client, "vid-due").await;   // missing canonical phash, no failure
 
-    // No failure → eligible + selected.
+    // missing canonical phash, no failure → eligible + selected
+    let tx = client.transaction().await.unwrap();
+    crate::media_index::upsert_servable_video_txn(&tx, servable_input("vid-due"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let missing_has = |c: &Client| async move {
+        super::videos_missing_canonical_phash(c, HASH_KIND, HASH_VERSION, imv, None, Some(100), None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.video_id == "vid-due")
+    };
+
     assert!(super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv).await.unwrap());
-    assert!(missing_contains(&client, "vid-due").await);
+    assert!(missing_has(&client).await);
 
-    // Failure backing off (next_retry_at in the FUTURE) → not eligible, not selected.
-    set_failure(&client, "vid-due", "now() + interval '1 hour'").await;
+    // failure backing off (next_retry_at FUTURE) → not eligible, not selected
+    client
+        .execute(
+            "INSERT INTO media_job_failures (job_kind, item_key, video_id, phase, last_error, next_retry_at)
+             VALUES ('media_phash','vid-due','vid-due','phash_download','x', now() + interval '1 hour')",
+            &[],
+        )
+        .await
+        .unwrap();
     assert!(!super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv).await.unwrap());
-    assert!(!missing_contains(&client, "vid-due").await);
+    assert!(!missing_has(&client).await);
 
-    // next_retry_at in the PAST (due) → eligible + selected again.
-    set_failure(&client, "vid-due", "now() - interval '1 minute'").await;
+    // next_retry_at PAST (due) → eligible + selected again
+    client
+        .execute(
+            "UPDATE media_job_failures SET next_retry_at = now() - interval '1 minute' WHERE video_id = 'vid-due'",
+            &[],
+        )
+        .await
+        .unwrap();
     assert!(super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv).await.unwrap());
-    assert!(missing_contains(&client, "vid-due").await);
+    assert!(missing_has(&client).await);
 }
 ```
-Helpers: `set_failure` UPSERTs a `media_job_failures` row with the given `next_retry_at` SQL; `missing_contains` calls `videos_missing_canonical_phash(.., None, Some(100), None)` and checks for the id. Note the new `any_eligible_for_hash` has **no** `failed_within` arg.
+The new `any_eligible_for_hash` has **no** `failed_within` arg. (If the closure borrow is awkward, inline the two `videos_missing_canonical_phash` calls.)
 
 - [ ] **Step 2: Run, verify fail to compile** (`any_eligible_for_hash` still takes the window arg)
 
@@ -408,26 +440,40 @@ git commit -m "feat: gate drain selection + eligibility on next_retry_at backoff
 
 - [ ] **Step 1: Write the failing test** (`src/jobs/media_phash.rs` tests)
 
+Model on the existing `successful_compute_writes_hash_row_…` test (same module): reuse `test_client()`, `init_test_schema()`, `seed_video()`, `insert_job_run()`, `make_run_id()`, `make_row()`, `make_hash_result()`. `PHashSummary` has **no** `Default` — use an explicit struct literal (copy the one in that test). Seed a prior failure with a raw INSERT (`job_run_id` defaults NULL — nullable FK, so no run needed for the failure row itself).
+
 ```rust
 #[tokio::test]
 async fn successful_hash_clears_prior_failure_row() {
-    let (_pg, mut client) = crate::media_index::test_support::test_client().await;
-    crate::media_index::init_schema(&client).await.unwrap();
-    // seed a servable row + a prior failure for it
-    seed_servable_storj_row(&client, "video-ok").await;
-    insert_phash_failure(&client, "video-ok", "earlier transient").await;
+    let (_pg, mut client) = test_client().await;
+    init_test_schema(&client).await;
+    seed_video(&client, "video-ok").await;
+    let job_run_id = make_run_id();
+    insert_job_run(&client, job_run_id, "test-runner").await.unwrap();
 
-    let row = make_missing_row("video-ok"); // MissingHashRow for video-ok
-    let mut summary = PHashSummary::default();
-    persist_one(&mut client, Uuid::new_v4(), &row, Ok(make_hash_result("ab12")), &mut summary)
+    client
+        .execute(
+            "INSERT INTO media_job_failures (job_kind, item_key, video_id, phase, last_error)
+             VALUES ('media_phash','video-ok','video-ok','phash_download','earlier transient')",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let row = make_row("video-ok");
+    let mut summary = PHashSummary {
+        job_run_id,
+        scanned_rows: 0,
+        hash_rows_upserted: 0,
+        hash_feed_events_appended: 0,
+        row_failures: 0,
+    };
+    persist_one(&mut client, job_run_id, &row, Ok(make_hash_result("1010101010")), &mut summary)
         .await
         .unwrap();
 
     let n: i64 = client
-        .query_one(
-            "SELECT count(*) FROM media_job_failures WHERE video_id = 'video-ok'",
-            &[],
-        )
+        .query_one("SELECT count(*) FROM media_job_failures WHERE video_id = 'video-ok'", &[])
         .await
         .unwrap()
         .get(0);
