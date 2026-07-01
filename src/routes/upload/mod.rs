@@ -38,9 +38,4 @@ impl UploadState {
             .map(NotificationClient::new),
         }
     }
-
-    /// True when neither side-effect client is configured (for a startup log).
-    pub fn is_fully_disabled(&self) -> bool {
-        self.events_service.is_none() && self.notification_client.is_none()
-    }
 }

@@ -262,10 +262,16 @@ async fn run_server() -> anyhow::Result<()> {
         builder.build().context("Failed to build IC agent")?
     };
     let upload = routes::upload::UploadState::from_env();
-    if upload.is_fully_disabled() {
+    if upload.events_service.is_none() {
         tracing::warn!(
-            "upload analytics + notifications disabled: OFFCHAIN_EVENTS_API_TOKEN / \
-             YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN not set (publishing still works)"
+            "OFFCHAIN_EVENTS_API_TOKEN not set — upload analytics events disabled \
+             (publishing still works)"
+        );
+    }
+    if upload.notification_client.is_none() {
+        tracing::warn!(
+            "YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN not set — push notifications \
+             disabled (publishing still works)"
         );
     }
 

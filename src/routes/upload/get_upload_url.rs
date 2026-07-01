@@ -32,8 +32,14 @@ pub struct GetUploadUrlResp {
 }
 
 /// Build `{base}/duplicate_raw/upload?publisher_user_id=&video_id=&is_nsfw=` with
-/// URL-encoded params (S16). Pure — unit tested.
-fn build_upload_url(base: &str, publisher_user_id: &str, video_id: &str, is_nsfw: bool) -> String {
+/// URL-encoded params (S16). Pure — unit tested. `pub(crate)` so the videogen
+/// upload-refresh path can re-issue a URL for an EXISTING video_id.
+pub(crate) fn build_upload_url(
+    base: &str,
+    publisher_user_id: &str,
+    video_id: &str,
+    is_nsfw: bool,
+) -> String {
     let mut url = Url::parse(&format!(
         "{}/duplicate_raw/upload",
         base.trim_end_matches('/')

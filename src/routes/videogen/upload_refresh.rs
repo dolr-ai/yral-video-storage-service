@@ -287,15 +287,11 @@ pub async fn refresh_upload_url(
 
 struct RuntimeUploadRefreshDeps {
     config: VideogenConfig,
-    ic_agent: ic_agent::Agent,
 }
 
 impl RuntimeUploadRefreshDeps {
-    fn new(state: AppState, config: VideogenConfig) -> Self {
-        Self {
-            config,
-            ic_agent: state.ic_agent,
-        }
+    fn new(_state: AppState, config: VideogenConfig) -> Self {
+        Self { config }
     }
 }
 
@@ -325,30 +321,42 @@ impl UploadRefreshDeps for RuntimeUploadRefreshDeps {
         video_id: &str,
         object_key: &str,
     ) -> Result<UploadDestination, String> {
-        use chrono::Duration;
-
-        // In-process (Phase 2.5): mint a fresh upload URL via the merged get-upload-url
-        // logic instead of POSTing to upload.yral.com. Publisher resolves from the
-        // request key's principal. The caller's video_id/object_key are preserved in
-        // the returned destination (unchanged from the prior HTTP behavior).
+        // In-process (Phase 2.5): re-issue a fresh signed upload URL for the SAME
+        // video_id (refresh must reuse the existing object — not mint a new one, or
+        // the re-upload would land at a different key than the pipeline tracks).
+        // Publisher = request key's principal.
         let base = std::env::var(crate::consts::PUBLIC_BASE_URL)
             .map_err(|_| "PUBLIC_BASE_URL not set".to_string())?;
-        let resp = crate::routes::upload::get_upload_url::get_upload_url_core(
-            &self.ic_agent,
+        Ok(build_refresh_destination(
             &base,
             &request_key.principal,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+            video_id,
+            object_key,
+            self.config.upload_url_ttl_secs as i64,
+        ))
+    }
+}
 
-        Ok(UploadDestination {
-            video_id: video_id.to_string(),
-            object_key: object_key.to_string(),
-            upload_url: resp.upload_url,
-            expires_at: Utc::now() + Duration::seconds(self.config.upload_url_ttl_secs as i64),
-            bucket_url: None,
-            encrypted_identity: None,
-        })
+/// Build a refresh `UploadDestination` whose `upload_url` targets the SAME `video_id`
+/// it returns. Pure (no env, no canister). Regression guard: the returned `video_id`
+/// and the `video_id` embedded in `upload_url` are built from one arg, so they can't
+/// diverge (the original bug returned the old id with a fresh-UUID URL).
+fn build_refresh_destination(
+    base: &str,
+    publisher: &str,
+    video_id: &str,
+    object_key: &str,
+    ttl_secs: i64,
+) -> UploadDestination {
+    UploadDestination {
+        video_id: video_id.to_string(),
+        object_key: object_key.to_string(),
+        upload_url: crate::routes::upload::get_upload_url::build_upload_url(
+            base, publisher, video_id, false,
+        ),
+        expires_at: Utc::now() + chrono::Duration::seconds(ttl_secs),
+        bucket_url: None,
+        encrypted_identity: None,
     }
 }
 
@@ -364,6 +372,19 @@ mod tests {
     use axum::http::header::HeaderValue;
     use chrono::Utc;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn refresh_destination_url_matches_returned_video_id() {
+        // Regression guard for the original bug: refresh returned the original
+        // video_id but a URL for a freshly-minted UUID. They must always match.
+        let d = build_refresh_destination("https://x.test", "principal-abc", "vid-ABC", "obj", 900);
+        assert_eq!(d.video_id, "vid-ABC");
+        assert!(
+            d.upload_url.contains("video_id=vid-ABC"),
+            "upload_url must embed the returned video_id: {}",
+            d.upload_url
+        );
+    }
 
     const TEST_KEY_SPEC: &str = "v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
