@@ -8,6 +8,7 @@ services:
       SERVER_1_IP: "${SERVER_1_IP}"
       SERVER_2_IP: "${SERVER_2_IP}"
       SERVER_3_IP: "${SERVER_3_IP}"
+      POSTGRES_READONLY_ALLOWLIST: "${POSTGRES_READONLY_ALLOWLIST:-}"
     volumes:
       - ./scripts/server/apply-firewall.sh:/apply-firewall.sh:ro
     command: sh -c "apk add --no-cache iptables ip6tables && sh /apply-firewall.sh"
@@ -137,6 +138,13 @@ services:
       PHASH_CONCURRENCY: ${PHASH_CONCURRENCY:-6}
       MIRROR_CONCURRENCY: ${MIRROR_CONCURRENCY:-30}
       SCAN_PAGE_SIZE: ${SCAN_PAGE_SIZE:-1000}
+      # Steady-state sweep worker. Ships disabled; single-runner via the DB lease.
+      # NODE_NAME is the worker's stable per-box identity (survives redeploys).
+      RUN_SWEEP_WORKER: ${RUN_SWEEP_WORKER:-false}
+      DRAIN_INTERVAL_SECS: ${DRAIN_INTERVAL_SECS:-180}
+      DISCOVERY_INTERVAL_SECS: ${DISCOVERY_INTERVAL_SECS:-86400}
+      SWEEP_LEASE_TTL_SECS: ${SWEEP_LEASE_TTL_SECS:-120}
+      NODE_NAME: ${NODE_NAME}
     restart: always
 
 volumes:

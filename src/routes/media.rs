@@ -492,6 +492,62 @@ pub async fn media_jobs_runs(
     Ok(Json(JobRunsResponse { runs }))
 }
 
+/// Liveness view of the steady-state sweep worker's lease.
+#[derive(Serialize, ToSchema)]
+pub struct SweepStatusView {
+    /// Lease owner (the box currently running the sweep worker); null if no lease yet.
+    pub owner: Option<String>,
+    /// RFC3339 UTC last heartbeat. A stale heartbeat means the worker is dead/not running.
+    pub heartbeat: Option<String>,
+    /// RFC3339 UTC time of the last discovery full-scan; null if discovery never ran.
+    pub last_discovery_at: Option<String>,
+}
+
+/// Report the steady-state sweep worker's lease state (owner + heartbeat + last discovery).
+///
+/// This is the liveness signal for the unattended worker: a fresh `heartbeat` from an
+/// `owner` means coverage maintenance is running on that box. Aggregates the whole fleet
+/// (the lease is a single shared-DB row), so one call answers "is it running, and where".
+#[utoipa::path(
+    get,
+    path = "/media/sweep/status",
+    tag = "media",
+    responses(
+        (status = 200, description = "Sweep worker lease/liveness", body = SweepStatusView),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
+pub async fn media_sweep_status(
+    State(state): State<AppState>,
+) -> Result<Json<SweepStatusView>, StatusCode> {
+    let client = db::connect(&state.db_url)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let lease = media_index::read_lease(&client)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(sweep_status_view(lease)))
+}
+
+/// Map an optional `LeaseRow` to its HTTP view (timestamps → RFC3339).
+pub fn sweep_status_view(lease: Option<crate::media_index::LeaseRow>) -> SweepStatusView {
+    match lease {
+        Some(l) => SweepStatusView {
+            owner: Some(l.owner),
+            heartbeat: Some(l.heartbeat.to_rfc3339()),
+            last_discovery_at: l.last_discovery_at.map(|t| t.to_rfc3339()),
+        },
+        None => SweepStatusView {
+            owner: None,
+            heartbeat: None,
+            last_discovery_at: None,
+        },
+    }
+}
+
 /// Summarise media job failures grouped by phase, with sample error messages.
 ///
 /// Optionally filter by `job_kind`. Returns at most `limit` groups (default 20, max 100).
@@ -830,6 +886,26 @@ mod tests {
         assert_eq!(v.status, "running");
         assert!(v.started_at.contains('T')); // rfc3339
         assert!(v.finished_at.is_none());
+    }
+
+    #[test]
+    fn sweep_status_view_maps_lease_and_none() {
+        // No lease -> all fields None.
+        let empty = super::sweep_status_view(None);
+        assert!(empty.owner.is_none());
+        assert!(empty.heartbeat.is_none());
+        assert!(empty.last_discovery_at.is_none());
+
+        // A held lease with no discovery yet -> owner/heartbeat present, discovery None.
+        let lease = crate::media_index::LeaseRow {
+            owner: "server_1".into(),
+            heartbeat: chrono::Utc::now(),
+            last_discovery_at: None,
+        };
+        let v = super::sweep_status_view(Some(lease));
+        assert_eq!(v.owner.as_deref(), Some("server_1"));
+        assert!(v.heartbeat.unwrap().contains('T')); // rfc3339
+        assert!(v.last_discovery_at.is_none());
     }
 
     /// The import running flag prevents two concurrent imports and returns 409.

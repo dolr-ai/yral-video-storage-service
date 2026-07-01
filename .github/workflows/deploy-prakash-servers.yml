@@ -130,10 +130,31 @@ jobs:
       VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD: ${{ secrets.VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD }}
       VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64: ${{ secrets.VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64 }}
       VIDEOGEN_SERVICE_AUTH_TOKEN: ${{ secrets.VIDEOGEN_SERVICE_AUTH_TOKEN }}
+      # Space-separated public CIDRs allowed to reach Postgres :15432 as readonly clients.
+      # Editable repo variable (empty default → firewall no-op). Set in repo Settings → Variables.
+      POSTGRES_READONLY_ALLOWLIST: ${{ vars.POSTGRES_READONLY_ALLOWLIST }}
+      # Steady-state sweep worker on/off. Editable repo variable (default "false" = disabled).
+      # Flip to "true" in repo Settings → Variables + redeploy to enable; lease elects one runner.
+      RUN_SWEEP_WORKER: ${{ vars.RUN_SWEEP_WORKER || 'false' }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Validate readonly allowlist format
+        run: |
+          ALLOW="${POSTGRES_READONLY_ALLOWLIST}"
+          if [ -z "$ALLOW" ]; then
+            echo "readonly allowlist empty → firewall stays cluster-only"; exit 0
+          fi
+          case "$ALLOW" in
+            *,*) echo "::error::POSTGRES_READONLY_ALLOWLIST must be space-separated, not commas"; exit 1 ;;
+          esac
+          for cidr in $ALLOW; do
+            echo "$cidr" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[12][0-9]|3[0-2]))?$' \
+              || { echo "::error::invalid CIDR/IP in POSTGRES_READONLY_ALLOWLIST: '$cidr'"; exit 1; }
+          done
+          echo "readonly allowlist OK: $ALLOW"
 
       - name: Setup SSH
         run: |
@@ -202,6 +223,10 @@ jobs:
                 export YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN='${YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN}'; \
                 export PUBLIC_BASE_URL='https://storage-interface.prakash.yral.com'; \
                 export PHASH_CONCURRENCY='4'; \
+                export RUN_SWEEP_WORKER='${RUN_SWEEP_WORKER}'; \
+                export DRAIN_INTERVAL_SECS='180'; \
+                export DISCOVERY_INTERVAL_SECS='86400'; \
+                export SWEEP_LEASE_TTL_SECS='120'; \
                 export ENVIRONMENT='production';"
             fi
 
@@ -219,6 +244,7 @@ jobs:
                export APP_IMAGE='ghcr.io/${{ env.IMAGE_NAME }}'; \
                export RUN_APP='${RUN_APP}'; \
                export HOST_PORT='${HOST_PORT}'; \
+               export POSTGRES_READONLY_ALLOWLIST='${POSTGRES_READONLY_ALLOWLIST}'; \
                ${APP_VARS} \
                echo '${GITHUB_TOKEN}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin && \
                bash '${APP_DIR}/deploy/scripts/deploy/deploy-ha.sh'"
@@ -257,4 +283,4 @@ jobs:
           echo "**Image:** ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "**URL:** ${{ env.PREVIEW_URL }}" >> $GITHUB_STEP_SUMMARY
           echo "**Nodes:** server_1 (${{ env.SERVER_1_IP }}), server_2 (${{ env.SERVER_2_IP }}), server_3 (${{ env.SERVER_3_IP }})" >> $GITHUB_STEP_SUMMARY
-          echo "**App:** all 3 nodes (port ${{ env.HOST_PORT }}); public domain on server_1 only; PHASH_CONCURRENCY=4" >> $GITHUB_STEP_SUMMARY
+          echo "**App:** all 3 nodes (port ${{ env.HOST_PORT }}); public domain on server_1 only; PHASH_CONCURRENCY=4; RUN_SWEEP_WORKER=${{ vars.RUN_SWEEP_WORKER || 'false' }} (repo variable)" >> $GITHUB_STEP_SUMMARY

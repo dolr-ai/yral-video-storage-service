@@ -32,6 +32,14 @@ pub struct MediaJobsStatus {
     pub phash_running: bool,
 }
 
+/// Liveness view of the steady-state sweep worker's lease.
+#[derive(Debug, serde::Deserialize)]
+pub struct SweepStatus {
+    pub owner: Option<String>,
+    pub heartbeat: Option<String>,
+    pub last_discovery_at: Option<String>,
+}
+
 /// A single event from the media feed.
 #[derive(Debug, serde::Deserialize)]
 pub struct MediaFeedEvent {
@@ -520,6 +528,28 @@ impl MirrorClient {
 
         match resp.status().as_u16() {
             200 => Ok(resp.json::<MediaJobsStatus>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Get the steady-state sweep worker lease state (owner + heartbeat + last discovery).
+    pub async fn media_sweep(&self) -> Result<SweepStatus, MirrorError> {
+        let path = "/media/sweep/status";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<SweepStatus>().await?),
             401 | 403 => Err(MirrorError::Unauthorized),
             status => {
                 let body = resp.text().await.unwrap_or_default();

@@ -401,6 +401,16 @@ pub struct MissingHashRow {
 /// MUST advance this cursor past the last row of each batch; otherwise a row
 /// that never gets a hash (e.g. a permanent compute failure) stays "missing"
 /// and would be re-fetched forever.
+/// Shared SQL predicate: video `v` has no failure row currently backing off
+/// (`next_retry_at` in the future). Used by BOTH the drain selection
+/// ([`videos_missing_canonical_phash`]) and the eligibility gate
+/// ([`any_eligible_for_hash`]) so the two cannot diverge. Requires the outer
+/// query to alias `all_servable_videos_on_yral` as `v`. A NULL `next_retry_at`
+/// (e.g. legacy failure rows written before backoff existed) counts as due.
+const NOT_BACKING_OFF: &str = "NOT EXISTS (\
+    SELECT 1 FROM media_job_failures f \
+    WHERE f.video_id = v.video_id AND f.next_retry_at > now())";
+
 pub async fn videos_missing_canonical_phash(
     client: &Client,
     hash_kind: &str,
@@ -414,7 +424,8 @@ pub async fn videos_missing_canonical_phash(
         Some((of, idx)) => (Some(of), Some(idx)),
         None => (None, None),
     };
-    let base = "SELECT v.video_id, v.storage_provider, v.object_key, v.servable_status, v.bucket
+    let base = format!(
+        "SELECT v.video_id, v.storage_provider, v.object_key, v.servable_status, v.bucket
                 FROM all_servable_videos_on_yral v
                 LEFT JOIN servable_video_hashes h
                    ON h.video_id = v.video_id
@@ -423,7 +434,9 @@ pub async fn videos_missing_canonical_phash(
                   AND ($4::TEXT IS NULL OR v.video_id > $4)
                   AND ($5::BIGINT IS NULL
                        OR (((hashtext(v.video_id)::bigint % $5) + $5) % $5) = $6)
-                ORDER BY v.video_id";
+                  AND {NOT_BACKING_OFF}
+                ORDER BY v.video_id"
+    );
     let rows = if let Some(limit) = limit {
         client
             .query(
@@ -442,7 +455,7 @@ pub async fn videos_missing_canonical_phash(
     } else {
         client
             .query(
-                base,
+                &base,
                 &[
                     &hash_kind,
                     &hash_version,
@@ -504,6 +517,40 @@ pub async fn canonical_phash_coverage(
         with_canonical_phash: row.get(1),
         missing_canonical_phash: row.get(2),
     })
+}
+
+/// Returns true iff there is at least one servable video that is MISSING a canonical
+/// pHash AND is not currently backing off (no failure row with `next_retry_at` in the
+/// future — see [`NOT_BACKING_OFF`]). The backoff anti-join keeps the steady-state
+/// worker from re-downloading a permanently-dead row every tick (it backs off to the
+/// 24h cap) while still letting a fresh transient failure retry within minutes — and
+/// avoids inserting an empty `media_job_runs` row each idle pass. Short-circuits via
+/// `EXISTS … LIMIT 1`, far cheaper than a full `COUNT(*)` over the whole servable set.
+pub async fn any_eligible_for_hash(
+    client: &Client,
+    hash_kind: &str,
+    hash_version: &str,
+    input_media_version: &str,
+) -> Result<bool, tokio_postgres::Error> {
+    // Mirror of the drain selection in `videos_missing_canonical_phash`: a row is
+    // eligible iff it is missing the canonical hash AND is not currently backing
+    // off. Shares `NOT_BACKING_OFF` so the gate and the selection cannot diverge.
+    let sql = format!(
+        "SELECT EXISTS (
+               SELECT 1
+               FROM all_servable_videos_on_yral v
+               LEFT JOIN servable_video_hashes h
+                 ON h.video_id = v.video_id
+                AND h.hash_kind = $1 AND h.hash_version = $2 AND h.input_media_version = $3
+               WHERE h.video_id IS NULL
+                 AND {NOT_BACKING_OFF}
+               LIMIT 1
+             ) AS eligible"
+    );
+    let row = client
+        .query_one(&sql, &[&hash_kind, &hash_version, &input_media_version])
+        .await?;
+    Ok(row.get("eligible"))
 }
 
 /// A single row from `media_job_runs`, returned by [`recent_job_runs`].
@@ -681,11 +728,261 @@ pub async fn find_exact_duplicates(
         .collect())
 }
 
+/// A snapshot of the single-row `sweep_lease` election lease (`id = 1`),
+/// returned by [`read_lease`].
+#[derive(Debug, Clone)]
+pub struct LeaseRow {
+    pub owner: String,
+    pub heartbeat: chrono::DateTime<chrono::Utc>,
+    pub last_discovery_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Atomically acquire the `sweep_lease` for `owner`, or renew it if `owner`
+/// already holds it, or steal it if the current holder's heartbeat is older
+/// than `ttl`.
+///
+/// Implemented as a single `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`
+/// statement (one txn) so it is safe under pgbouncer transaction pooling — no
+/// multi-statement session state is required.
+///
+/// Returns `Ok(true)` iff `owner` now holds the lease. When the row exists with
+/// a *different, fresh* owner, the conditional `UPDATE` is skipped, no row is
+/// returned, and this returns `Ok(false)` ("another box holds it, skip").
+pub async fn acquire_or_renew_lease(
+    client: &Client,
+    owner: &str,
+    ttl: std::time::Duration,
+) -> Result<bool, tokio_postgres::Error> {
+    let row = client
+        .query_opt(
+            "INSERT INTO sweep_lease (id, owner, heartbeat) VALUES (1, $1, now())
+             ON CONFLICT (id) DO UPDATE
+                SET owner = $1, heartbeat = now()
+                WHERE sweep_lease.owner = $1
+                   OR sweep_lease.heartbeat < now() - ($2::double precision * interval '1 second')
+             RETURNING owner",
+            &[&owner, &(ttl.as_secs_f64())],
+        )
+        .await?;
+    Ok(row.is_some())
+}
+
+/// Release the `sweep_lease` iff it is currently held by `owner`.
+///
+/// Deletes the `id = 1` row only when `owner` matches, so a box can never
+/// release a lease that another box has since stolen.
+pub async fn release_lease(client: &Client, owner: &str) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute(
+            "DELETE FROM sweep_lease WHERE id = 1 AND owner = $1",
+            &[&owner],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Read the current `sweep_lease` row (`id = 1`), or `None` if unheld.
+pub async fn read_lease(client: &Client) -> Result<Option<LeaseRow>, tokio_postgres::Error> {
+    let row = client
+        .query_opt(
+            "SELECT owner, heartbeat, last_discovery_at FROM sweep_lease WHERE id = 1",
+            &[],
+        )
+        .await?;
+    Ok(row.map(|r| LeaseRow {
+        owner: r.get(0),
+        heartbeat: r.get(1),
+        last_discovery_at: r.get(2),
+    }))
+}
+
+/// Read `last_discovery_at` from the `sweep_lease` row (`id = 1`).
+///
+/// Returns `None` when there is no lease row OR the column is `NULL`.
+pub async fn get_last_discovery_at(
+    client: &Client,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, tokio_postgres::Error> {
+    let row = client
+        .query_opt(
+            "SELECT last_discovery_at FROM sweep_lease WHERE id = 1",
+            &[],
+        )
+        .await?;
+    Ok(row.and_then(|r| r.get(0)))
+}
+
+/// Record the timestamp of the most recent discovery sweep on the
+/// `sweep_lease` row (`id = 1`).
+pub async fn set_last_discovery_at(
+    client: &Client,
+    owner: &str,
+    ts: chrono::DateTime<chrono::Utc>,
+) -> Result<(), tokio_postgres::Error> {
+    // Owner-guarded: only the current lease holder advances the cadence. Prevents a
+    // box that lost the lease mid-cycle (e.g. a transient renew failure → peer steal)
+    // from fast-forwarding `last_discovery_at` on the new owner and suppressing its
+    // discovery for a full interval. A 0-row update is benign (next pass self-corrects).
+    client
+        .execute(
+            "UPDATE sweep_lease SET last_discovery_at = $1 WHERE id = 1 AND owner = $2",
+            &[&ts, &owner],
+        )
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
+    use super::{acquire_or_renew_lease, get_last_discovery_at, read_lease, set_last_discovery_at};
     use crate::media_index::test_support::test_client;
+
+    #[tokio::test]
+    async fn lease_single_owner_and_steal_after_ttl() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+
+        let ttl = std::time::Duration::from_secs(60);
+        assert!(
+            acquire_or_renew_lease(&client, "box-a", ttl).await.unwrap(),
+            "first acquire"
+        );
+        assert!(
+            !acquire_or_renew_lease(&client, "box-b", ttl).await.unwrap(),
+            "fresh foreign lease -> skip"
+        );
+        assert!(
+            acquire_or_renew_lease(&client, "box-a", ttl).await.unwrap(),
+            "owner renews own"
+        );
+
+        // Simulate staleness: backdate heartbeat beyond ttl.
+        client
+            .execute(
+                "UPDATE sweep_lease SET heartbeat = now() - interval '120 seconds' WHERE id = 1",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            acquire_or_renew_lease(&client, "box-b", ttl).await.unwrap(),
+            "stale lease stolen"
+        );
+        let lease = read_lease(&client).await.unwrap().unwrap();
+        assert_eq!(lease.owner, "box-b");
+    }
+
+    #[tokio::test]
+    async fn last_discovery_at_roundtrip() {
+        let (_pg, client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+        acquire_or_renew_lease(&client, "box-a", std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(get_last_discovery_at(&client).await.unwrap().is_none());
+        let now = chrono::Utc::now();
+        // owner-guarded: matches the lease owner from the acquire above
+        set_last_discovery_at(&client, "box-a", now).await.unwrap();
+        // a non-owner update is a no-op (owner guard)
+        set_last_discovery_at(
+            &client,
+            "intruder",
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        )
+        .await
+        .unwrap();
+        let got = get_last_discovery_at(&client).await.unwrap().unwrap();
+        assert!((got - now).num_seconds().abs() < 2);
+    }
+
+    #[tokio::test]
+    async fn eligibility_and_selection_respect_next_retry_at() {
+        use phash::{HASH_KIND, HASH_VERSION};
+        let imv = crate::jobs::media_phash::INPUT_MEDIA_VERSION;
+        let (_pg, mut client) = test_client().await;
+        crate::media_index::init_schema(&client).await.unwrap();
+
+        // Empty set: nothing eligible.
+        assert!(
+            !super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv)
+                .await
+                .unwrap(),
+            "no servable rows -> not eligible"
+        );
+
+        // Missing (unhashed) servable row, no failure → eligible AND selected.
+        let tx = client.transaction().await.unwrap();
+        crate::media_index::upsert_servable_video_txn(&tx, servable_input("vid-due"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(
+            super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv)
+                .await
+                .unwrap(),
+            "missing + no failure -> eligible"
+        );
+        assert!(
+            missing_has(&client, "vid-due").await,
+            "no failure -> selected"
+        );
+
+        // Failure backing off (next_retry_at in the FUTURE) → not eligible, not selected.
+        client
+            .execute(
+                "INSERT INTO media_job_failures (job_kind, item_key, video_id, phase, last_error, next_retry_at)
+                 VALUES ('media_phash','vid-due','vid-due','phash_download','x', now() + interval '1 hour')",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            !super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv)
+                .await
+                .unwrap(),
+            "backing off -> not eligible"
+        );
+        assert!(
+            !missing_has(&client, "vid-due").await,
+            "backing off -> not selected"
+        );
+
+        // next_retry_at in the PAST (due) → eligible AND selected again. (The BEFORE UPDATE
+        // trigger only touches updated_at, so updating next_retry_at directly is fine.)
+        client
+            .execute(
+                "UPDATE media_job_failures SET next_retry_at = now() - interval '1 minute' WHERE video_id = 'vid-due'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            super::any_eligible_for_hash(&client, HASH_KIND, HASH_VERSION, imv)
+                .await
+                .unwrap(),
+            "due -> eligible"
+        );
+        assert!(missing_has(&client, "vid-due").await, "due -> selected");
+    }
+
+    async fn missing_has(client: &tokio_postgres::Client, vid: &str) -> bool {
+        use phash::{HASH_KIND, HASH_VERSION};
+        let imv = crate::jobs::media_phash::INPUT_MEDIA_VERSION;
+        super::videos_missing_canonical_phash(
+            client,
+            HASH_KIND,
+            HASH_VERSION,
+            imv,
+            None,
+            Some(100),
+            None,
+        )
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.video_id == vid)
+    }
 
     #[tokio::test]
     async fn update_job_run_totals_reflects_progress_before_completion() {

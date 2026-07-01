@@ -129,6 +129,10 @@ pub trait CompletionDeps: Send + Sync {
     ) -> Result<(), String>;
 
     async fn create_draft(&self, request: DraftCreationRequest) -> Result<(), DraftServiceError>;
+
+    /// Register a completed video into the master table for steady-state pHash.
+    /// Best-effort; default no-op so test fakes need no change.
+    async fn register_ingested(&self, _video_id: &str, _bucket_url: &str) {}
 }
 
 // ─── Core logic (testable) ───────────────────────────────────────────────────
@@ -239,6 +243,9 @@ async fn handle_success_completion<D: CompletionDeps>(
     if let Err(e) = deps.mark_rate_limit_complete(request_key, bucket_url).await {
         tracing::warn!("mark_rate_limit_complete failed (best-effort): {e}");
     }
+
+    // Register into master table for steady-state pHash (best-effort; swallows its own errors)
+    deps.register_ingested(video_id, bucket_url).await;
 
     tracing::info!(
         principal = %request_key.principal,
@@ -426,8 +433,9 @@ pub async fn complete_video(
 
 struct RuntimeCompletionDeps {
     config: VideogenConfig,
-    // Hold the whole AppState: the rate-limiter calls need `ic_agent`, and the
-    // in-process draft client (Phase 2) needs the shared agent + upload deps.
+    // Hold the whole AppState: the rate-limiter calls need `ic_agent`, the in-process
+    // draft client (Phase 2) needs the shared agent + upload deps, and register_ingested
+    // (steady-state pHash) needs `db_url`.
     state: AppState,
 }
 
@@ -548,6 +556,10 @@ impl CompletionDeps for RuntimeCompletionDeps {
         )
         .create_draft(request)
         .await
+    }
+
+    async fn register_ingested(&self, video_id: &str, bucket_url: &str) {
+        crate::jobs::ingest::on_video_ingested(&self.state.db_url, video_id, bucket_url).await;
     }
 }
 

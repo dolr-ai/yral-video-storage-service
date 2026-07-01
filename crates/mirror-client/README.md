@@ -46,6 +46,7 @@ Operate the media-ownership subsystem (canonical master table + pHash + feed out
 | `media-cancel` | Cancel the running media jobs (import + pHash) | No | — |
 | `media-status` | Show whether the media import / pHash jobs are running | No | — |
 | `media-audit` | pHash coverage: `total_servable` / `with_canonical_phash` / `missing` | No | — |
+| `media-sweep` | Steady-state sweep worker liveness: lease `owner` / `heartbeat` / `last_discovery_at` | No | — |
 | `media-feed` | Page the denormalized media outbox feed (`cursor > after`) | No | `--after N`, `--limit N` |
 | `media-runs` | Recent media job runs with live totals (scanned/failed) — derive rate/ETA | No | `--job-kind K`, `--limit N` |
 | `media-failures` | Failure summary grouped by phase, with counts + sample errors | No | `--job-kind K`, `--limit N` |
@@ -109,6 +110,9 @@ set -a && source .env && set +a && cargo run -p mirror-client -- media-phash --s
 set -a && source .env && set +a && cargo run -p mirror-client -- media-audit
 set -a && source .env && set +a && cargo run -p mirror-client -- media-runs --job-kind media_phash
 set -a && source .env && set +a && cargo run -p mirror-client -- media-failures --job-kind media_phash
+
+# Steady-state sweep worker liveness (which box holds the lease + last heartbeat/discovery)
+set -a && source .env && set +a && cargo run -p mirror-client -- media-sweep
 
 # Cancel the running media jobs
 set -a && source .env && set +a && cargo run -p mirror-client -- media-cancel

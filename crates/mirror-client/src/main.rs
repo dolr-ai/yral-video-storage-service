@@ -24,6 +24,7 @@ Commands:
   media-cancel         Cancel any running media import / phash jobs
   media-status         Show running status of media import and phash jobs
   media-audit          Show pHash coverage stats for servable videos
+  media-sweep          Show steady-state sweep worker lease (owner/heartbeat/last discovery)
   media-feed           Stream events from the media feed [--after CURSOR] [--limit N]
   media-runs           List recent job runs [--job-kind KIND] [--limit N]
   media-failures       List failure groups [--job-kind KIND] [--limit N]
@@ -349,6 +350,24 @@ async fn main() {
                 println!("total_servable:         {}", r.total_servable);
                 println!("with_canonical_phash:   {}", r.with_canonical_phash);
                 println!("missing_canonical_phash:{}", r.missing_canonical_phash);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "media-sweep" => match client.media_sweep().await {
+            Ok(s) => {
+                println!(
+                    "owner:             {}",
+                    s.owner.as_deref().unwrap_or("<none>")
+                );
+                println!(
+                    "heartbeat:         {}",
+                    s.heartbeat.as_deref().unwrap_or("<none>")
+                );
+                println!(
+                    "last_discovery_at: {}",
+                    s.last_discovery_at.as_deref().unwrap_or("<never>")
+                );
                 Ok(())
             }
             Err(e) => Err(e),

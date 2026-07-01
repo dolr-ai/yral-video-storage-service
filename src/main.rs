@@ -95,6 +95,7 @@ pub(crate) struct AppState {
         routes::media::media_jobs_status,
         routes::media::media_jobs_runs,
         routes::media::media_jobs_failures,
+        routes::media::media_sweep_status,
         routes::videogen::drafts::get_in_progress_drafts,
         routes::videogen::generate::generate_video,
         routes::videogen::providers::get_providers,
@@ -291,6 +292,29 @@ async fn run_server() -> anyhow::Result<()> {
         upload,
     };
 
+    // Steady-state sweep worker (leased; single-runner across boxes). Ships disabled
+    // via RUN_SWEEP_WORKER; enabling on all 3 boxes is safe because the DB lease elects
+    // exactly one. `me` = NODE_NAME (stable per box across redeploys) so a restart
+    // re-adopts its own lease without waiting a TTL.
+    if consts::run_sweep_worker() {
+        let me = std::env::var("NODE_NAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| format!("sweep-{}", uuid::Uuid::new_v4()));
+        let worker = jobs::worker::SweepWorker {
+            s3: app_state.s3_client.clone(),
+            storj: app_state.storj_client.clone(),
+            db_url: app_state.db_url.clone(),
+            drain_flag: app_state.job_media_phash_running.clone(),
+            import_flag: app_state.job_media_import_running.clone(),
+            media_cancel: app_state.media_job_cancel.clone(),
+            me,
+            drain_interval: std::time::Duration::from_secs(consts::drain_interval_secs()),
+            discovery_interval: std::time::Duration::from_secs(consts::discovery_interval_secs()),
+            lease_ttl: std::time::Duration::from_secs(consts::sweep_lease_ttl_secs()),
+        };
+        tokio::spawn(worker.run(cancel.clone()));
+    }
+
     // Configure CORS to allow cross-origin requests
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -472,6 +496,12 @@ async fn run_server() -> anyhow::Result<()> {
         .route(
             "/media/jobs/failures",
             get(routes::media::media_jobs_failures)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/sweep/status",
+            get(routes::media::media_sweep_status)
                 .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
         )
