@@ -65,8 +65,8 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 candid = "0.10.6"
 ic-agent = "0.41.0"
 k256 = { version = "0.13.3", features = ["jwk"] }
-yral-canisters-client = { git = "https://github.com/dolr-ai/yral-common.git", branch = "master", features = ["full"] }
-yral-types = { git = "https://github.com/dolr-ai/yral-common", branch = "master" }
+yral-canisters-client = { git = "https://github.com/dolr-ai/yral-common.git", branch = "main", features = ["full"] }
+yral-types = { git = "https://github.com/dolr-ai/yral-common", branch = "main" }
 stringreader = "0.1.1"
 lapin = { version = "4", default-features = false, features = ["rustls--ring", "tokio"] }
 # Activate tcp-stream's async TLS path (rustls-futures) which lapin's rustls--ring feature omits.

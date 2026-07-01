@@ -57,6 +57,10 @@ pub(crate) struct AppState {
     pub media_job_cancel: Arc<Mutex<CancellationToken>>,
     pub job_media_phash_running: Arc<AtomicBool>,
     pub ic_agent: Agent,
+    /// Optional best-effort upload side-effect clients (offchain events + push
+    /// notifications). Each is independently `None` when its token is unset; the
+    /// core publish flow works regardless.
+    pub upload: routes::upload::UploadState,
 }
 
 #[derive(OpenApi)]
@@ -257,6 +261,20 @@ async fn run_server() -> anyhow::Result<()> {
         }
         builder.build().context("Failed to build IC agent")?
     };
+    let upload = routes::upload::UploadState::from_env();
+    if upload.events_service.is_none() {
+        tracing::warn!(
+            "OFFCHAIN_EVENTS_API_TOKEN not set — upload analytics events disabled \
+             (publishing still works)"
+        );
+    }
+    if upload.notification_client.is_none() {
+        tracing::warn!(
+            "YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN not set — push notifications \
+             disabled (publishing still works)"
+        );
+    }
+
     let cancel = CancellationToken::new();
     let job_cancel = CancellationToken::new();
 
@@ -277,6 +295,7 @@ async fn run_server() -> anyhow::Result<()> {
         media_job_cancel: Arc::new(Mutex::new(CancellationToken::new())),
         job_media_phash_running: Arc::new(AtomicBool::new(false)),
         ic_agent,
+        upload,
     };
 
     // Steady-state sweep worker (leased; single-runner across boxes). Ships disabled
@@ -329,6 +348,22 @@ async fn run_server() -> anyhow::Result<()> {
         .route(
             "/duplicate_raw/finalize",
             post(routes::duplicate::handler_raw_finalize).with_state(app_state.clone()),
+        )
+        // Upload-service routes (merged in). PUBLIC — no `authorize` layer; auth is the
+        // in-body chain-verified delegated identity. Small JSON bodies → default 2MB limit.
+        .route(
+            "/get-upload-url",
+            post(routes::upload::get_upload_url::get_upload_url).with_state(app_state.clone()),
+        )
+        .route(
+            "/update-video-metadata",
+            post(routes::upload::update_video_metadata::update_video_metadata)
+                .with_state(app_state.clone()),
+        )
+        .route(
+            "/mark-post-as-published",
+            post(routes::upload::mark_post_as_published::mark_post_as_published)
+                .with_state(app_state.clone()),
         )
         // NOTE: This will be removed as the upload happens in the very end of the pipeline and nsfw flag is passed into duplicate
         .route(

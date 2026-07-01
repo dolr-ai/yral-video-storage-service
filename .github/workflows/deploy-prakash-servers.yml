@@ -173,6 +173,7 @@ jobs:
             secret/data/yral-video-storage-service/BACKEND_ADMIN_IDENTITY value | BACKEND_ADMIN_IDENTITY ;
             secret/data/yral-video-storage-service/INTERNAL_ENCRYPTION_SECRET value | INTERNAL_ENCRYPTION_SECRET ;
             secret/data/yral-video-storage-service/MODERATION_HMAC_SECRET value | MODERATION_HMAC_SECRET ;
+            secret/data/yral-video-storage-service/YRAL_METADATA_USER_NOTIFICATION_API_KEY value | YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN ;
 
       - name: Deploy HA to all nodes
         run: |
@@ -219,6 +220,7 @@ jobs:
                 export BACKEND_ADMIN_IDENTITY='${BACKEND_ADMIN_IDENTITY}'; \
                 export INTERNAL_ENCRYPTION_SECRET='${INTERNAL_ENCRYPTION_SECRET}'; \
                 export MODERATION_HMAC_SECRET='${MODERATION_HMAC_SECRET}'; \
+                export YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN='${YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN}'; \
                 export PUBLIC_BASE_URL='https://storage-interface.prakash.yral.com'; \
                 export PHASH_CONCURRENCY='4'; \
                 export RUN_SWEEP_WORKER='${RUN_SWEEP_WORKER}'; \

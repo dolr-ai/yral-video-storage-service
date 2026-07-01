@@ -287,15 +287,11 @@ pub async fn refresh_upload_url(
 
 struct RuntimeUploadRefreshDeps {
     config: VideogenConfig,
-    http: reqwest::Client,
 }
 
 impl RuntimeUploadRefreshDeps {
     fn new(_state: AppState, config: VideogenConfig) -> Self {
-        Self {
-            config,
-            http: reqwest::Client::new(),
-        }
+        Self { config }
     }
 }
 
@@ -321,69 +317,46 @@ impl UploadRefreshDeps for RuntimeUploadRefreshDeps {
 
     async fn generate_fresh_upload_url(
         &self,
-        _request_key: &RateLimiterRequestKey,
+        request_key: &RateLimiterRequestKey,
         video_id: &str,
-        _object_key: &str,
+        object_key: &str,
     ) -> Result<UploadDestination, String> {
-        use chrono::Duration;
-        use reqwest::header::CONTENT_TYPE;
-        use serde_json::json;
+        // In-process (Phase 2.5): re-issue a fresh signed upload URL for the SAME
+        // video_id (refresh must reuse the existing object — not mint a new one, or
+        // the re-upload would land at a different key than the pipeline tracks).
+        // Publisher = request key's principal.
+        let base = std::env::var(crate::consts::PUBLIC_BASE_URL)
+            .map_err(|_| "PUBLIC_BASE_URL not set".to_string())?;
+        Ok(build_refresh_destination(
+            &base,
+            &request_key.principal,
+            video_id,
+            object_key,
+            self.config.upload_url_ttl_secs as i64,
+        ))
+    }
+}
 
-        let url = format!(
-            "{}/get-upload-url",
-            crate::consts::VIDEOGEN_UPLOAD_SERVICE_DEFAULT_URL
-        );
-
-        let body =
-            serde_json::to_vec(&json!({ "video_id": video_id })).map_err(|e| e.to_string())?;
-
-        let response = self
-            .http
-            .post(url)
-            .header(CONTENT_TYPE, "application/json")
-            .timeout(std::time::Duration::from_secs(
-                self.config.upload_destination_timeout_secs,
-            ))
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !response.status().is_success() {
-            return Err(format!("upload service returned {}", response.status()));
-        }
-
-        #[derive(serde::Deserialize)]
-        struct Resp {
-            success: bool,
-            data: Option<Data>,
-            error_message: Option<String>,
-        }
-        #[derive(serde::Deserialize)]
-        struct Data {
-            upload_url: Option<String>,
-        }
-
-        let body = response.text().await.map_err(|e| e.to_string())?;
-        let resp: Resp = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-        if !resp.success {
-            return Err(resp
-                .error_message
-                .unwrap_or_else(|| "upload service did not return success".to_string()));
-        }
-        let upload_url = resp
-            .data
-            .and_then(|d| d.upload_url)
-            .ok_or_else(|| "upload service response missing upload_url".to_string())?;
-
-        Ok(UploadDestination {
-            video_id: video_id.to_string(),
-            object_key: _object_key.to_string(),
-            upload_url,
-            expires_at: Utc::now() + Duration::seconds(self.config.upload_url_ttl_secs as i64),
-            bucket_url: None,
-            encrypted_identity: None,
-        })
+/// Build a refresh `UploadDestination` whose `upload_url` targets the SAME `video_id`
+/// it returns. Pure (no env, no canister). Regression guard: the returned `video_id`
+/// and the `video_id` embedded in `upload_url` are built from one arg, so they can't
+/// diverge (the original bug returned the old id with a fresh-UUID URL).
+fn build_refresh_destination(
+    base: &str,
+    publisher: &str,
+    video_id: &str,
+    object_key: &str,
+    ttl_secs: i64,
+) -> UploadDestination {
+    UploadDestination {
+        video_id: video_id.to_string(),
+        object_key: object_key.to_string(),
+        upload_url: crate::routes::upload::get_upload_url::build_upload_url(
+            base, publisher, video_id, false,
+        ),
+        expires_at: Utc::now() + chrono::Duration::seconds(ttl_secs),
+        bucket_url: None,
+        encrypted_identity: None,
     }
 }
 
@@ -399,6 +372,19 @@ mod tests {
     use axum::http::header::HeaderValue;
     use chrono::Utc;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn refresh_destination_url_matches_returned_video_id() {
+        // Regression guard for the original bug: refresh returned the original
+        // video_id but a URL for a freshly-minted UUID. They must always match.
+        let d = build_refresh_destination("https://x.test", "principal-abc", "vid-ABC", "obj", 900);
+        assert_eq!(d.video_id, "vid-ABC");
+        assert!(
+            d.upload_url.contains("video_id=vid-ABC"),
+            "upload_url must embed the returned video_id: {}",
+            d.upload_url
+        );
+    }
 
     const TEST_KEY_SPEC: &str = "v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
