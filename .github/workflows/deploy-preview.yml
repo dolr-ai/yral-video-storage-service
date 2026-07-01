@@ -126,6 +126,7 @@ jobs:
             secret/data/yral-video-storage-service/BACKEND_ADMIN_IDENTITY value | BACKEND_ADMIN_IDENTITY ;
             secret/data/yral-video-storage-service/INTERNAL_ENCRYPTION_SECRET value | INTERNAL_ENCRYPTION_SECRET ;
             secret/data/yral-video-storage-service/MODERATION_HMAC_SECRET value | MODERATION_HMAC_SECRET ;
+            secret/data/yral-video-storage-service/YRAL_METADATA_USER_NOTIFICATION_API_KEY value | YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN ;
 
       - name: Setup SSH
         run: |
@@ -302,6 +303,7 @@ jobs:
           BACKEND_ADMIN_IDENTITY: ${{ env.BACKEND_ADMIN_IDENTITY }}
           INTERNAL_ENCRYPTION_SECRET: ${{ env.INTERNAL_ENCRYPTION_SECRET }}
           MODERATION_HMAC_SECRET: ${{ env.MODERATION_HMAC_SECRET }}
+          YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN: ${{ env.YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN }}
         run: |
           APP_UUID="${{ steps.coolify_app.outputs.app_uuid }}"
           PREVIEW_URL="${{ steps.meta.outputs.preview_url }}"
@@ -330,6 +332,7 @@ jobs:
             --arg backend_admin_identity "$BACKEND_ADMIN_IDENTITY" \
             --arg internal_encryption_secret "$INTERNAL_ENCRYPTION_SECRET" \
             --arg moderation_hmac_secret "$MODERATION_HMAC_SECRET" \
+            --arg yral_metadata_notification_service_api_token "$YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN" \
             '{
               "data": [
                 {"key": "DATABASE_URL", "value": $database_url, "is_literal": true},
@@ -357,7 +360,8 @@ jobs:
                 {"key": "VIDEOGEN_SERVICE_AUTH_TOKEN", "value": $videogen_service_auth_token, "is_literal": true},
                 {"key": "BACKEND_ADMIN_IDENTITY", "value": $backend_admin_identity, "is_multiline": true},
                 {"key": "INTERNAL_ENCRYPTION_SECRET", "value": $internal_encryption_secret, "is_literal": true},
-                {"key": "MODERATION_HMAC_SECRET", "value": $moderation_hmac_secret, "is_literal": true}
+                {"key": "MODERATION_HMAC_SECRET", "value": $moderation_hmac_secret, "is_literal": true},
+                {"key": "YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN", "value": $yral_metadata_notification_service_api_token, "is_literal": true}
               ]
             }')
 
