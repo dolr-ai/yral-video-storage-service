@@ -53,10 +53,15 @@ pub async fn chain_snapshot_start(
         };
         let src = chain_snapshot::LivePostSource(&agent);
         match chain_snapshot::run_chain_snapshot(&src, &mut client, &requested_by, &cancel).await {
-            Ok(s) => tracing::info!(job_run_id=%s.job_run_id, posts=s.posts_upserted, pages=s.pages, completed=s.completed, "chain_snapshot: done"),
+            Ok(s) => {
+                tracing::info!(job_run_id=%s.job_run_id, posts=s.posts_upserted, pages=s.pages, skipped=s.skipped, completed=s.completed, "chain_snapshot: done")
+            }
             Err(e) => {
                 tracing::error!(error=%e, "chain_snapshot: failed");
-                sentry::capture_message(&format!("chain_snapshot failed: {e}"), sentry::Level::Error);
+                sentry::capture_message(
+                    &format!("chain_snapshot failed: {e}"),
+                    sentry::Level::Error,
+                );
             }
         }
     });

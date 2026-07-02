@@ -160,7 +160,10 @@ FROM cat
 
 /// Fraction (0.0-1.0) of a sample of expected video_uids that match a video_id
 /// in master OR video_index. Low value ⇒ join-key skew ⇒ audit is meaningless.
-pub async fn join_key_match_rate(client: &Client, sample: i64) -> Result<f64, tokio_postgres::Error> {
+pub async fn join_key_match_rate(
+    client: &Client,
+    sample: i64,
+) -> Result<f64, tokio_postgres::Error> {
     let row = client
         .query_one(
             &format!(
@@ -181,7 +184,11 @@ pub async fn join_key_match_rate(client: &Client, sample: i64) -> Result<f64, to
         .await?;
     let total: i64 = row.get("total");
     let matched: i64 = row.get("matched");
-    Ok(if total == 0 { 1.0 } else { matched as f64 / total as f64 })
+    Ok(if total == 0 {
+        1.0
+    } else {
+        matched as f64 / total as f64
+    })
 }
 
 /// Up to `limit` category-D video_uids (expected, non-stale, not in master, not
@@ -512,7 +519,7 @@ mod tests {
             .unwrap();
         assert_eq!(row.get::<_, String>(0), "ReadyToView");
         assert_eq!(row.get::<_, String>(1), run2.to_string());
-        assert_eq!(row.get::<_, bool>(2), false);
+        assert!(!row.get::<_, bool>(2));
         let count: i64 = c
             .query_one("SELECT count(*) FROM yral_posts WHERE post_id='p1'", &[])
             .await
@@ -552,9 +559,19 @@ mod tests {
         // a phash failure row AND an unrelated import failure row for the same video
         c.execute("INSERT INTO media_job_failures (job_kind, item_key, phase, last_error, next_retry_at) \
                    VALUES ('media_phash','v1','download','x', now()+interval '1 day')", &[]).await.unwrap();
-        c.execute("UPDATE media_job_failures SET video_id='v1' WHERE item_key='v1'", &[]).await.unwrap();
-        c.execute("INSERT INTO media_job_failures (job_kind, item_key, phase, last_error, video_id) \
-                   VALUES ('legacy_video_index_import','v1','import','y','v1')", &[]).await.unwrap();
+        c.execute(
+            "UPDATE media_job_failures SET video_id='v1' WHERE item_key='v1'",
+            &[],
+        )
+        .await
+        .unwrap();
+        c.execute(
+            "INSERT INTO media_job_failures (job_kind, item_key, phase, last_error, video_id) \
+                   VALUES ('legacy_video_index_import','v1','import','y','v1')",
+            &[],
+        )
+        .await
+        .unwrap();
         let n = clear_phash_failures(&c, &["v1".to_string()]).await.unwrap();
         assert_eq!(n, 1); // only the media_phash row
         let import_left: i64 = c.query_one("SELECT count(*) FROM media_job_failures WHERE job_kind='legacy_video_index_import'", &[]).await.unwrap().get(0);

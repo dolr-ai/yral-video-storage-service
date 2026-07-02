@@ -30,9 +30,12 @@ pub struct LivePostSource<'a>(pub &'a Agent);
 impl<'a> PostPageSource for LivePostSource<'a> {
     async fn fetch(&self, limit: u64, cursor: Option<String>) -> anyhow::Result<FetchPostsResult> {
         let svc = UserPostService(USER_POST_SERVICE_ID, self.0);
-        svc.fetch_posts(FetchPostsArgs { limit, last_uuid_processed: cursor })
-            .await
-            .map_err(|e| anyhow::anyhow!("fetch_posts failed: {e}"))
+        svc.fetch_posts(FetchPostsArgs {
+            limit,
+            last_uuid_processed: cursor,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("fetch_posts failed: {e}"))
     }
 }
 
@@ -46,7 +49,8 @@ pub fn walk_step(
 ) -> (bool, Option<String>) {
     let next = res.last_post_id_fetched.clone().filter(|s| !s.is_empty());
     let advanced = next.is_some() && &next != prev_cursor;
-    let stop = res.posts.is_empty() || next.is_none() || !advanced || (res.posts.len() as u64) < page;
+    let stop =
+        res.posts.is_empty() || next.is_none() || !advanced || (res.posts.len() as u64) < page;
     (stop, next)
 }
 
@@ -177,7 +181,10 @@ mod tests {
 
     #[test]
     fn converts_system_time_to_utc() {
-        let st = SystemTime { secs_since_epoch: 1_700_000_000, nanos_since_epoch: 500_000_000 };
+        let st = SystemTime {
+            secs_since_epoch: 1_700_000_000,
+            nanos_since_epoch: 500_000_000,
+        };
         let dt = system_time_to_utc(&st);
         assert_eq!(dt.timestamp(), 1_700_000_000);
         assert_eq!(dt.timestamp_subsec_millis(), 500);
@@ -190,7 +197,10 @@ mod tests {
             share_count: 0,
             hashtags: vec![],
             description: String::new(),
-            created_at: SystemTime { secs_since_epoch: 0, nanos_since_epoch: 0 },
+            created_at: SystemTime {
+                secs_since_epoch: 0,
+                nanos_since_epoch: 0,
+            },
             likes: vec![],
             video_uid: video_uid.into(),
             view_stats: PostViewStatistics {
@@ -198,13 +208,17 @@ mod tests {
                 average_watch_percentage: 0,
                 threshold_view_count: 0,
             },
-            creator_principal: Principal::from_text(creator).unwrap_or_else(|_| Principal::anonymous()),
+            creator_principal: Principal::from_text(creator)
+                .unwrap_or_else(|_| Principal::anonymous()),
         }
     }
 
     fn res(ids: &[&str], last: Option<&str>) -> FetchPostsResult {
         FetchPostsResult {
-            posts: ids.iter().map(|i| mkpost(i, i, "aaaaa-aa", PostStatus::Uploaded)).collect(),
+            posts: ids
+                .iter()
+                .map(|i| mkpost(i, i, "aaaaa-aa", PostStatus::Uploaded))
+                .collect(),
             last_post_id_fetched: last.map(|s| s.to_string()),
         }
     }
@@ -267,10 +281,17 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PostPageSource for MockSource {
-        async fn fetch(&self, _limit: u64, _cursor: Option<String>) -> anyhow::Result<FetchPostsResult> {
+        async fn fetch(
+            &self,
+            _limit: u64,
+            _cursor: Option<String>,
+        ) -> anyhow::Result<FetchPostsResult> {
             let mut p = self.pages.lock().unwrap();
             if p.is_empty() {
-                return Ok(FetchPostsResult { posts: vec![], last_post_id_fetched: None });
+                return Ok(FetchPostsResult {
+                    posts: vec![],
+                    last_post_id_fetched: None,
+                });
             }
             Ok(p.remove(0))
         }
