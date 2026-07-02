@@ -111,7 +111,10 @@ pub async fn chain_audit(client: &Client) -> Result<ChainAuditReport, tokio_post
     let sql = format!(
         r#"
 WITH expected AS (
-    SELECT video_uid
+    -- vk = canonical join key: lowercased, dashes stripped. Storj keys (hence our
+    -- video_id) AND chain video_uid come in BOTH dashed and undashed uuid forms,
+    -- so we compare on the normalized key on every side.
+    SELECT video_uid, lower(replace(video_uid, '-', '')) AS vk
     FROM yral_posts
     WHERE NOT stale
     GROUP BY video_uid
@@ -130,17 +133,17 @@ cat AS (
         h.video_id IS NOT NULL AS has_hash,
         vi.video_id IS NOT NULL AS in_index,
         EXISTS (SELECT 1 FROM media_job_failures f
-                WHERE f.video_id = e.video_uid
+                WHERE lower(replace(f.video_id, '-', '')) = e.vk
                   AND f.job_kind = 'media_phash'
                   AND f.next_retry_at > now()) AS backing_off
     FROM expected e
-    LEFT JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid
+    LEFT JOIN all_servable_videos_on_yral m ON lower(replace(m.video_id, '-', '')) = e.vk
     LEFT JOIN servable_video_hashes h
-        ON h.video_id = e.video_uid
+        ON lower(replace(h.video_id, '-', '')) = e.vk
        AND h.hash_kind = '{hk}'
        AND h.hash_version = '{hv}'
        AND h.input_media_version = '{imv}'
-    LEFT JOIN video_index vi ON vi.video_id = e.video_uid
+    LEFT JOIN video_index vi ON lower(replace(vi.video_id, '-', '')) = e.vk
 )
 SELECT
   (SELECT count(*) FROM cat) AS total_expected,
@@ -182,13 +185,13 @@ pub async fn join_key_match_rate(
             &format!(
                 r#"
         WITH s AS (
-            SELECT DISTINCT video_uid FROM yral_posts WHERE NOT stale
-              AND status IN {expected} LIMIT $1
+            SELECT DISTINCT video_uid, lower(replace(video_uid, '-', '')) AS vk
+            FROM yral_posts WHERE NOT stale AND status IN {expected} LIMIT $1
         )
         SELECT count(*) AS total,
                count(*) FILTER (WHERE
-                   EXISTS (SELECT 1 FROM all_servable_videos_on_yral m WHERE m.video_id = s.video_uid)
-                OR EXISTS (SELECT 1 FROM video_index vi WHERE vi.video_id = s.video_uid)) AS matched
+                   EXISTS (SELECT 1 FROM all_servable_videos_on_yral m WHERE lower(replace(m.video_id, '-', '')) = s.vk)
+                OR EXISTS (SELECT 1 FROM video_index vi WHERE lower(replace(vi.video_id, '-', '')) = s.vk)) AS matched
         FROM s"#,
                 expected = EXPECTED_STATUSES
             ),
@@ -213,14 +216,15 @@ pub async fn category_d_sample(
     let sql = format!(
         r#"
         WITH expected AS (
-            SELECT video_uid, min(creator_principal) AS creator
+            SELECT video_uid, lower(replace(video_uid, '-', '')) AS vk,
+                   min(creator_principal) AS creator
             FROM yral_posts WHERE NOT stale
             GROUP BY video_uid HAVING bool_or(status IN {expected})
         )
         SELECT e.video_uid, e.creator
         FROM expected e
-        LEFT JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid
-        LEFT JOIN video_index vi ON vi.video_id = e.video_uid
+        LEFT JOIN all_servable_videos_on_yral m ON lower(replace(m.video_id, '-', '')) = e.vk
+        LEFT JOIN video_index vi ON lower(replace(vi.video_id, '-', '')) = e.vk
         WHERE m.video_id IS NULL AND vi.video_id IS NULL
         ORDER BY e.video_uid
         LIMIT $1"#,
@@ -243,18 +247,19 @@ pub async fn worst_creators(
     let sql = format!(
         r#"
         WITH expected AS (
-            SELECT video_uid FROM yral_posts WHERE NOT stale
+            SELECT video_uid, lower(replace(video_uid, '-', '')) AS vk
+            FROM yral_posts WHERE NOT stale
             GROUP BY video_uid HAVING bool_or(status IN {expected})
         ),
         non_clean AS (
             SELECT e.video_uid
             FROM expected e
-            LEFT JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid
+            LEFT JOIN all_servable_videos_on_yral m ON lower(replace(m.video_id, '-', '')) = e.vk
             LEFT JOIN servable_video_hashes h
-                ON h.video_id = e.video_uid
+                ON lower(replace(h.video_id, '-', '')) = e.vk
                AND h.hash_kind='{hk}' AND h.hash_version='{hv}'
                AND h.input_media_version='{imv}'
-            LEFT JOIN video_index vi ON vi.video_id = e.video_uid
+            LEFT JOIN video_index vi ON lower(replace(vi.video_id, '-', '')) = e.vk
             WHERE NOT (m.video_id IS NOT NULL AND m.servable_status='servable' AND h.video_id IS NOT NULL)
         )
         SELECT p.creator_principal, count(DISTINCT p.video_uid) AS n
@@ -294,8 +299,11 @@ pub async fn clear_phash_failures(
         .await
 }
 
-/// The category-B video_ids (coverage-expected, non-stale, in master, servable,
-/// missing the canonical hash tuple).
+/// The category-B **master** video_ids (coverage-expected, non-stale, in master,
+/// servable, missing the canonical hash tuple). Returns the raw `master.video_id`
+/// (NOT the chain `video_uid`) because remediation feeds these to media-phash,
+/// which keys on `master.video_id` as-stored — so we must hand back that exact
+/// value, matched via the canonical join key.
 pub async fn category_b_video_ids(
     client: &Client,
     limit: i64,
@@ -303,14 +311,16 @@ pub async fn category_b_video_ids(
     let sql = format!(
         r#"
         WITH expected AS (
-            SELECT video_uid FROM yral_posts WHERE NOT stale
+            SELECT video_uid, lower(replace(video_uid, '-', '')) AS vk
+            FROM yral_posts WHERE NOT stale
             GROUP BY video_uid HAVING bool_or(status IN {expected})
         )
-        SELECT e.video_uid
+        SELECT DISTINCT m.video_id
         FROM expected e
-        JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid AND m.servable_status = 'servable'
+        JOIN all_servable_videos_on_yral m
+            ON lower(replace(m.video_id, '-', '')) = e.vk AND m.servable_status = 'servable'
         LEFT JOIN servable_video_hashes h
-            ON h.video_id = e.video_uid
+            ON lower(replace(h.video_id, '-', '')) = e.vk
            AND h.hash_kind='{hk}' AND h.hash_version='{hv}'
            AND h.input_media_version='{imv}'
         WHERE h.video_id IS NULL
@@ -352,6 +362,80 @@ pub async fn snapshot_freshness(
         run_id: run.as_ref().map(|r| r.get::<_, String>(0)),
         status: run.as_ref().map(|r| r.get::<_, String>(1)),
         newest_fetched_at: newest.get::<_, Option<String>>(0),
+    })
+}
+
+/// One sampled chain post + whether its `video_uid` resolves in our tables.
+#[derive(Debug, Clone)]
+pub struct DiagExample {
+    pub video_uid: String,
+    pub status: String,
+    pub in_master: bool,
+    pub in_index: bool,
+}
+
+/// Read-only join-key diagnostic: samples `yral_posts` and reports how many of
+/// the sampled `video_uid`s resolve to a `video_id` in master / video_index,
+/// plus a few raw example rows so the operator can eyeball the id FORMAT.
+/// This is what tells apart "unrepresentative head-slice" from a real
+/// `video_uid` != `video_id` format skew when the audit gate trips.
+#[derive(Debug, Clone)]
+pub struct JoinKeyDiag {
+    pub total_nonstale: i64,
+    pub sampled: i64,
+    pub in_master: i64,
+    pub in_index: i64,
+    pub examples: Vec<DiagExample>,
+}
+
+pub async fn join_key_diag(
+    client: &Client,
+    sample: i64,
+) -> Result<JoinKeyDiag, tokio_postgres::Error> {
+    let total: i64 = client
+        .query_one("SELECT count(*) FROM yral_posts WHERE NOT stale", &[])
+        .await?
+        .get(0);
+    let rows = client
+        .query(
+            "WITH s AS (
+                 SELECT video_uid, status, lower(replace(video_uid, '-', '')) AS vk
+                 FROM yral_posts WHERE NOT stale LIMIT $1
+             )
+             SELECT s.video_uid, s.status,
+                 EXISTS (SELECT 1 FROM all_servable_videos_on_yral m WHERE lower(replace(m.video_id, '-', '')) = s.vk) AS in_master,
+                 EXISTS (SELECT 1 FROM video_index vi WHERE lower(replace(vi.video_id, '-', '')) = s.vk) AS in_index
+             FROM s",
+            &[&sample],
+        )
+        .await?;
+    let mut in_master = 0i64;
+    let mut in_index = 0i64;
+    let mut examples = Vec::new();
+    for r in &rows {
+        let m: bool = r.get(2);
+        let i: bool = r.get(3);
+        if m {
+            in_master += 1;
+        }
+        if i {
+            in_index += 1;
+        }
+        if examples.len() < 10 {
+            examples.push(DiagExample {
+                video_uid: r.get(0),
+                status: r.get(1),
+                in_master: m,
+                in_index: i,
+            });
+        }
+    }
+    Ok(JoinKeyDiag {
+        total_nonstale: total,
+        sampled: rows.len() as i64,
+        in_master,
+        in_index,
+        examples,
     })
 }
 
@@ -539,6 +623,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashed_master_matches_undashed_chain_uid() {
+        // Prod reality: master.video_id and chain video_uid come in both dashed
+        // and undashed uuid forms. The canonical join must match the SAME uuid
+        // across the dash-format difference.
+        let (_pg, c) = setup().await;
+        let run = uuid::Uuid::new_v4();
+        let dashed = "11111111-1111-1111-1111-111111111111";
+        let undashed = "11111111111111111111111111111111";
+        // A: master (dashed) + canonical hash, chain post carries the undashed form
+        seed_master(&c, dashed, "servable").await;
+        seed_canonical_hash(&c, dashed).await;
+        upsert_chain_post(&c, &post("pa", undashed, "cc", "Uploaded"), run)
+            .await
+            .unwrap();
+        // B: servable master (dashed), no hash, chain undashed
+        let dashed_b = "22222222-2222-2222-2222-222222222222";
+        let undashed_b = "22222222222222222222222222222222";
+        seed_master(&c, dashed_b, "servable").await;
+        upsert_chain_post(&c, &post("pb", undashed_b, "cc", "Uploaded"), run)
+            .await
+            .unwrap();
+
+        let rep = chain_audit(&c).await.unwrap();
+        assert_eq!(rep.category_a, 1); // matched despite dash-format skew
+        assert_eq!(rep.category_b, 1);
+        assert_eq!(rep.category_d, 0); // NOT a phantom gap
+
+        // gate now passes (both matched)
+        assert_eq!(join_key_match_rate(&c, 200).await.unwrap(), 1.0);
+        // diagnostic membership is normalized too
+        let diag = join_key_diag(&c, 500).await.unwrap();
+        assert_eq!(diag.in_master, 2);
+        // remediation emits the RAW dashed master id (not the chain uid)
+        let b_ids = category_b_video_ids(&c, 100).await.unwrap();
+        assert_eq!(b_ids, vec![dashed_b.to_string()]);
+    }
+
+    #[tokio::test]
     async fn upsert_is_idempotent_and_updates_status_and_run() {
         let (_pg, c) = setup().await;
         let run1 = uuid::Uuid::new_v4();
@@ -639,6 +761,29 @@ mod tests {
         assert!(d.iter().any(|(v, cr)| v == "vD" && cr == "cD"));
         let worst = worst_creators(&c, 50).await.unwrap();
         assert!(worst.iter().any(|(cr, n)| cr == "cD" && *n >= 1));
+    }
+
+    #[tokio::test]
+    async fn join_key_diag_counts_master_and_index_membership() {
+        let (_pg, c) = setup().await;
+        let run = uuid::Uuid::new_v4();
+        seed_master(&c, "dm", "servable").await; // in master
+        seed_video_index(&c, "di").await; // in index only
+        upsert_chain_post(&c, &post("pdm", "dm", "cc", "Uploaded"), run)
+            .await
+            .unwrap();
+        upsert_chain_post(&c, &post("pdi", "di", "cc", "Uploaded"), run)
+            .await
+            .unwrap();
+        upsert_chain_post(&c, &post("pdn", "dn", "cc", "Uploaded"), run)
+            .await
+            .unwrap(); // nowhere
+        let d = join_key_diag(&c, 500).await.unwrap();
+        assert_eq!(d.total_nonstale, 3);
+        assert_eq!(d.sampled, 3);
+        assert_eq!(d.in_master, 1);
+        assert_eq!(d.in_index, 1);
+        assert_eq!(d.examples.len(), 3);
     }
 
     #[tokio::test]
