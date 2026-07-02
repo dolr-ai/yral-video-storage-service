@@ -205,9 +205,15 @@ CREATE TABLE IF NOT EXISTS yral_users (
 -- chain-audit join compares video_uid <-> video_id on this form. Without these
 -- indexes the joins seq-scan the full master table and time out on prod.
 -- `lower`/`replace`/`regexp_replace` are IMMUTABLE, so indexable.
-CREATE INDEX IF NOT EXISTS idx_master_video_id_norm
+-- NEW index names (…_video_key). The prior …_video_id_norm indexes used a
+-- dash-only expression; CREATE IF NOT EXISTS matches by NAME, so reusing the
+-- name would keep the stale expression. Drop the old ones (one-time; no-op
+-- afterwards) and build fresh under new names.
+DROP INDEX IF EXISTS idx_master_video_id_norm;
+CREATE INDEX IF NOT EXISTS idx_master_video_key
     ON all_servable_videos_on_yral (lower(replace(regexp_replace(video_id, '^.*/', ''), '-', '')));
-CREATE INDEX IF NOT EXISTS idx_hashes_video_id_norm
+DROP INDEX IF EXISTS idx_hashes_video_id_norm;
+CREATE INDEX IF NOT EXISTS idx_hashes_video_key
     ON servable_video_hashes (lower(replace(regexp_replace(video_id, '^.*/', ''), '-', '')));
 CREATE INDEX IF NOT EXISTS idx_yral_posts_video_uid_norm
     ON yral_posts (lower(replace(video_uid, '-', '')));

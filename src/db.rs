@@ -37,7 +37,10 @@ CREATE INDEX IF NOT EXISTS idx_phash_versioned_val
 -- canonical key strips the "<principal>/" prefix, then dashes, then lowercases.
 -- IMMUTABLE exprs → indexable. Lives here (not in the media_index schema)
 -- because `video_index` is created by this schema.
-CREATE INDEX IF NOT EXISTS idx_video_index_video_id_norm
+-- New name (see media_index schema note): drop the stale dash-only index, build
+-- fresh under a new name so CREATE-IF-NOT-EXISTS actually applies the new expr.
+DROP INDEX IF EXISTS idx_video_index_video_id_norm;
+CREATE INDEX IF NOT EXISTS idx_video_index_video_key
     ON video_index (lower(replace(regexp_replace(video_id, '^.*/', ''), '-', '')));
 -- Drop stale trigger from old single-table schema.
 DROP TRIGGER IF EXISTS video_index_updated_at ON video_index;
