@@ -116,6 +116,21 @@ fn mkpost(id: &str, video_uid: &str, creator: &str, status: PostStatus) -> Post 
     }
 }
 fn default_cancel() -> tokio_util::sync::CancellationToken { tokio_util::sync::CancellationToken::new() }
+
+// Mock page source for both the step tests and the orchestrator test. `fetch`
+// takes `&self`, so interior mutability (std Mutex) is needed to pop pages.
+struct MockSource { pages: std::sync::Mutex<Vec<FetchPostsResult>> }
+#[async_trait::async_trait]
+impl PostPageSource for MockSource {
+    async fn fetch(&self, _limit: u64, _cursor: Option<String>) -> anyhow::Result<FetchPostsResult> {
+        let mut p = self.pages.lock().unwrap();
+        if p.is_empty() {
+            // exhausted → empty terminal page (defensive; tests should supply a terminator)
+            return Ok(FetchPostsResult { posts: vec![], last_post_id_fetched: None });
+        }
+        Ok(p.remove(0))
+    }
+}
 ```
 
 > Confirm the `Principal` import path (`ic_agent::export::Principal` or `candid::Principal` — match what the generated `Post` uses; grep the `out/did/user_post_service.rs` imports). Use a valid principal text for `creator` in tests (e.g. `"aaaaa-aa"`), or `Principal::anonymous().to_text()`.
@@ -724,7 +739,10 @@ git commit -m "feat(chain-audit): run_chain_snapshot orchestrator with run track
 
 - [ ] **Step 1: Write failing test (seed master/hashes/video_index)**
 
-Seed one video per category and assert counts. Reuse existing seed helpers (`make_row`/`servable_input`/`seed_video` from `repo.rs`/`media_phash.rs` tests — match exact names).
+Seed one video per category and assert counts, using the **local** seed helpers
+from the Shared test scaffolding (`seed_master`, `seed_canonical_hash`,
+`seed_video_index`) — these are written in the test module, not imported from
+elsewhere (no such helpers exist in `repo.rs`/`media_phash.rs`).
 
 ```rust
 #[tokio::test]
@@ -757,12 +775,30 @@ async fn audit_categorizes_all_five() {
 
 #[tokio::test]
 async fn mixed_status_video_is_expected_if_any_expected() {
-    // same video_uid: one Deleted post + one ReadyToView post → coverage-expected
+    let (_pg, c) = setup().await;
+    let run = uuid::Uuid::new_v4();
+    seed_master(&c, "vm", "servable").await; // in master, no hash → would be B if expected
+    // same video_uid, two posts: one Deleted, one ReadyToView → coverage-expected (ANY expected)
+    upsert_chain_post(&c, &post("pm1", "vm", "cc", "Deleted"), run).await.unwrap();
+    upsert_chain_post(&c, &post("pm2", "vm", "cc", "ReadyToView"), run).await.unwrap();
+    let rep = chain_audit(&c).await.unwrap();
+    assert_eq!(rep.category_b, 1);          // counted, not excluded
+    assert_eq!(rep.excluded_by_status, 0);  // NOT excluded despite the Deleted post
 }
 
 #[tokio::test]
 async fn non_canonical_hash_does_not_satisfy_a() {
-    // hash row with hash_version='other' → still category B, not A
+    let (_pg, c) = setup().await;
+    let run = uuid::Uuid::new_v4();
+    seed_master(&c, "vh", "servable").await;
+    // a hash row with the WRONG version → must not count as canonical
+    c.execute("INSERT INTO servable_video_hashes \
+        (video_id, hash_kind, hash_version, input_media_version, hash_value, hash_bit_length, num_frames, hash_size) \
+        VALUES ('vh','phash','SOME_OTHER_VERSION','current_stored_object_v1','ff',64,1,64)", &[]).await.unwrap();
+    upsert_chain_post(&c, &post("ph", "vh", "cc", "Uploaded"), run).await.unwrap();
+    let rep = chain_audit(&c).await.unwrap();
+    assert_eq!(rep.category_a, 0); // wrong tuple ⇒ not clean
+    assert_eq!(rep.category_b, 1); // still missing the canonical tuple
 }
 ```
 
