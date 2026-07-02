@@ -207,8 +207,6 @@ CREATE INDEX IF NOT EXISTS idx_master_video_id_norm
     ON all_servable_videos_on_yral (lower(replace(video_id, '-', '')));
 CREATE INDEX IF NOT EXISTS idx_hashes_video_id_norm
     ON servable_video_hashes (lower(replace(video_id, '-', '')));
-CREATE INDEX IF NOT EXISTS idx_video_index_video_id_norm
-    ON video_index (lower(replace(video_id, '-', '')));
 CREATE INDEX IF NOT EXISTS idx_yral_posts_video_uid_norm
     ON yral_posts (lower(replace(video_uid, '-', '')));
 "#;
