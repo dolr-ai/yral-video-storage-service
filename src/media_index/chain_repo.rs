@@ -76,6 +76,88 @@ pub async fn rebuild_yral_users(client: &Client) -> Result<(), tokio_postgres::E
     Ok(())
 }
 
+/// Read-only reconciliation of coverage-expected chain `video_uid`s against
+/// our master + hashes + video_index tables. See module docs in the task
+/// spec for the A-E category definitions.
+#[derive(Debug, Clone, Default)]
+pub struct ChainAuditReport {
+    pub total_expected: i64,
+    pub category_a: i64,
+    pub category_b: i64,
+    pub category_c: i64,
+    pub category_d: i64,
+    pub category_e: i64,
+    pub excluded_by_status: i64,
+    pub b_backing_off: i64,
+}
+
+const EXPECTED_STATUSES: &str = "('Uploaded','ReadyToView','Transcoding','CheckingExplicitness')";
+
+/// Categorize every coverage-expected, non-stale distinct `video_uid` into
+/// A (clean) / B (missing canonical pHash) / C (video_index only) /
+/// D (nowhere) / E (in master but not servable), plus an `excluded_by_status`
+/// count of video_uids whose posts are all Draft/Deleted/Banned*.
+pub async fn chain_audit(client: &Client) -> Result<ChainAuditReport, tokio_postgres::Error> {
+    let sql = format!(
+        r#"
+WITH expected AS (
+    SELECT video_uid
+    FROM yral_posts
+    WHERE NOT stale
+    GROUP BY video_uid
+    HAVING bool_or(status IN {expected})
+),
+excluded AS (
+    SELECT count(*) AS n FROM (
+        SELECT video_uid FROM yral_posts WHERE NOT stale
+        GROUP BY video_uid HAVING NOT bool_or(status IN {expected})
+    ) t
+),
+cat AS (
+    SELECT e.video_uid,
+        m.video_id IS NOT NULL AS in_master,
+        (m.servable_status = 'servable') AS servable,
+        h.video_id IS NOT NULL AS has_hash,
+        vi.video_id IS NOT NULL AS in_index,
+        EXISTS (SELECT 1 FROM media_job_failures f
+                WHERE f.video_id = e.video_uid
+                  AND f.job_kind = 'media_phash'
+                  AND f.next_retry_at > now()) AS backing_off
+    FROM expected e
+    LEFT JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid
+    LEFT JOIN servable_video_hashes h
+        ON h.video_id = e.video_uid
+       AND h.hash_kind = 'phash'
+       AND h.hash_version = 'offchain_binary_10x8_v1'
+       AND h.input_media_version = 'current_stored_object_v1'
+    LEFT JOIN video_index vi ON vi.video_id = e.video_uid
+)
+SELECT
+  (SELECT count(*) FROM cat) AS total_expected,
+  count(*) FILTER (WHERE in_master AND servable AND has_hash)          AS a,
+  count(*) FILTER (WHERE in_master AND servable AND NOT has_hash)      AS b,
+  count(*) FILTER (WHERE NOT in_master AND in_index)                   AS c,
+  count(*) FILTER (WHERE NOT in_master AND NOT in_index)               AS d,
+  count(*) FILTER (WHERE in_master AND NOT servable)                   AS e,
+  (SELECT n FROM excluded)                                             AS excluded,
+  count(*) FILTER (WHERE in_master AND servable AND NOT has_hash AND backing_off) AS b_backing_off
+FROM cat
+    "#,
+        expected = EXPECTED_STATUSES
+    );
+    let row = client.query_one(&sql, &[]).await?;
+    Ok(ChainAuditReport {
+        total_expected: row.get("total_expected"),
+        category_a: row.get("a"),
+        category_b: row.get("b"),
+        category_c: row.get("c"),
+        category_d: row.get("d"),
+        category_e: row.get("e"),
+        excluded_by_status: row.get("excluded"),
+        b_backing_off: row.get("b_backing_off"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +240,105 @@ mod tests {
             .unwrap()
             .get(0);
         assert_eq!(cnt, 2);
+    }
+
+    async fn seed_master(c: &tokio_postgres::Client, video_id: &str, servable_status: &str) {
+        c.execute(
+            "INSERT INTO all_servable_videos_on_yral
+                (video_id, source_kind, servable_status, storage_provider, object_key, discovered_from)
+             VALUES ($1, 'test', $2, 'hetzner', $3, 'test')
+             ON CONFLICT (video_id) DO UPDATE SET servable_status = EXCLUDED.servable_status",
+            &[&video_id, &servable_status, &format!("videos/{video_id}.mp4")],
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn seed_canonical_hash(c: &tokio_postgres::Client, video_id: &str) {
+        c.execute(
+            "INSERT INTO servable_video_hashes
+                (video_id, hash_kind, hash_version, input_media_version,
+                 hash_value, hash_bit_length, num_frames, hash_size)
+             VALUES ($1, 'phash', 'offchain_binary_10x8_v1', 'current_stored_object_v1', 'ff', 64, 1, 64)
+             ON CONFLICT DO NOTHING",
+            &[&video_id],
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn seed_video_index(c: &tokio_postgres::Client, video_id: &str) {
+        c.execute(
+            "INSERT INTO video_index (video_id, storj_key) VALUES ($1, $2) ON CONFLICT (video_id) DO NOTHING",
+            &[&video_id, &format!("creator/{video_id}.mp4")],
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn audit_categorizes_all_five() {
+        let (_pg, c) = setup().await;
+        let run = uuid::Uuid::new_v4();
+        seed_master(&c, "A", "servable").await;
+        seed_canonical_hash(&c, "A").await;
+        seed_master(&c, "B", "servable").await;
+        seed_video_index(&c, "C").await;
+        // D: nowhere
+        seed_master(&c, "E", "unservable").await;
+        seed_canonical_hash(&c, "E").await;
+        for v in ["A", "B", "C", "D", "E"] {
+            upsert_chain_post(&c, &post(&format!("p{v}"), v, "cc", "Uploaded"), run)
+                .await
+                .unwrap();
+        }
+        upsert_chain_post(&c, &post("pX", "X", "cc", "Deleted"), run)
+            .await
+            .unwrap(); // excluded
+        let rep = chain_audit(&c).await.unwrap();
+        assert_eq!(rep.category_a, 1);
+        assert_eq!(rep.category_b, 1);
+        assert_eq!(rep.category_c, 1);
+        assert_eq!(rep.category_d, 1);
+        assert_eq!(rep.category_e, 1);
+        assert_eq!(rep.excluded_by_status, 1);
+    }
+
+    #[tokio::test]
+    async fn mixed_status_video_is_expected_if_any_expected() {
+        let (_pg, c) = setup().await;
+        let run = uuid::Uuid::new_v4();
+        seed_master(&c, "vm", "servable").await; // in master, no hash → B if expected
+        upsert_chain_post(&c, &post("pm1", "vm", "cc", "Deleted"), run)
+            .await
+            .unwrap();
+        upsert_chain_post(&c, &post("pm2", "vm", "cc", "ReadyToView"), run)
+            .await
+            .unwrap();
+        let rep = chain_audit(&c).await.unwrap();
+        assert_eq!(rep.category_b, 1);
+        assert_eq!(rep.excluded_by_status, 0);
+    }
+
+    #[tokio::test]
+    async fn non_canonical_hash_does_not_satisfy_a() {
+        let (_pg, c) = setup().await;
+        let run = uuid::Uuid::new_v4();
+        seed_master(&c, "vh", "servable").await;
+        c.execute(
+            "INSERT INTO servable_video_hashes \
+            (video_id, hash_kind, hash_version, input_media_version, hash_value, hash_bit_length, num_frames, hash_size) \
+            VALUES ('vh','phash','SOME_OTHER_VERSION','current_stored_object_v1','ff',64,1,64)",
+            &[],
+        )
+        .await
+        .unwrap();
+        upsert_chain_post(&c, &post("ph", "vh", "cc", "Uploaded"), run)
+            .await
+            .unwrap();
+        let rep = chain_audit(&c).await.unwrap();
+        assert_eq!(rep.category_a, 0);
+        assert_eq!(rep.category_b, 1);
     }
 
     #[tokio::test]
