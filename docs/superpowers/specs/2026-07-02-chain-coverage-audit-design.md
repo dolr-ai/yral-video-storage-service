@@ -131,14 +131,15 @@ Loop:
    `fetch_posts` cursor semantics are **unverified** (no binding exists yet), so
    these belt-and-suspenders conditions are required — the existing import loop
    terminates on an empty page, not a null cursor (media_imports.rs:231-233).
-5. After a *complete* walk, recompute `yral_users` from `yral_posts`
-   (`INSERT … SELECT … GROUP BY creator_principal … ON CONFLICT DO UPDATE`).
-6. **Stale-row handling:** also after a *complete* walk only, rows in
+5. After a *complete* walk only: **stale-row handling first** — rows in
    `yral_posts` whose `snapshot_run_id` != the current run were not seen this
    pass → the post was hard-deleted on chain. Mark them stale (a
    `stale = true` flag, cheaper and safer than deleting) so the audit excludes
    them and they don't linger as phantom gaps. This runs **only** when the walk
    completed cleanly — a partial/aborted run must never tombstone live rows.
+6. Then recompute `yral_users` from `yral_posts` **excluding stale rows**
+   (`INSERT … SELECT … WHERE NOT stale GROUP BY creator_principal … ON CONFLICT
+   DO UPDATE`), so hard-deleted posts don't inflate `post_count`/first/last-seen.
 
 Page size is a tunable constant, throttled to be gentle on the canister. Progress
 (pages done, rows upserted, current cursor, completed?) is recorded on the run
@@ -171,8 +172,9 @@ different statuses. Rule: a `video_uid` is **coverage-expected** if *any* of its
 posts is in `Uploaded`, `ReadyToView`, `Transcoding`, or `CheckingExplicitness`.
 A `video_uid` is excluded (informational only) *only* when *all* of its posts are
 `Draft` / `Deleted` / `BannedForExplicitness` / `BannedDueToUserReporting` — we
-don't expect a pHash for those. Only coverage-expected `video_uid`s are
-categorized A–E.
+don't expect a pHash for those. Rows flagged `stale` (post hard-deleted on chain)
+are dropped from the input set before any of this. Only coverage-expected,
+non-stale `video_uid`s are categorized A–E.
 
 Output: counts per category (A/B/C/D/E + excluded-by-status), a sample of
 `video_uid`s per non-clean category, and the "worst creators" — principals ranked
