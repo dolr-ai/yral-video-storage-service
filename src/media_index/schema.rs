@@ -198,15 +198,17 @@ CREATE TABLE IF NOT EXISTS yral_users (
     last_seen TIMESTAMPTZ
 );
 
--- Functional indexes on the CANONICAL video key (lowercased, dashes stripped).
--- The chain-audit join compares video_uid <-> video_id on this normalized form
--- because storj keys (hence video_id) and chain video_uid appear both dashed and
--- undashed. Without these, the audit/diagnostic joins seq-scan the full master
--- table and time out on prod. `lower`+`replace` are IMMUTABLE, so indexable.
+-- Functional indexes on the CANONICAL video key. Our video_id is the full
+-- storage path "<principal>/<uid>" (both dashed and undashed uuid forms exist),
+-- but the chain sends the bare "<uid>". Canonical = strip everything up to the
+-- last '/' (drop the principal prefix), then strip dashes + lowercase. The
+-- chain-audit join compares video_uid <-> video_id on this form. Without these
+-- indexes the joins seq-scan the full master table and time out on prod.
+-- `lower`/`replace`/`regexp_replace` are IMMUTABLE, so indexable.
 CREATE INDEX IF NOT EXISTS idx_master_video_id_norm
-    ON all_servable_videos_on_yral (lower(replace(video_id, '-', '')));
+    ON all_servable_videos_on_yral (lower(replace(regexp_replace(video_id, '^.*/', ''), '-', '')));
 CREATE INDEX IF NOT EXISTS idx_hashes_video_id_norm
-    ON servable_video_hashes (lower(replace(video_id, '-', '')));
+    ON servable_video_hashes (lower(replace(regexp_replace(video_id, '^.*/', ''), '-', '')));
 CREATE INDEX IF NOT EXISTS idx_yral_posts_video_uid_norm
     ON yral_posts (lower(replace(video_uid, '-', '')));
 "#;

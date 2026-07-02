@@ -32,12 +32,13 @@ WHERE phash IS NOT NULL
 CREATE INDEX IF NOT EXISTS idx_phash_versioned_val
     ON video_index (phash_kind, phash_version, phash)
     WHERE phash IS NOT NULL;
--- Canonical video-key index (lowercased, dashes stripped) for the chain-audit
--- join, which normalizes video_uid <-> video_id to match dashed vs undashed
--- uuids. `lower`+`replace` are IMMUTABLE, so indexable. Lives here (not in the
--- media_index schema) because `video_index` is created by this schema.
+-- Canonical video-key index for the chain-audit join. video_index.video_id is
+-- the full path "<principal>/<uid>"; the chain sends the bare "<uid>", so the
+-- canonical key strips the "<principal>/" prefix, then dashes, then lowercases.
+-- IMMUTABLE exprs → indexable. Lives here (not in the media_index schema)
+-- because `video_index` is created by this schema.
 CREATE INDEX IF NOT EXISTS idx_video_index_video_id_norm
-    ON video_index (lower(replace(video_id, '-', '')));
+    ON video_index (lower(replace(regexp_replace(video_id, '^.*/', ''), '-', '')));
 -- Drop stale trigger from old single-table schema.
 DROP TRIGGER IF EXISTS video_index_updated_at ON video_index;
 
