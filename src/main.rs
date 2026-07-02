@@ -56,6 +56,7 @@ pub(crate) struct AppState {
     /// Cancelling this does NOT affect the mirror jobs and vice-versa.
     pub media_job_cancel: Arc<Mutex<CancellationToken>>,
     pub job_media_phash_running: Arc<AtomicBool>,
+    pub job_chain_snapshot_running: Arc<AtomicBool>,
     pub ic_agent: Agent,
     /// Optional best-effort upload side-effect clients (offchain events + push
     /// notifications). Each is independently `None` when its token is unset; the
@@ -294,6 +295,7 @@ async fn run_server() -> anyhow::Result<()> {
         job_media_import_running: Arc::new(AtomicBool::new(false)),
         media_job_cancel: Arc::new(Mutex::new(CancellationToken::new())),
         job_media_phash_running: Arc::new(AtomicBool::new(false)),
+        job_chain_snapshot_running: Arc::new(AtomicBool::new(false)),
         ic_agent,
         upload,
     };
@@ -508,6 +510,24 @@ async fn run_server() -> anyhow::Result<()> {
         .route(
             "/media/sweep/status",
             get(routes::media::media_sweep_status)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/chain/snapshot",
+            post(routes::chain::chain_snapshot_start)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/chain/snapshot/status",
+            get(routes::chain::chain_snapshot_status)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/chain/audit",
+            get(routes::chain::chain_audit)
                 .with_state(app_state.clone())
                 .layer(middleware::from_fn(authorize)),
         )
