@@ -36,6 +36,15 @@ surface any coverage gaps — with optional, explicitly-flagged remediation.
 - `PostStatus` variants: `Uploaded`, `ReadyToView`, `Transcoding`,
   `CheckingExplicitness`, `Draft`, `Deleted`, `BannedForExplicitness`,
   `BannedDueToUserReporting`.
+- The Rust binding is **already generated** by `yral-canisters-client`'s
+  `build.rs` (candid → `OUT_DIR/did/user_post_service.rs`; verified):
+  `pub async fn fetch_posts(&self, arg0: FetchPostsArgs) -> Result<FetchPostsResult>`,
+  `FetchPostsArgs { limit: u64, last_uuid_processed: Option<String> }`,
+  `FetchPostsResult { last_post_id_fetched: Option<String>, posts: Vec<Post> }`,
+  `Post { id: String, video_uid: String, creator_principal: Principal, status:
+  PostStatus, created_at: SystemTime, .. }`. The generated method already wraps a
+  transport-error retry (200ms base, 5 attempts), so the walk gets per-page retry
+  for free.
 
 **Consequence:** `fetch_posts` alone yields the entire corpus — every
 `video_uid` *and* its `creator_principal`. We do not need (and cannot use)
@@ -128,8 +137,9 @@ Loop:
    - `posts.len() < PAGE` (short/final page).
    Otherwise `last = last_post_id_fetched`, `iters += 1`, and loop while
    `iters < MAX_ITERS` (a hard backstop against a mis-behaving cursor).
-   `fetch_posts` cursor semantics are **unverified** (no binding exists yet), so
-   these belt-and-suspenders conditions are required — the existing import loop
+   The binding exists, but the canister's **cursor semantics on the final page**
+   (does it echo the last id or return None?) are not documented, so these
+   belt-and-suspenders conditions are required — the existing import loop
    terminates on an empty page, not a null cursor (media_imports.rs:231-233).
 5. After a *complete* walk only: **stale-row handling first** — rows in
    `yral_posts` whose `snapshot_run_id` != the current run were not seen this
@@ -155,17 +165,35 @@ A SQL reconciliation joining the coverage-expected distinct `video_uid`s in
 
 | cat | meaning                                              | fixable by     |
 |-----|------------------------------------------------------|----------------|
-| A   | in master, **servable**, **and** has canonical pHash | — (clean ✓)    |
-| B   | in master, servable, **no** canonical pHash          | media-phash    |
+| A   | in master, **servable**, **and** has canonical-tuple pHash | — (clean ✓) |
+| B   | in master, servable, **no** canonical-tuple pHash    | media-phash    |
 | C   | not in master, but present in `video_index`          | media-import → phash |
 | D   | not in master **and** not in `video_index`           | none (object missing from buckets) |
 | E   | in master but **not servable** (dead/unservable object) | none (manual — object gone/broken) |
 
+**"has canonical pHash" is a specific tuple, not "any hash row."**
+`servable_video_hashes` is keyed on `(video_id, hash_kind, hash_version,
+input_media_version)`. The worker's own "missing" predicate
+(`videos_missing_canonical_phash`, repo.rs:427-438) LEFT-JOINs on exactly
+`hash_kind = $1 AND hash_version = $2 AND input_media_version = $3` and treats
+`h.video_id IS NULL` as missing. The audit MUST reuse the **same tuple**
+(the current canonical `hash_kind`/`hash_version`/`input_media_version`) so its
+counts agree with what the drain worker will actually act on. "Has canonical
+pHash" = a hash row exists for that tuple.
+
+One deliberate difference from the worker predicate: the worker also excludes
+rows currently backing off (`NOT_BACKING_OFF`) because that is a *scheduling*
+concern. The audit is a *coverage* report, so category B counts **all** servable
+master rows missing the canonical tuple regardless of backoff, and additionally
+annotates how many of them are currently backing off (so a big B that is "all
+backing off / permanently-dead" is distinguishable from fresh gaps).
+
 Category A is gated on `servable_status = 'servable'` (the exact servable value
-is read from the schema at implementation time). A master row that exists but is
-non-servable (dead/missing object) is **not** counted clean — it becomes
-category E rather than silently passing as A/B. Categories are mutually
-exclusive and exhaustive over the expected `video_uid` set.
+is read from the schema at implementation time; B is likewise servable-gated).
+A master row that exists but is non-servable (dead/missing object) is **not**
+counted clean — it becomes category E rather than silently passing as A/B.
+Categories are mutually exclusive and exhaustive over the expected `video_uid`
+set.
 
 **Status filter + aggregation.** A `video_uid` can back multiple posts with
 different statuses. Rule: a `video_uid` is **coverage-expected** if *any* of its
@@ -246,6 +274,9 @@ Unit tests (Postgres container, `--test-threads=1` per the known CI flake):
   passes; a deliberately-skewed set trips the low-match-rate halt.
 - category SQL assigns A/B/C/D/**E** correctly against seeded master / hashes /
   video_index fixtures — including a **non-servable master row → E** (not A/B).
+- **canonical tuple**: a hash row with a *different* `hash_kind`/`version` does
+  NOT satisfy A (still B); a row with the canonical tuple does. A backing-off B
+  row is still counted in B and also in the backoff-annotation count.
 - **mixed-status `video_uid`**: expected if ANY post is in an expected status;
   excluded only if ALL posts are Draft/Deleted/Banned.
 - **stale handling**: a post present in a prior run but absent in a completed new
