@@ -189,6 +189,34 @@ pub struct FailuresResponse {
     pub failures: Vec<FailureGroupView>,
 }
 
+/// Result of the chain coverage reconciliation audit.
+#[derive(Debug, serde::Deserialize)]
+pub struct ChainAuditResult {
+    pub total_expected: i64,
+    pub category_a: i64,
+    pub category_b: i64,
+    pub category_c: i64,
+    pub category_d: i64,
+    pub category_e: i64,
+    pub excluded_by_status: i64,
+    pub b_backing_off: i64,
+    pub d_sample: Vec<ChainDVideo>,
+    pub worst_creators: Vec<ChainCreatorGap>,
+    pub remediated: Option<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ChainDVideo {
+    pub video_uid: String,
+    pub creator_principal: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ChainCreatorGap {
+    pub creator_principal: String,
+    pub non_clean: i64,
+}
+
 pub struct MirrorClient {
     base_url: String,
     secret: String,
@@ -695,6 +723,64 @@ impl MirrorClient {
         match resp.status().as_u16() {
             200 => Ok(resp.json::<ConfigResponse>().await?),
             401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Trigger the chain snapshot walk (202 accepted, 409 already running).
+    pub async fn chain_snapshot(&self) -> Result<(), MirrorError> {
+        self.post_job("/chain/snapshot", None, None, None, None)
+            .await
+    }
+
+    /// Latest chain snapshot run status.
+    pub async fn chain_status(&self) -> Result<serde_json::Value, MirrorError> {
+        let path = "/chain/snapshot/status";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<serde_json::Value>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Run the reconciliation audit. `remediate=true` appends `?remediate=true`.
+    /// Signs the bare path only; query params are appended after signing,
+    /// matching server-side signing behaviour (see `media_feed`).
+    pub async fn chain_audit(&self, remediate: bool) -> Result<ChainAuditResult, MirrorError> {
+        let path = "/chain/audit";
+        let (ts, sig) = self.sign("GET", path);
+        let mut req = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"));
+        if remediate {
+            req = req.query(&[("remediate", "true")]);
+        }
+        let resp = req.send().await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<ChainAuditResult>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            422 => Err(MirrorError::ServerError {
+                status: 422,
+                body: "join-key match rate too low — snapshot/audit skew; investigate before trusting counts".to_string(),
+            }),
             status => {
                 let body = resp.text().await.unwrap_or_default();
                 Err(MirrorError::ServerError { status, body })

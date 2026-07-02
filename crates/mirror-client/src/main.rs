@@ -29,6 +29,10 @@ Commands:
   media-runs           List recent job runs [--job-kind KIND] [--limit N]
   media-failures       List failure groups [--job-kind KIND] [--limit N]
 
+  chain-snapshot       Snapshot chain posts (user_post_service.fetch_posts) into yral_posts/yral_users
+  chain-status         Show latest chain snapshot run status
+  chain-audit          Reconcile chain videos vs master+phash [--remediate to clear B + kick C import]
+
 Options:
   --limit N           Stop after processing N items (scan/phash/mirror/run-pipeline/media-*)
   --prefix PREFIX     Filter by object key prefix, e.g. publisher-id/  (scan/run-pipeline)
@@ -37,6 +41,7 @@ Options:
   --after CURSOR      Cursor (i64) for media-feed pagination
   --job-kind KIND     Job kind filter for media-runs / media-failures (e.g. media_phash)
   --shard I --of N    Process only shard I of N (0 <= I < N) for media-phash; both required together
+  --remediate         Clear category-B and kick category-C import for chain-audit
 
 Environment:
   MIRROR_SERVICE_URL    Base URL of the service (required)
@@ -423,6 +428,52 @@ async fn main() {
                         for sample in &group.samples {
                             println!("    {sample}");
                         }
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "chain-snapshot" => client
+            .chain_snapshot()
+            .await
+            .map(|_| println!("chain snapshot started (202). poll with: chain-status")),
+        "chain-status" => match client.chain_status().await {
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "chain-audit" => {
+            let remediate = args.iter().any(|a| a == "--remediate");
+            match client.chain_audit(remediate).await {
+                Ok(r) => {
+                    println!("chain coverage audit:");
+                    println!("  total expected videos : {}", r.total_expected);
+                    println!("  A clean               : {}", r.category_a);
+                    println!(
+                        "  B no canonical phash  : {}  (backing off: {})",
+                        r.category_b, r.b_backing_off
+                    );
+                    println!("  C unimported          : {}", r.category_c);
+                    println!("  D not in buckets      : {}", r.category_d);
+                    println!("  E dead in master      : {}", r.category_e);
+                    println!("  excluded (status)     : {}", r.excluded_by_status);
+                    if !r.d_sample.is_empty() {
+                        println!("  category-D sample (video_uid  creator):");
+                        for d in r.d_sample.iter().take(20) {
+                            println!("    {}  {}", d.video_uid, d.creator_principal);
+                        }
+                    }
+                    if !r.worst_creators.is_empty() {
+                        println!("  worst creators (non-clean count):");
+                        for c in r.worst_creators.iter().take(20) {
+                            println!("    {}  {}", c.creator_principal, c.non_clean);
+                        }
+                    }
+                    if let Some(rem) = &r.remediated {
+                        println!("  remediated: {rem}");
                     }
                     Ok(())
                 }
