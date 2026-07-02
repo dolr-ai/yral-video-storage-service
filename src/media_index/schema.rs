@@ -197,6 +197,20 @@ CREATE TABLE IF NOT EXISTS yral_users (
     first_seen TIMESTAMPTZ,
     last_seen TIMESTAMPTZ
 );
+
+-- Functional indexes on the CANONICAL video key (lowercased, dashes stripped).
+-- The chain-audit join compares video_uid <-> video_id on this normalized form
+-- because storj keys (hence video_id) and chain video_uid appear both dashed and
+-- undashed. Without these, the audit/diagnostic joins seq-scan the full master
+-- table and time out on prod. `lower`+`replace` are IMMUTABLE, so indexable.
+CREATE INDEX IF NOT EXISTS idx_master_video_id_norm
+    ON all_servable_videos_on_yral (lower(replace(video_id, '-', '')));
+CREATE INDEX IF NOT EXISTS idx_hashes_video_id_norm
+    ON servable_video_hashes (lower(replace(video_id, '-', '')));
+CREATE INDEX IF NOT EXISTS idx_video_index_video_id_norm
+    ON video_index (lower(replace(video_id, '-', '')));
+CREATE INDEX IF NOT EXISTS idx_yral_posts_video_uid_norm
+    ON yral_posts (lower(replace(video_uid, '-', '')));
 "#;
 
 pub async fn init_schema(client: &Client) -> Result<(), tokio_postgres::Error> {
