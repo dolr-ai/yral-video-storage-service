@@ -31,8 +31,9 @@ surface any coverage gaps — with optional, explicitly-flagged remediation.
   FetchPostsResult { posts: vec Post, last_post_id_fetched: opt text }` — a
   **global paginated cursor over ALL posts**.
 - `Post` carries: `id: text`, `video_uid: text`, `creator_principal: principal`,
-  `status: PostStatus`, `created_at: SystemTime`, plus like/share/view fields we
-  ignore.
+  `status: PostStatus`, `created_at: SystemTime`, plus mutable/volatile fields
+  (`description`, `hashtags`, `share_count`, `likes`, `view_stats`) that we do
+  **not** store — a one-shot snapshot can't keep them accurate (see `yral_posts`).
 - `PostStatus` variants: `Uploaded`, `ReadyToView`, `Transcoding`,
   `CheckingExplicitness`, `Draft`, `Deleted`, `BannedForExplicitness`,
   `BannedDueToUserReporting`.
@@ -85,21 +86,35 @@ mirror-client chain-audit --remediate     service: enqueue fixable gaps
 
 ### New tables (prod DB, beside master)
 
-**`yral_posts`** — the chain's record, one row per post.
+**`yral_posts`** — the chain's record, one row per post. We store only the
+**stable** `Post` fields — identity + creation time. We snapshot the canister
+*once* per run, so any mutable engagement field (`share_count`, `likes`,
+`view_stats`) would be stale the instant it is written and would drift from the
+canister's live value. Storing them would create a discrepancy, not an ML asset.
+So they are deliberately excluded (see note).
 
-| column           | type        | notes                                    |
-|------------------|-------------|------------------------------------------|
-| `post_id`        | text PK     | `Post.id`                                |
-| `video_uid`      | text        | `Post.video_uid`; indexed               |
-| `creator_principal` | text     | `Post.creator_principal`; indexed        |
-| `status`         | text        | `PostStatus` variant name; indexed       |
-| `created_at`     | timestamptz | from `Post.created_at` (see conversion note) |
+| column           | type        | source / notes                            |
+|------------------|-------------|-------------------------------------------|
+| `post_id`        | text PK     | `Post.id` — immutable                     |
+| `video_uid`      | text        | `Post.video_uid` — immutable; indexed     |
+| `creator_principal` | text     | `Post.creator_principal` (principal→text) — immutable; indexed |
+| `created_at`     | timestamptz | `Post.created_at` — immutable; indexed. True video-creation time (chain is the only source; master has no equivalent) |
+| `status`         | text        | `PostStatus` variant name; indexed. **Mutable** on chain — stored as a point-in-time value; refreshed each snapshot. Needed for the coverage-expected filter |
 | `snapshot_run_id`| uuid        | run that last wrote this row; matches `media_job_runs.id` (UUID) |
-| `fetched_at`     | timestamptz | wall-clock of the write                  |
+| `fetched_at`     | timestamptz | wall-clock of the write; makes the point-in-time nature of `status` explicit |
 | `stale`          | boolean     | default false; set true when a completed run no longer sees the post (hard-deleted on chain); excluded from audit |
 
 `Post.created_at` is an IC `SystemTime` (nanoseconds since epoch); convert
 `nanos → timestamptz` (divide to secs + nanos remainder) on the way in.
+
+**Deliberately excluded (mutable / volatile).** `share_count`, `likes`,
+`view_stats.*`, and the user-editable `description` / `hashtags` all change on
+chain after creation. A one-shot snapshot cannot keep them accurate, so we do not
+store them here — doing so would misrepresent live values. If ML later needs
+engagement or content metadata, it should read the canister live (or a dedicated,
+clearly-timestamped metrics snapshot), not this coverage table. Even `status` is
+mutable and is kept only because the audit requires it; its `fetched_at` marks
+when it was true.
 
 **`yral_users`** — distinct creators, derived from the walk.
 
@@ -303,6 +318,10 @@ explicit user go.
 ## Out of scope (YAGNI)
 
 - Enriching `yral_users` with profile details from user_info_service.
+- Storing mutable engagement/content fields (`share_count`, `likes`,
+  `view_stats`, `description`, `hashtags`). Excluded because a one-shot snapshot
+  would drift from the canister. A live read or a dedicated timestamped metrics
+  snapshot is the right home for those if ML needs them.
 - Continuous/scheduled coverage monitoring (this is an on-demand audit).
 - Reverse audit (videos in master that the chain does *not* know about).
 - Automated recovery of category-D videos (object genuinely missing).
