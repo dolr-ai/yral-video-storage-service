@@ -253,6 +253,51 @@ pub async fn worst_creators(
         .collect())
 }
 
+/// Clear ONLY the phash failure rows for the given video_ids so the media-phash
+/// worker retries. Scoped to `job_kind='media_phash'` so unrelated import/other
+/// failure rows are left intact. Returns rows deleted. (Category-B remediation.)
+pub async fn clear_phash_failures(
+    client: &Client,
+    video_ids: &[String],
+) -> Result<u64, tokio_postgres::Error> {
+    if video_ids.is_empty() {
+        return Ok(0);
+    }
+    client
+        .execute(
+            "DELETE FROM media_job_failures WHERE job_kind = 'media_phash' AND video_id = ANY($1)",
+            &[&video_ids],
+        )
+        .await
+}
+
+/// The category-B video_ids (coverage-expected, non-stale, in master, servable,
+/// missing the canonical hash tuple).
+pub async fn category_b_video_ids(
+    client: &Client,
+    limit: i64,
+) -> Result<Vec<String>, tokio_postgres::Error> {
+    let sql = format!(
+        r#"
+        WITH expected AS (
+            SELECT video_uid FROM yral_posts WHERE NOT stale
+            GROUP BY video_uid HAVING bool_or(status IN {expected})
+        )
+        SELECT e.video_uid
+        FROM expected e
+        JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid AND m.servable_status = 'servable'
+        LEFT JOIN servable_video_hashes h
+            ON h.video_id = e.video_uid
+           AND h.hash_kind='phash' AND h.hash_version='offchain_binary_10x8_v1'
+           AND h.input_media_version='current_stored_object_v1'
+        WHERE h.video_id IS NULL
+        LIMIT $1"#,
+        expected = EXPECTED_STATUSES
+    );
+    let rows = client.query(&sql, &[&limit]).await?;
+    Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,6 +544,21 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(join_key_match_rate(&c, 200).await.unwrap(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn remediate_b_clears_only_phash_failures() {
+        let (_pg, c) = setup().await;
+        // a phash failure row AND an unrelated import failure row for the same video
+        c.execute("INSERT INTO media_job_failures (job_kind, item_key, phase, last_error, next_retry_at) \
+                   VALUES ('media_phash','v1','download','x', now()+interval '1 day')", &[]).await.unwrap();
+        c.execute("UPDATE media_job_failures SET video_id='v1' WHERE item_key='v1'", &[]).await.unwrap();
+        c.execute("INSERT INTO media_job_failures (job_kind, item_key, phase, last_error, video_id) \
+                   VALUES ('legacy_video_index_import','v1','import','y','v1')", &[]).await.unwrap();
+        let n = clear_phash_failures(&c, &["v1".to_string()]).await.unwrap();
+        assert_eq!(n, 1); // only the media_phash row
+        let import_left: i64 = c.query_one("SELECT count(*) FROM media_job_failures WHERE job_kind='legacy_video_index_import'", &[]).await.unwrap().get(0);
+        assert_eq!(import_left, 1); // untouched
     }
 
     #[tokio::test]
