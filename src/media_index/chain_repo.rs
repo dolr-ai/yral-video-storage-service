@@ -133,17 +133,17 @@ cat AS (
         h.video_id IS NOT NULL AS has_hash,
         vi.video_id IS NOT NULL AS in_index,
         EXISTS (SELECT 1 FROM media_job_failures f
-                WHERE lower(replace(f.video_id, '-', '')) = e.vk
+                WHERE lower(replace(regexp_replace(f.video_id, '^.*/', ''), '-', '')) = e.vk
                   AND f.job_kind = 'media_phash'
                   AND f.next_retry_at > now()) AS backing_off
     FROM expected e
-    LEFT JOIN all_servable_videos_on_yral m ON lower(replace(m.video_id, '-', '')) = e.vk
+    LEFT JOIN all_servable_videos_on_yral m ON lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = e.vk
     LEFT JOIN servable_video_hashes h
-        ON lower(replace(h.video_id, '-', '')) = e.vk
+        ON lower(replace(regexp_replace(h.video_id, '^.*/', ''), '-', '')) = e.vk
        AND h.hash_kind = '{hk}'
        AND h.hash_version = '{hv}'
        AND h.input_media_version = '{imv}'
-    LEFT JOIN video_index vi ON lower(replace(vi.video_id, '-', '')) = e.vk
+    LEFT JOIN video_index vi ON lower(replace(regexp_replace(vi.video_id, '^.*/', ''), '-', '')) = e.vk
 )
 SELECT
   (SELECT count(*) FROM cat) AS total_expected,
@@ -190,8 +190,8 @@ pub async fn join_key_match_rate(
         )
         SELECT count(*) AS total,
                count(*) FILTER (WHERE
-                   EXISTS (SELECT 1 FROM all_servable_videos_on_yral m WHERE lower(replace(m.video_id, '-', '')) = s.vk)
-                OR EXISTS (SELECT 1 FROM video_index vi WHERE lower(replace(vi.video_id, '-', '')) = s.vk)) AS matched
+                   EXISTS (SELECT 1 FROM all_servable_videos_on_yral m WHERE lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = s.vk)
+                OR EXISTS (SELECT 1 FROM video_index vi WHERE lower(replace(regexp_replace(vi.video_id, '^.*/', ''), '-', '')) = s.vk)) AS matched
         FROM s"#,
                 expected = EXPECTED_STATUSES
             ),
@@ -223,8 +223,8 @@ pub async fn category_d_sample(
         )
         SELECT e.video_uid, e.creator
         FROM expected e
-        LEFT JOIN all_servable_videos_on_yral m ON lower(replace(m.video_id, '-', '')) = e.vk
-        LEFT JOIN video_index vi ON lower(replace(vi.video_id, '-', '')) = e.vk
+        LEFT JOIN all_servable_videos_on_yral m ON lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = e.vk
+        LEFT JOIN video_index vi ON lower(replace(regexp_replace(vi.video_id, '^.*/', ''), '-', '')) = e.vk
         WHERE m.video_id IS NULL AND vi.video_id IS NULL
         ORDER BY e.video_uid
         LIMIT $1"#,
@@ -254,12 +254,12 @@ pub async fn worst_creators(
         non_clean AS (
             SELECT e.video_uid
             FROM expected e
-            LEFT JOIN all_servable_videos_on_yral m ON lower(replace(m.video_id, '-', '')) = e.vk
+            LEFT JOIN all_servable_videos_on_yral m ON lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = e.vk
             LEFT JOIN servable_video_hashes h
-                ON lower(replace(h.video_id, '-', '')) = e.vk
+                ON lower(replace(regexp_replace(h.video_id, '^.*/', ''), '-', '')) = e.vk
                AND h.hash_kind='{hk}' AND h.hash_version='{hv}'
                AND h.input_media_version='{imv}'
-            LEFT JOIN video_index vi ON lower(replace(vi.video_id, '-', '')) = e.vk
+            LEFT JOIN video_index vi ON lower(replace(regexp_replace(vi.video_id, '^.*/', ''), '-', '')) = e.vk
             WHERE NOT (m.video_id IS NOT NULL AND m.servable_status='servable' AND h.video_id IS NOT NULL)
         )
         SELECT p.creator_principal, count(DISTINCT p.video_uid) AS n
@@ -318,9 +318,9 @@ pub async fn category_b_video_ids(
         SELECT DISTINCT m.video_id
         FROM expected e
         JOIN all_servable_videos_on_yral m
-            ON lower(replace(m.video_id, '-', '')) = e.vk AND m.servable_status = 'servable'
+            ON lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = e.vk AND m.servable_status = 'servable'
         LEFT JOIN servable_video_hashes h
-            ON lower(replace(h.video_id, '-', '')) = e.vk
+            ON lower(replace(regexp_replace(h.video_id, '^.*/', ''), '-', '')) = e.vk
            AND h.hash_kind='{hk}' AND h.hash_version='{hv}'
            AND h.input_media_version='{imv}'
         WHERE h.video_id IS NULL
@@ -403,8 +403,8 @@ pub async fn join_key_diag(
                  FROM yral_posts WHERE NOT stale LIMIT $1
              )
              SELECT s.video_uid, s.status,
-                 EXISTS (SELECT 1 FROM all_servable_videos_on_yral m WHERE lower(replace(m.video_id, '-', '')) = s.vk) AS in_master,
-                 EXISTS (SELECT 1 FROM video_index vi WHERE lower(replace(vi.video_id, '-', '')) = s.vk) AS in_index
+                 EXISTS (SELECT 1 FROM all_servable_videos_on_yral m WHERE lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = s.vk) AS in_master,
+                 EXISTS (SELECT 1 FROM video_index vi WHERE lower(replace(regexp_replace(vi.video_id, '^.*/', ''), '-', '')) = s.vk) AS in_index
              FROM s",
             &[&sample],
         )
@@ -658,6 +658,33 @@ mod tests {
         // remediation emits the RAW dashed master id (not the chain uid)
         let b_ids = category_b_video_ids(&c, 100).await.unwrap();
         assert_eq!(b_ids, vec![dashed_b.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn principal_prefixed_master_matches_bare_chain_uid() {
+        // Prod reality: master/video_index store video_id = "<principal>/<uid>",
+        // but the chain sends the bare "<uid>". The canonical key strips the
+        // "<principal>/" prefix so they match.
+        let (_pg, c) = setup().await;
+        let run = uuid::Uuid::new_v4();
+        let uid = "f742370ca7730811060ee907b9111777";
+        let master_id = format!("kyxqt-t4e7d-stmey/{uid}"); // <principal>/<uid>
+        seed_master(&c, &master_id, "servable").await; // B: in master, no hash
+        upsert_chain_post(&c, &post("pp", uid, "cc", "Uploaded"), run)
+            .await
+            .unwrap();
+
+        let rep = chain_audit(&c).await.unwrap();
+        assert_eq!(rep.category_b, 1); // matched via suffix — NOT a phantom D
+        assert_eq!(rep.category_d, 0);
+
+        let diag = join_key_diag(&c, 500).await.unwrap();
+        assert_eq!(diag.in_master, 1);
+
+        // remediation emits the FULL master video_id ("<principal>/<uid>") — the
+        // value media-phash actually keys on, NOT the bare chain uid.
+        let b = category_b_video_ids(&c, 100).await.unwrap();
+        assert_eq!(b, vec![master_id]);
     }
 
     #[tokio::test]
