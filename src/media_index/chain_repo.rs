@@ -45,6 +45,37 @@ pub async fn upsert_chain_post(
     Ok(())
 }
 
+/// After a COMPLETE walk: rows not touched by `run_id` were not seen this pass →
+/// hard-deleted on chain. Flag them stale. Returns count flagged. NEVER call
+/// after a partial/aborted walk (would tombstone live rows).
+pub async fn mark_stale_posts(client: &Client, run_id: Uuid) -> Result<u64, tokio_postgres::Error> {
+    client
+        .execute(
+            "UPDATE yral_posts SET stale = TRUE
+             WHERE stale = FALSE AND snapshot_run_id IS DISTINCT FROM $1::TEXT::UUID",
+            &[&run_id.to_string()],
+        )
+        .await
+}
+
+/// Recompute the derived rollup from non-stale posts.
+pub async fn rebuild_yral_users(client: &Client) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute(
+            "INSERT INTO yral_users (creator_principal, post_count, first_seen, last_seen)
+             SELECT creator_principal, count(*), min(created_at), max(created_at)
+             FROM yral_posts WHERE NOT stale
+             GROUP BY creator_principal
+             ON CONFLICT (creator_principal) DO UPDATE SET
+                 post_count = EXCLUDED.post_count,
+                 first_seen = EXCLUDED.first_seen,
+                 last_seen  = EXCLUDED.last_seen",
+            &[],
+        )
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,6 +89,75 @@ mod tests {
         crate::db::init_schema(&client).await.unwrap();
         crate::media_index::init_schema(&client).await.unwrap();
         (pg, client)
+    }
+
+    // Test helper: build a ChainPost quickly.
+    fn post(id: &str, vid: &str, creator: &str, status: &str) -> ChainPost {
+        ChainPost {
+            post_id: id.into(),
+            video_uid: vid.into(),
+            creator_principal: creator.into(),
+            created_at: chrono::Utc::now(),
+            status: status.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_stale_flags_posts_from_older_runs_only() {
+        let (_pg, c) = setup().await;
+        let old = uuid::Uuid::new_v4();
+        let cur = uuid::Uuid::new_v4();
+        upsert_chain_post(&c, &post("s-old", "vo", "ca", "Uploaded"), old)
+            .await
+            .unwrap();
+        upsert_chain_post(&c, &post("s-cur", "vc", "ca", "Uploaded"), cur)
+            .await
+            .unwrap();
+        let n = mark_stale_posts(&c, cur).await.unwrap();
+        assert_eq!(n, 1);
+        let stale_old: bool = c
+            .query_one("SELECT stale FROM yral_posts WHERE post_id='s-old'", &[])
+            .await
+            .unwrap()
+            .get(0);
+        let stale_cur: bool = c
+            .query_one("SELECT stale FROM yral_posts WHERE post_id='s-cur'", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert!(stale_old);
+        assert!(!stale_cur);
+    }
+
+    #[tokio::test]
+    async fn rebuild_users_excludes_stale_and_aggregates() {
+        let (_pg, c) = setup().await;
+        let run = uuid::Uuid::new_v4();
+        upsert_chain_post(&c, &post("u1", "v1", "creatorX", "Uploaded"), run)
+            .await
+            .unwrap();
+        upsert_chain_post(&c, &post("u2", "v2", "creatorX", "ReadyToView"), run)
+            .await
+            .unwrap();
+        // a stale row for creatorX must NOT inflate the count
+        upsert_chain_post(
+            &c,
+            &post("u3", "v3", "creatorX", "Deleted"),
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+        mark_stale_posts(&c, run).await.unwrap(); // flags u3 (older run)
+        rebuild_yral_users(&c).await.unwrap();
+        let cnt: i64 = c
+            .query_one(
+                "SELECT post_count FROM yral_users WHERE creator_principal='creatorX'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(cnt, 2);
     }
 
     #[tokio::test]
