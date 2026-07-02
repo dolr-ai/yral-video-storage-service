@@ -1,4 +1,6 @@
 #[allow(dead_code)]
+pub mod chain_repo;
+#[allow(dead_code)]
 pub mod feed;
 #[allow(dead_code)]
 pub mod repo;

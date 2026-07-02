@@ -175,6 +175,28 @@ CREATE TABLE IF NOT EXISTS sweep_lease (
     heartbeat         TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_discovery_at TIMESTAMPTZ
 );
+
+CREATE TABLE IF NOT EXISTS yral_posts (
+    post_id TEXT PRIMARY KEY,
+    video_uid TEXT NOT NULL,
+    creator_principal TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL,
+    snapshot_run_id UUID,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    stale BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS idx_yral_posts_video_uid ON yral_posts (video_uid);
+CREATE INDEX IF NOT EXISTS idx_yral_posts_creator ON yral_posts (creator_principal);
+CREATE INDEX IF NOT EXISTS idx_yral_posts_status ON yral_posts (status);
+CREATE INDEX IF NOT EXISTS idx_yral_posts_created_at ON yral_posts (created_at);
+
+CREATE TABLE IF NOT EXISTS yral_users (
+    creator_principal TEXT PRIMARY KEY,
+    post_count BIGINT NOT NULL,
+    first_seen TIMESTAMPTZ,
+    last_seen TIMESTAMPTZ
+);
 "#;
 
 pub async fn init_schema(client: &Client) -> Result<(), tokio_postgres::Error> {
