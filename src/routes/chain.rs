@@ -261,3 +261,37 @@ pub async fn chain_snapshot_status(
     };
     Ok(Json(body))
 }
+
+/// GET /chain/diagnose — read-only join-key diagnostic. Samples yral_posts and
+/// reports master/video_index membership + a few raw example rows, so an
+/// operator can tell an unrepresentative sample apart from a real
+/// `video_uid` != `video_id` format skew when the audit gate trips.
+pub async fn chain_diagnose(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let client = db::connect(&state.db_url)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let d = chain_repo::join_key_diag(&client, 500)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let examples: Vec<serde_json::Value> = d
+        .examples
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "video_uid": e.video_uid,
+                "status": e.status,
+                "in_master": e.in_master,
+                "in_index": e.in_index,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "total_nonstale": d.total_nonstale,
+        "sampled": d.sampled,
+        "in_master": d.in_master,
+        "in_index": d.in_index,
+        "examples": examples,
+    })))
+}

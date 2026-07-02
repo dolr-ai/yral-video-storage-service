@@ -30,6 +30,7 @@ Commands:
   media-failures       List failure groups [--job-kind KIND] [--limit N]
 
   chain-snapshot       Snapshot chain posts (user_post_service.fetch_posts) into yral_posts/yral_users [--limit N for a bounded sample]
+  chain-diagnose       Read-only join-key diagnostic (sample master/index membership + example rows)
   chain-status         Show latest chain snapshot run status
   chain-audit          Reconcile chain videos vs master+phash [--remediate to clear B + kick C import]
 
@@ -439,6 +440,13 @@ async fn main() {
             .await
             .map(|_| println!("chain snapshot started (202). poll with: chain-status")),
         "chain-status" => match client.chain_status().await {
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "chain-diagnose" => match client.chain_diagnose().await {
             Ok(v) => {
                 println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
                 Ok(())

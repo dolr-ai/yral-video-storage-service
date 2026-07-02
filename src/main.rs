@@ -532,6 +532,12 @@ async fn run_server() -> anyhow::Result<()> {
                 .layer(middleware::from_fn(authorize)),
         )
         .route(
+            "/chain/diagnose",
+            get(routes::chain::chain_diagnose)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
             "/api/v2/videogen/drafts/in-progress",
             post(routes::videogen::get_in_progress_drafts).with_state(app_state.clone()),
         )

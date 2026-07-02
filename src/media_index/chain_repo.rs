@@ -355,6 +355,79 @@ pub async fn snapshot_freshness(
     })
 }
 
+/// One sampled chain post + whether its `video_uid` resolves in our tables.
+#[derive(Debug, Clone)]
+pub struct DiagExample {
+    pub video_uid: String,
+    pub status: String,
+    pub in_master: bool,
+    pub in_index: bool,
+}
+
+/// Read-only join-key diagnostic: samples `yral_posts` and reports how many of
+/// the sampled `video_uid`s resolve to a `video_id` in master / video_index,
+/// plus a few raw example rows so the operator can eyeball the id FORMAT.
+/// This is what tells apart "unrepresentative head-slice" from a real
+/// `video_uid` != `video_id` format skew when the audit gate trips.
+#[derive(Debug, Clone)]
+pub struct JoinKeyDiag {
+    pub total_nonstale: i64,
+    pub sampled: i64,
+    pub in_master: i64,
+    pub in_index: i64,
+    pub examples: Vec<DiagExample>,
+}
+
+pub async fn join_key_diag(
+    client: &Client,
+    sample: i64,
+) -> Result<JoinKeyDiag, tokio_postgres::Error> {
+    let total: i64 = client
+        .query_one("SELECT count(*) FROM yral_posts WHERE NOT stale", &[])
+        .await?
+        .get(0);
+    let rows = client
+        .query(
+            "WITH s AS (
+                 SELECT video_uid, status FROM yral_posts WHERE NOT stale LIMIT $1
+             )
+             SELECT s.video_uid, s.status,
+                 EXISTS (SELECT 1 FROM all_servable_videos_on_yral m WHERE m.video_id = s.video_uid) AS in_master,
+                 EXISTS (SELECT 1 FROM video_index vi WHERE vi.video_id = s.video_uid) AS in_index
+             FROM s",
+            &[&sample],
+        )
+        .await?;
+    let mut in_master = 0i64;
+    let mut in_index = 0i64;
+    let mut examples = Vec::new();
+    for r in &rows {
+        let m: bool = r.get(2);
+        let i: bool = r.get(3);
+        if m {
+            in_master += 1;
+        }
+        if i {
+            in_index += 1;
+        }
+        if examples.len() < 10 {
+            examples.push(DiagExample {
+                video_uid: r.get(0),
+                status: r.get(1),
+                in_master: m,
+                in_index: i,
+            });
+        }
+    }
+    Ok(JoinKeyDiag {
+        total_nonstale: total,
+        sampled: rows.len() as i64,
+        in_master,
+        in_index,
+        examples,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +712,29 @@ mod tests {
         assert!(d.iter().any(|(v, cr)| v == "vD" && cr == "cD"));
         let worst = worst_creators(&c, 50).await.unwrap();
         assert!(worst.iter().any(|(cr, n)| cr == "cD" && *n >= 1));
+    }
+
+    #[tokio::test]
+    async fn join_key_diag_counts_master_and_index_membership() {
+        let (_pg, c) = setup().await;
+        let run = uuid::Uuid::new_v4();
+        seed_master(&c, "dm", "servable").await; // in master
+        seed_video_index(&c, "di").await; // in index only
+        upsert_chain_post(&c, &post("pdm", "dm", "cc", "Uploaded"), run)
+            .await
+            .unwrap();
+        upsert_chain_post(&c, &post("pdi", "di", "cc", "Uploaded"), run)
+            .await
+            .unwrap();
+        upsert_chain_post(&c, &post("pdn", "dn", "cc", "Uploaded"), run)
+            .await
+            .unwrap(); // nowhere
+        let d = join_key_diag(&c, 500).await.unwrap();
+        assert_eq!(d.total_nonstale, 3);
+        assert_eq!(d.sampled, 3);
+        assert_eq!(d.in_master, 1);
+        assert_eq!(d.in_index, 1);
+        assert_eq!(d.examples.len(), 3);
     }
 
     #[tokio::test]

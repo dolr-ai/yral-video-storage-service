@@ -762,6 +762,29 @@ impl MirrorClient {
         }
     }
 
+    /// Read-only join-key diagnostic: sampled master/video_index membership +
+    /// example rows, to diagnose why the audit join-key gate tripped.
+    pub async fn chain_diagnose(&self) -> Result<serde_json::Value, MirrorError> {
+        let path = "/chain/diagnose";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<serde_json::Value>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
     /// Run the reconciliation audit. `remediate=true` appends `?remediate=true`.
     /// Signs the bare path only; query params are appended after signing,
     /// matching server-side signing behaviour (see `media_feed`).
