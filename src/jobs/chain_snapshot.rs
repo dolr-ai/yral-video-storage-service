@@ -368,7 +368,7 @@ mod tests {
             .unwrap();
         assert_eq!(summary.posts_upserted, 1);
         assert!(!summary.completed); // limited → partial
-        // A partial run must NOT rebuild the users rollup (didn't see whole corpus).
+                                     // A partial run must NOT rebuild the users rollup (didn't see whole corpus).
         let users: i64 = c
             .query_one("SELECT count(*) FROM yral_users", &[])
             .await
