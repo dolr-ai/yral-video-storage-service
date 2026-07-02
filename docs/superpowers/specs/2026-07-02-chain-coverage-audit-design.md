@@ -239,9 +239,11 @@ Read-only unless `--remediate` is passed. When passed:
   So C remediation kicks a full import run that necessarily picks up these rows;
   they then flow to media-phash. (A targeted per-video import path is out of scope
   unless a later need appears.)
-- **D** and **E** → cannot be auto-fixed (object absent from buckets / dead in
-  master); emit the full list for manual follow-up (targeted bucket scan or
-  upstream re-check).
+- **D** and **E** → **list-only** (no automated action). Emit the full list
+  (`video_uid` + `creator_principal`) for manual follow-up. A "chase-down" —
+  HEAD-probing the expected `<principal>/<uuid>.mp4` in storj/hetzner to
+  distinguish a genuine hole from a scan-gap/key-skew — was considered and
+  **deferred** (out of scope); the list gives everything needed to do it by hand.
 
 Remediation reuses the existing pipeline entry points; it introduces **no** new
 write path to master or to the hash table.
@@ -325,3 +327,5 @@ explicit user go.
 - Continuous/scheduled coverage monitoring (this is an on-demand audit).
 - Reverse audit (videos in master that the chain does *not* know about).
 - Automated recovery of category-D videos (object genuinely missing).
+- Category-D chase-down (HEAD-probing expected keys in storj/hetzner). Deferred;
+  the D list carries `video_uid` + `creator_principal` for manual probing.
