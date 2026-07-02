@@ -33,12 +33,12 @@ CREATE INDEX IF NOT EXISTS idx_phash_versioned_val
     ON video_index (phash_kind, phash_version, phash)
     WHERE phash IS NOT NULL;
 -- Canonical video-key index for the chain-audit join. video_index.video_id is
--- the full path "<principal>/<uid>"; the chain sends the bare "<uid>", so the
--- canonical key strips the "<principal>/" prefix, then dashes, then lowercases.
--- IMMUTABLE exprs → indexable. Lives here (not in the media_index schema)
--- because `video_index` is created by this schema.
--- New name (see media_index schema note): drop the stale dash-only index, build
--- fresh under a new name so CREATE-IF-NOT-EXISTS actually applies the new expr.
+-- the full path principal-slash-uid; the chain sends the bare uid, so the
+-- canonical key strips the principal prefix (up to last slash), then dashes,
+-- then lowercases. IMMUTABLE exprs, so indexable. Lives here (not in the
+-- media_index schema) because video_index is created by this schema.
+-- New name: drop the stale dash-only index, build fresh under a new name so
+-- CREATE-IF-NOT-EXISTS actually applies the new expression.
 DROP INDEX IF EXISTS idx_video_index_video_id_norm;
 CREATE INDEX IF NOT EXISTS idx_video_index_video_key
     ON video_index (lower(replace(regexp_replace(video_id, '^.*/', ''), '-', '')));
