@@ -14,6 +14,9 @@ use crate::{db, AppState};
 #[derive(Deserialize)]
 pub struct SnapshotParams {
     pub requested_by: Option<String>,
+    /// Optional cap on posts upserted — bounded sample for preview/testing. A
+    /// limited run is marked `partial` (no stale/rollup). Omit on prod for a full walk.
+    pub limit: Option<u64>,
 }
 
 /// POST /chain/snapshot — trigger the fetch_posts walk. 202 accepted / 409 running.
@@ -41,6 +44,7 @@ pub async fn chain_snapshot_start(
         .map(|s| s.chars().take(256).collect::<String>())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "chain_snapshot_api".into());
+    let limit = params.limit;
 
     tokio::spawn(async move {
         let _guard = guard;
@@ -52,7 +56,9 @@ pub async fn chain_snapshot_start(
             }
         };
         let src = chain_snapshot::LivePostSource(&agent);
-        match chain_snapshot::run_chain_snapshot(&src, &mut client, &requested_by, &cancel).await {
+        match chain_snapshot::run_chain_snapshot(&src, &mut client, &requested_by, &cancel, limit)
+            .await
+        {
             Ok(s) => {
                 tracing::info!(job_run_id=%s.job_run_id, posts=s.posts_upserted, pages=s.pages, skipped=s.skipped, completed=s.completed, "chain_snapshot: done")
             }

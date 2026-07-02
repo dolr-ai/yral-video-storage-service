@@ -734,8 +734,9 @@ impl MirrorClient {
     }
 
     /// Trigger the chain snapshot walk (202 accepted, 409 already running).
-    pub async fn chain_snapshot(&self) -> Result<(), MirrorError> {
-        self.post_job("/chain/snapshot", None, None, None, None)
+    /// `limit` caps posts upserted (bounded sample for preview/testing); None = full walk.
+    pub async fn chain_snapshot(&self, limit: Option<u64>) -> Result<(), MirrorError> {
+        self.post_job("/chain/snapshot", limit, None, None, None)
             .await
     }
 

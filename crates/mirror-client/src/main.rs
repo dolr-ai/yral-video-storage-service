@@ -29,7 +29,7 @@ Commands:
   media-runs           List recent job runs [--job-kind KIND] [--limit N]
   media-failures       List failure groups [--job-kind KIND] [--limit N]
 
-  chain-snapshot       Snapshot chain posts (user_post_service.fetch_posts) into yral_posts/yral_users
+  chain-snapshot       Snapshot chain posts (user_post_service.fetch_posts) into yral_posts/yral_users [--limit N for a bounded sample]
   chain-status         Show latest chain snapshot run status
   chain-audit          Reconcile chain videos vs master+phash [--remediate to clear B + kick C import]
 
@@ -435,7 +435,7 @@ async fn main() {
             }
         }
         "chain-snapshot" => client
-            .chain_snapshot()
+            .chain_snapshot(limit)
             .await
             .map(|_| println!("chain snapshot started (202). poll with: chain-status")),
         "chain-status" => match client.chain_status().await {

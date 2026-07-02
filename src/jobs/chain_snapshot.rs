@@ -78,6 +78,7 @@ pub async fn run_chain_snapshot<S: PostPageSource>(
     client: &mut tokio_postgres::Client,
     requested_by: &str,
     cancel: &CancellationToken,
+    limit: Option<u64>,
 ) -> anyhow::Result<ChainSnapshotSummary> {
     let run_id = Uuid::new_v4();
     let job_kind: &str = JOB_KIND;
@@ -126,6 +127,16 @@ pub async fn run_chain_snapshot<S: PostPageSource>(
                     &[&run_id.to_string(), &cursor_json, &totals],
                 )
                 .await;
+            // Bounded sample (preview/testing): once `limit` posts are upserted,
+            // stop as a partial run — checked BEFORE walk_step so a deliberate cap
+            // always yields completed=false (no mark-stale/rebuild; we didn't see
+            // the whole corpus), even if this page would otherwise be a natural end.
+            // Prod passes None for a real, complete coverage snapshot.
+            if let Some(l) = limit {
+                if upserted >= l {
+                    return Ok((pages, false));
+                }
+            }
             let (stop, next) = walk_step(&cursor, &res, PAGE);
             if stop {
                 return Ok((pages, true));
@@ -308,7 +319,7 @@ mod tests {
                 last_post_id_fetched: None,
             }]),
         };
-        let summary = run_chain_snapshot(&src, &mut c, "test", &default_cancel())
+        let summary = run_chain_snapshot(&src, &mut c, "test", &default_cancel(), None)
             .await
             .unwrap();
         assert_eq!(summary.posts_upserted, 1);
@@ -334,5 +345,44 @@ mod tests {
             .unwrap()
             .get(0);
         assert_eq!(run, "completed");
+    }
+
+    #[tokio::test]
+    async fn limited_snapshot_stops_early_and_is_partial() {
+        let (_pg, mut c) = setup().await;
+        // Two full pages available, but limit=1 stops after the first page.
+        let src = MockSource {
+            pages: std::sync::Mutex::new(vec![
+                FetchPostsResult {
+                    posts: vec![mkpost("p1", "v1", "aaaaa-aa", PostStatus::Uploaded)],
+                    last_post_id_fetched: Some("p1".into()),
+                },
+                FetchPostsResult {
+                    posts: vec![mkpost("p2", "v2", "aaaaa-aa", PostStatus::Uploaded)],
+                    last_post_id_fetched: Some("p2".into()),
+                },
+            ]),
+        };
+        let summary = run_chain_snapshot(&src, &mut c, "test", &default_cancel(), Some(1))
+            .await
+            .unwrap();
+        assert_eq!(summary.posts_upserted, 1);
+        assert!(!summary.completed); // limited → partial
+        // A partial run must NOT rebuild the users rollup (didn't see whole corpus).
+        let users: i64 = c
+            .query_one("SELECT count(*) FROM yral_users", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(users, 0);
+        let run: String = c
+            .query_one(
+                "SELECT status FROM media_job_runs WHERE id=$1::TEXT::UUID",
+                &[&summary.job_run_id.to_string()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(run, "partial");
     }
 }
