@@ -158,6 +158,101 @@ FROM cat
     })
 }
 
+/// Fraction (0.0-1.0) of a sample of expected video_uids that match a video_id
+/// in master OR video_index. Low value ⇒ join-key skew ⇒ audit is meaningless.
+pub async fn join_key_match_rate(client: &Client, sample: i64) -> Result<f64, tokio_postgres::Error> {
+    let row = client
+        .query_one(
+            &format!(
+                r#"
+        WITH s AS (
+            SELECT DISTINCT video_uid FROM yral_posts WHERE NOT stale
+              AND status IN {expected} LIMIT $1
+        )
+        SELECT count(*) AS total,
+               count(*) FILTER (WHERE
+                   EXISTS (SELECT 1 FROM all_servable_videos_on_yral m WHERE m.video_id = s.video_uid)
+                OR EXISTS (SELECT 1 FROM video_index vi WHERE vi.video_id = s.video_uid)) AS matched
+        FROM s"#,
+                expected = EXPECTED_STATUSES
+            ),
+            &[&sample],
+        )
+        .await?;
+    let total: i64 = row.get("total");
+    let matched: i64 = row.get("matched");
+    Ok(if total == 0 { 1.0 } else { matched as f64 / total as f64 })
+}
+
+/// Up to `limit` category-D video_uids (expected, non-stale, not in master, not
+/// in video_index) with one representative creator, for manual probing.
+pub async fn category_d_sample(
+    client: &Client,
+    limit: i64,
+) -> Result<Vec<(String, String)>, tokio_postgres::Error> {
+    let sql = format!(
+        r#"
+        WITH expected AS (
+            SELECT video_uid, min(creator_principal) AS creator
+            FROM yral_posts WHERE NOT stale
+            GROUP BY video_uid HAVING bool_or(status IN {expected})
+        )
+        SELECT e.video_uid, e.creator
+        FROM expected e
+        LEFT JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid
+        LEFT JOIN video_index vi ON vi.video_id = e.video_uid
+        WHERE m.video_id IS NULL AND vi.video_id IS NULL
+        ORDER BY e.video_uid
+        LIMIT $1"#,
+        expected = EXPECTED_STATUSES
+    );
+    let rows = client.query(&sql, &[&limit]).await?;
+    Ok(rows
+        .iter()
+        .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)))
+        .collect())
+}
+
+/// Creators ranked by count of DISTINCT non-clean (B/C/D/E) expected videos they
+/// authored. A mixed-creator video is charged to EVERY creator that authored an
+/// expected post for it.
+pub async fn worst_creators(
+    client: &Client,
+    limit: i64,
+) -> Result<Vec<(String, i64)>, tokio_postgres::Error> {
+    let sql = format!(
+        r#"
+        WITH expected AS (
+            SELECT video_uid FROM yral_posts WHERE NOT stale
+            GROUP BY video_uid HAVING bool_or(status IN {expected})
+        ),
+        non_clean AS (
+            SELECT e.video_uid
+            FROM expected e
+            LEFT JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid
+            LEFT JOIN servable_video_hashes h
+                ON h.video_id = e.video_uid
+               AND h.hash_kind='phash' AND h.hash_version='offchain_binary_10x8_v1'
+               AND h.input_media_version='current_stored_object_v1'
+            LEFT JOIN video_index vi ON vi.video_id = e.video_uid
+            WHERE NOT (m.video_id IS NOT NULL AND m.servable_status='servable' AND h.video_id IS NOT NULL)
+        )
+        SELECT p.creator_principal, count(DISTINCT p.video_uid) AS n
+        FROM yral_posts p
+        JOIN non_clean nc ON nc.video_uid = p.video_uid
+        WHERE NOT p.stale AND p.status IN {expected}
+        GROUP BY p.creator_principal
+        ORDER BY n DESC
+        LIMIT $1"#,
+        expected = EXPECTED_STATUSES
+    );
+    let rows = client.query(&sql, &[&limit]).await?;
+    Ok(rows
+        .iter()
+        .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1)))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +474,43 @@ mod tests {
             .unwrap()
             .get(0);
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn join_key_gate_passes_when_matches_high() {
+        let (_pg, c) = setup().await;
+        let run = uuid::Uuid::new_v4();
+        for v in ["m1", "m2", "m3"] {
+            seed_master(&c, v, "servable").await;
+            upsert_chain_post(&c, &post(&format!("p{v}"), v, "cc", "Uploaded"), run)
+                .await
+                .unwrap();
+        }
+        assert!(join_key_match_rate(&c, 200).await.unwrap() >= 0.99);
+    }
+
+    #[tokio::test]
+    async fn join_key_gate_flags_when_matches_low() {
+        let (_pg, c) = setup().await;
+        let run = uuid::Uuid::new_v4();
+        for v in ["x1", "x2"] {
+            upsert_chain_post(&c, &post(&format!("p{v}"), v, "cc", "Uploaded"), run)
+                .await
+                .unwrap();
+        }
+        assert_eq!(join_key_match_rate(&c, 200).await.unwrap(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn d_sample_and_worst_creators_returned() {
+        let (_pg, c) = setup().await;
+        let run = uuid::Uuid::new_v4();
+        upsert_chain_post(&c, &post("pD", "vD", "cD", "Uploaded"), run)
+            .await
+            .unwrap(); // D: nowhere
+        let d = category_d_sample(&c, 100).await.unwrap();
+        assert!(d.iter().any(|(v, cr)| v == "vD" && cr == "cD"));
+        let worst = worst_creators(&c, 50).await.unwrap();
+        assert!(worst.iter().any(|(cr, n)| cr == "cD" && *n >= 1));
     }
 }
