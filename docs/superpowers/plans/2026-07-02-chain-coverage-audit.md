@@ -39,6 +39,87 @@
 - **mirror-client:** `crates/mirror-client/src/main.rs` dispatches on a subcommand string → `client.<method>()`. Client methods in `crates/mirror-client/src/lib.rs` use `self.sign(METHOD, path)` → `X-Timestamp` + `Authorization: HMAC-SHA256 <sig>` headers; `self.post_job(path, limit, ...)` for POST triggers; GET returns typed JSON.
 - **Tests:** Postgres-container tests must run with `--test-threads=1` (known `PgContainer` parallelism flake). Existing repo tests show the `test_client`/seed helpers in `src/media_index/repo.rs` and `src/jobs/media_phash.rs` test modules — reuse them.
 
+## Shared test scaffolding (used by ALL DB-backed tests in Tasks 2,3,6,7,8,9)
+
+The repo's test container helper is `crate::media_index::test_support::test_client()`
+(a `#[cfg(test)] pub(crate)` mod). **It returns `(PgContainer, Client)` — a tuple,
+NOT a bare `Client`.** `PgContainer` has a `Drop` that runs `docker rm -f`, so the
+container handle MUST be held for the test's lifetime (bind it, don't discard). It
+also does NOT apply schema — callers run both `crate::db::init_schema` (for
+`video_index` etc.) and `crate::media_index::init_schema` (for master / hashes /
+`media_job_runs` / our new tables). This mirrors `media_phash.rs::init_test_schema`
+(`src/jobs/media_phash.rs:521-524`).
+
+Put this in each test module (`chain_repo.rs`, `chain_snapshot.rs`):
+
+```rust
+// Full DB setup. Bind the returned PgContainer for the whole test (do NOT `_`-drop it).
+async fn setup() -> (crate::media_index::test_support::PgContainer, tokio_postgres::Client) {
+    let (pg, client) = crate::media_index::test_support::test_client().await;
+    crate::db::init_schema(&client).await.unwrap();
+    crate::media_index::init_schema(&client).await.unwrap();
+    (pg, client)
+}
+
+// Local seed helpers — these DO NOT exist in the repo; write them here.
+// Master insert modeled on `media_phash.rs:528` `seed_video`.
+async fn seed_master(c: &tokio_postgres::Client, video_id: &str, servable_status: &str) {
+    c.execute(
+        "INSERT INTO all_servable_videos_on_yral
+            (video_id, source_kind, servable_status, storage_provider, object_key, discovered_from)
+         VALUES ($1, 'test', $2, 'hetzner', $3, 'test')
+         ON CONFLICT (video_id) DO UPDATE SET servable_status = EXCLUDED.servable_status",
+        &[&video_id, &servable_status, &format!("videos/{video_id}.mp4")],
+    ).await.unwrap();
+}
+async fn seed_canonical_hash(c: &tokio_postgres::Client, video_id: &str) {
+    c.execute(
+        "INSERT INTO servable_video_hashes
+            (video_id, hash_kind, hash_version, input_media_version,
+             hash_value, hash_bit_length, num_frames, hash_size)
+         VALUES ($1, 'phash', 'offchain_binary_10x8_v1', 'current_stored_object_v1', 'ff', 64, 1, 64)
+         ON CONFLICT DO NOTHING",
+        &[&video_id],
+    ).await.unwrap();
+}
+async fn seed_video_index(c: &tokio_postgres::Client, video_id: &str) {
+    c.execute(
+        "INSERT INTO video_index (video_id, storj_key) VALUES ($1, $2) ON CONFLICT (video_id) DO NOTHING",
+        &[&video_id, &format!("creator/{video_id}.mp4")],
+    ).await.unwrap();
+}
+```
+
+> `seed_canonical_hash` uses the exact canonical tuple; a `servable_video_hashes`
+> row requires the NOT-NULL cols (`hash_value, hash_bit_length, num_frames,
+> hash_size`) — confirm against `schema.rs:44-59`. `seed_video_index` matches the
+> `video_index(video_id, storj_key)` insert form used at `media_imports.rs:1108`.
+
+For `chain_snapshot.rs` walk tests, author these builders (Post has 10 fields):
+
+```rust
+use ic_agent::export::Principal;
+use yral_canisters_client::user_post_service::{Post, PostStatus, PostViewStatistics, SystemTime};
+
+fn mkpost(id: &str, video_uid: &str, creator: &str, status: PostStatus) -> Post {
+    Post {
+        id: id.into(),
+        status,
+        share_count: 0,
+        hashtags: vec![],
+        description: String::new(),
+        created_at: SystemTime { secs_since_epoch: 0, nanos_since_epoch: 0 },
+        likes: vec![],
+        video_uid: video_uid.into(),
+        view_stats: PostViewStatistics { total_view_count: 0, average_watch_percentage: 0, threshold_view_count: 0 },
+        creator_principal: Principal::from_text(creator).unwrap_or_else(|_| Principal::anonymous()),
+    }
+}
+fn default_cancel() -> tokio_util::sync::CancellationToken { tokio_util::sync::CancellationToken::new() }
+```
+
+> Confirm the `Principal` import path (`ic_agent::export::Principal` or `candid::Principal` — match what the generated `Post` uses; grep the `out/did/user_post_service.rs` imports). Use a valid principal text for `creator` in tests (e.g. `"aaaaa-aa"`), or `Principal::anonymous().to_text()`.
+
 ## File structure
 
 **Create:**
@@ -117,19 +198,20 @@ In `src/media_index/mod.rs` add `pub mod chain_repo;` alongside the existing `pu
 
 - [ ] **Step 2: Write the failing test**
 
-In `src/media_index/chain_repo.rs`, create the test module. Reuse the crate's existing PG test helper (find it in `repo.rs` tests — likely `test_client()` returning a connected `Client` against the test container; match its exact signature/name).
+In `src/media_index/chain_repo.rs`, create the test module. Use the **Shared test
+scaffolding** `setup()` defined above (holds the `PgContainer`, applies both
+schemas). Do NOT wrap `test_client()` in a `-> Client` helper — that drops the
+container and kills the connection.
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // NOTE: match the real helper name/signature used in repo.rs tests.
-    async fn client() -> tokio_postgres::Client { crate::media_index::repo::tests::test_client().await }
+    // `setup()`, `seed_master`, `seed_canonical_hash`, `seed_video_index`, `post()` — see Shared test scaffolding.
 
     #[tokio::test]
     async fn upsert_is_idempotent_and_updates_status_and_run() {
-        let c = client().await;
+        let (_pg, c) = setup().await;
         let run1 = uuid::Uuid::new_v4();
         let p = ChainPost {
             post_id: "p1".into(),
@@ -235,7 +317,7 @@ git commit -m "feat(chain-audit): ChainPost + idempotent upsert_chain_post"
 ```rust
 #[tokio::test]
 async fn mark_stale_flags_posts_from_older_runs_only() {
-    let c = client().await;
+    let (_pg, c) = setup().await;
     let old = uuid::Uuid::new_v4();
     let cur = uuid::Uuid::new_v4();
     upsert_chain_post(&c, &post("s-old", "vo", "ca", "Uploaded"), old).await.unwrap();
@@ -250,7 +332,7 @@ async fn mark_stale_flags_posts_from_older_runs_only() {
 
 #[tokio::test]
 async fn rebuild_users_excludes_stale_and_aggregates() {
-    let c = client().await;
+    let (_pg, c) = setup().await;
     let run = uuid::Uuid::new_v4();
     upsert_chain_post(&c, &post("u1", "v1", "creatorX", "Uploaded"), run).await.unwrap();
     upsert_chain_post(&c, &post("u2", "v2", "creatorX", "ReadyToView"), run).await.unwrap();
@@ -408,71 +490,38 @@ git add src/jobs/chain_snapshot.rs src/jobs/mod.rs
 git commit -m "feat(chain-audit): SystemTime conversion + PostPageSource seam"
 ```
 
-### Task 5: The walk loop with termination guards (testable, no DB, no canister)
+### Task 5: Pure per-page termination decision (`walk_step`) — shipped code == tested code
 
 **Files:**
 - Modify: `src/jobs/chain_snapshot.rs`
 
-The loop is factored so the *page-driving* logic is tested against a mock source, and the DB upsert is a callback. This isolates the C2 termination risk.
+The C2 termination risk is isolated in ONE pure function, `walk_step`, that the
+Task-6 orchestrator actually calls. We deliberately do NOT build a separate
+`walk_pages` loop — a second loop that the prod path doesn't use would give false
+test confidence (the orchestrator also skips empty `video_uid`s and checks
+cancellation). Testing the decision function directly means the shipped loop is
+exactly what the tests exercise.
 
-- [ ] **Step 1: Write failing tests for termination**
+- [ ] **Step 1: Write failing tests for the decision function**
 
 ```rust
 #[cfg(test)]
-mod walk_tests {
+mod step_tests {
     use super::*;
-    use std::sync::Mutex;
-    use yral_canisters_client::user_post_service::{Post, PostStatus, SystemTime};
-
-    struct MockSource { pages: Mutex<Vec<FetchPostsResult>> }
-    #[async_trait::async_trait]
-    impl PostPageSource for MockSource {
-        async fn fetch(&self, _l: u64, _c: Option<String>) -> anyhow::Result<FetchPostsResult> {
-            Ok(self.pages.lock().unwrap().remove(0))
+    fn res(ids: &[&str], last: Option<&str>) -> FetchPostsResult {
+        FetchPostsResult {
+            posts: ids.iter().map(|i| mkpost(i, i, "aaaaa-aa", yral_canisters_client::user_post_service::PostStatus::Uploaded)).collect(),
+            last_post_id_fetched: last.map(|s| s.to_string()),
         }
     }
-    fn mkpost(id: &str) -> Post { /* fill required fields; video_uid=id, creator=Principal::anonymous(), status=Uploaded, created_at=SystemTime{0,0}, plus share/likes/view defaults */ unimplemented!() }
-
-    #[tokio::test]
-    async fn stops_on_null_cursor() {
-        let src = MockSource { pages: Mutex::new(vec![
-            FetchPostsResult { posts: vec![mkpost("a")], last_post_id_fetched: Some("a".into()) },
-            FetchPostsResult { posts: vec![mkpost("b")], last_post_id_fetched: None },
-        ]) };
-        let mut seen = vec![];
-        let done = walk_pages(&src, 10, 1000, |p| { seen.push(p.video_uid.clone()); }).await.unwrap();
-        assert_eq!(seen, vec!["a", "b"]);
-        assert!(done.completed);
-    }
-
-    #[tokio::test]
-    async fn stops_on_non_advancing_cursor() {
-        // cursor echoes the same id → must NOT loop forever
-        let src = MockSource { pages: Mutex::new(vec![
-            FetchPostsResult { posts: vec![mkpost("a")], last_post_id_fetched: Some("a".into()) },
-            FetchPostsResult { posts: vec![mkpost("a")], last_post_id_fetched: Some("a".into()) },
-        ]) };
-        let mut seen = vec![];
-        let done = walk_pages(&src, 1, 1000, |p| seen.push(p.video_uid.clone())).await.unwrap();
-        assert!(done.completed);
-        assert!(seen.len() <= 2); // stopped once cursor failed to advance
-    }
-
-    #[tokio::test]
-    async fn stops_on_short_page() {
-        let src = MockSource { pages: Mutex::new(vec![
-            FetchPostsResult { posts: vec![mkpost("a")], last_post_id_fetched: Some("a".into()) }, // len 1 < PAGE 10
-        ]) };
-        let mut seen = vec![];
-        let done = walk_pages(&src, 10, 1000, |p| seen.push(p.video_uid.clone())).await.unwrap();
-        assert_eq!(seen, vec!["a"]);
-        assert!(done.completed);
-    }
-
-    #[tokio::test]
-    async fn max_iters_backstop_marks_incomplete() {
-        // every page is full and cursor advances forever → backstop hits, completed=false
-        // (build a source that always returns a full page with a fresh cursor)
+    #[test] fn stops_on_null_cursor()      { let (stop, _) = walk_step(&Some("a".into()), &res(&["b"], None),      10); assert!(stop); }
+    #[test] fn stops_on_empty_cursor()     { let (stop, _) = walk_step(&Some("a".into()), &res(&["b"], Some("")),  10); assert!(stop); }
+    #[test] fn stops_on_empty_page()       { let (stop, _) = walk_step(&None,             &res(&[], Some("z")),     10); assert!(stop); }
+    #[test] fn stops_on_short_page()       { let (stop, _) = walk_step(&None,             &res(&["a"], Some("a")),  10); assert!(stop); } // len 1 < page 10
+    #[test] fn stops_on_non_advancing()    { let (stop, _) = walk_step(&Some("a".into()), &res(&["a"], Some("a")), 1);  assert!(stop); } // cursor echoed
+    #[test] fn continues_on_full_advance() {
+        let (stop, next) = walk_step(&Some("a".into()), &res(&["b","c"], Some("c")), 2);
+        assert!(!stop); assert_eq!(next, Some("c".into()));
     }
 }
 ```
@@ -480,61 +529,36 @@ mod walk_tests {
 - [ ] **Step 2: Run to verify fail**
 
 Run: `cargo test -p storj-interface --lib chain_snapshot -- --test-threads=1`
-Expected: FAIL — `walk_pages`/`WalkOutcome` undefined.
+Expected: FAIL — `walk_step` undefined.
 
-- [ ] **Step 3: Implement `walk_pages`**
+- [ ] **Step 3: Implement `walk_step`**
 
 ```rust
-pub struct WalkOutcome {
-    pub pages: u64,
-    pub posts_seen: u64,
-    pub completed: bool, // true only if a natural terminator hit (not the MAX_ITERS backstop)
-}
-
-/// Drive fetch_posts pagination. `on_post` is called for every post in order.
-/// Terminates on: empty page, null/empty cursor, non-advancing cursor, short
-/// page. `max_iters` is a hard backstop — if it trips, `completed = false`.
-pub async fn walk_pages<S: PostPageSource, F: FnMut(&yral_canisters_client::user_post_service::Post)>(
-    source: &S,
+/// Pure per-page decision. Returns `(stop, next_cursor)`. Stop on ANY of:
+/// empty page, null/empty next cursor, non-advancing cursor (echoed prev), or
+/// short page (`len < page`). The MAX_ITERS backstop lives in the caller.
+pub fn walk_step(
+    prev_cursor: &Option<String>,
+    res: &FetchPostsResult,
     page: u64,
-    max_iters: u64,
-    mut on_post: F,
-) -> anyhow::Result<WalkOutcome> {
-    let mut cursor: Option<String> = None;
-    let mut pages = 0u64;
-    let mut posts_seen = 0u64;
-    loop {
-        if pages >= max_iters {
-            return Ok(WalkOutcome { pages, posts_seen, completed: false });
-        }
-        let res = source.fetch(page, cursor.clone()).await?;
-        pages += 1;
-        let len = res.posts.len() as u64;
-        for p in &res.posts {
-            on_post(p);
-            posts_seen += 1;
-        }
-        let next = res.last_post_id_fetched.filter(|s| !s.is_empty());
-        let advanced = next.is_some() && next != cursor;
-        // terminate on any natural end-condition
-        if res.posts.is_empty() || next.is_none() || !advanced || len < page {
-            return Ok(WalkOutcome { pages, posts_seen, completed: true });
-        }
-        cursor = next;
-    }
+) -> (bool, Option<String>) {
+    let next = res.last_post_id_fetched.clone().filter(|s| !s.is_empty());
+    let advanced = next.is_some() && &next != prev_cursor;
+    let stop = res.posts.is_empty() || next.is_none() || !advanced || (res.posts.len() as u64) < page;
+    (stop, next)
 }
 ```
 
 - [ ] **Step 4: Run to verify pass**
 
 Run: `cargo test -p storj-interface --lib chain_snapshot -- --test-threads=1`
-Expected: PASS (fill in `mkpost` + the max-iters test body first).
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/jobs/chain_snapshot.rs
-git commit -m "feat(chain-audit): fetch_posts walk loop with termination guards"
+git commit -m "feat(chain-audit): pure walk_step termination decision + tests"
 ```
 
 ### Task 6: Orchestrator `run_chain_snapshot` (run row + upsert + stale + rollup)
@@ -547,9 +571,9 @@ git commit -m "feat(chain-audit): fetch_posts walk loop with termination guards"
 ```rust
 #[tokio::test]
 async fn snapshot_populates_posts_and_users_and_completes() {
-    let mut c = crate::media_index::repo::tests::test_client().await;
+    let (_pg, mut c) = setup().await;
     let src = MockSource { pages: Mutex::new(vec![
-        FetchPostsResult { posts: vec![mkpost_full("p1","v1","cA","Uploaded")], last_post_id_fetched: None },
+        FetchPostsResult { posts: vec![mkpost("p1","v1","aaaaa-aa",PostStatus::Uploaded)], last_post_id_fetched: None },
     ]) };
     let summary = run_chain_snapshot(&src, &mut c, "test", &default_cancel()).await.unwrap();
     assert_eq!(summary.posts_upserted, 1);
@@ -559,11 +583,17 @@ async fn snapshot_populates_posts_and_users_and_completes() {
     let users: i64 = c.query_one("SELECT count(*) FROM yral_users", &[]).await.unwrap().get(0);
     assert_eq!(users, 1);
     let run = c.query_one("SELECT status FROM media_job_runs WHERE id=$1::TEXT::UUID", &[&summary.job_run_id.to_string()]).await.unwrap();
-    assert_eq!(run.get::<_, String>(0), "completed"); // match the status literal media_imports uses
+    assert_eq!(run.get::<_, String>(0), "completed"); // NEW literal for this job_kind — see note below
 }
 ```
 
-> Confirm the exact success status literal used elsewhere (grep `mark_job_run_finished` call sites in `media_imports.rs` — e.g. `"completed"`). Use the same literal.
+> **Run-status literals (M1 fix).** `media_job_runs.status` has NO CHECK constraint
+> (`schema.rs:81-84`), and `media_imports` uses `'succeeded'` /
+> `'succeeded_with_failures'` / `'failed'` — NOT `'completed'`. This job introduces
+> its OWN literals `'completed'` (full walk) and `'partial'` (backstop/cancel). Do
+> NOT "match media_imports" — these are intentionally new and used consistently by
+> the Task-6 orchestrator, `chain-status`, and the readme. Just be consistent with
+> yourself.
 
 - [ ] **Step 2: Run to verify fail**
 
@@ -605,19 +635,16 @@ pub async fn run_chain_snapshot<S: PostPageSource>(
     let mut upserted = 0u64;
     let mut skipped = 0u64;
 
-    // Collect-then-write per page: keep the walk pure and do DB writes here.
-    // Simpler: pass a closure that buffers, then flush after each page. For the
-    // first version, buffer the whole page vec via walk_pages callback into a Vec,
-    // then upsert. (Page size is bounded by PAGE, so memory is fine.)
+    // Loop uses the pure `walk_step` (Task 5) for ALL termination decisions, so the
+    // shipped loop is exactly what the step tests cover. DB writes + progress happen here.
     let result = async {
         let mut cursor: Option<String> = None;
         let mut pages = 0u64;
         loop {
             if cancel.is_cancelled() { return Ok::<_, anyhow::Error>((pages, false)); }
-            if pages >= MAX_ITERS { return Ok((pages, false)); }
+            if pages >= MAX_ITERS { return Ok((pages, false)); } // backstop → completed=false
             let res = source.fetch(PAGE, cursor.clone()).await?;
             pages += 1;
-            let len = res.posts.len() as u64;
             for p in &res.posts {
                 if p.video_uid.is_empty() { skipped += 1; continue; }
                 let cp = ChainPost {
@@ -625,7 +652,7 @@ pub async fn run_chain_snapshot<S: PostPageSource>(
                     video_uid: p.video_uid.clone(),
                     creator_principal: p.creator_principal.to_text(),
                     created_at: system_time_to_utc(&p.created_at),
-                    status: format!("{:?}", p.status), // PostStatus variant name
+                    status: format!("{:?}", p.status), // PostStatus is unit variants → bare name
                 };
                 chain_repo::upsert_chain_post(client, &cp, run_id).await?;
                 upserted += 1;
@@ -638,11 +665,8 @@ pub async fn run_chain_snapshot<S: PostPageSource>(
                   &serde_json::json!({ "last": res.last_post_id_fetched }),
                   &totals],
             ).await;
-            let next = res.last_post_id_fetched.filter(|s| !s.is_empty());
-            let advanced = next.is_some() && next != cursor;
-            if res.posts.is_empty() || next.is_none() || !advanced || len < PAGE {
-                return Ok((pages, true));
-            }
+            let (stop, next) = walk_step(&cursor, &res, PAGE);
+            if stop { return Ok((pages, true)); }
             cursor = next;
         }
     }.await;
@@ -655,7 +679,7 @@ pub async fn run_chain_snapshot<S: PostPageSource>(
                 chain_repo::rebuild_yral_users(client).await?;
             }
             let totals = serde_json::json!({ "pages": pages, "posts_upserted": upserted, "skipped": skipped, "completed": completed });
-            let status = if completed { "completed" } else { "partial" }; // match repo literals
+            let status = if completed { "completed" } else { "partial" }; // NEW literals (no CHECK); see M1 note
             client.execute(
                 "UPDATE media_job_runs SET status=$2, finished_at=NOW(), totals=$3, error_message=NULL WHERE id=$1::TEXT::UUID",
                 &[&run_id.to_string(), &status, &totals],
@@ -673,7 +697,9 @@ pub async fn run_chain_snapshot<S: PostPageSource>(
 }
 ```
 
-> Note: the walk logic is duplicated here rather than reusing `walk_pages` because DB writes + progress are interleaved and `walk_pages` stays the pure, unit-tested spec of the termination rules. Keep the two termination conditions **identical** — if you change one, change both. (If you prefer DRY, refactor `walk_pages` to take an async per-page callback and call it here; only do that if the async-closure ergonomics stay clean.)
+> Termination is DRY: this loop calls the pure `walk_step` (Task 5), which is what
+> the step tests cover — no second loop to keep in sync. Only the DB-write and
+> progress side-effects live here.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -703,7 +729,7 @@ Seed one video per category and assert counts. Reuse existing seed helpers (`mak
 ```rust
 #[tokio::test]
 async fn audit_categorizes_all_five() {
-    let c = client().await;
+    let (_pg, c) = setup().await;
     let run = uuid::Uuid::new_v4();
     // A: master servable + canonical hash
     seed_master(&c, "A", "servable").await; seed_canonical_hash(&c, "A").await;
@@ -786,7 +812,9 @@ cat AS (
         h.video_id IS NOT NULL AS has_hash,
         vi.video_id IS NOT NULL AS in_index,
         EXISTS (SELECT 1 FROM media_job_failures f
-                WHERE f.video_id = e.video_uid AND f.next_retry_at > now()) AS backing_off
+                WHERE f.video_id = e.video_uid
+                  AND f.job_kind = 'media_phash'
+                  AND f.next_retry_at > now()) AS backing_off
     FROM expected e
     LEFT JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid
     LEFT JOIN servable_video_hashes h
@@ -844,14 +872,34 @@ git commit -m "feat(chain-audit): chain_audit categorization (A-E + status aggre
 
 ```rust
 #[tokio::test]
-async fn join_key_gate_passes_when_matches_high() { /* seed matching → match_rate high */ }
+async fn join_key_gate_passes_when_matches_high() {
+    let (_pg, c) = setup().await;
+    let run = uuid::Uuid::new_v4();
+    for v in ["m1","m2","m3"] { seed_master(&c, v, "servable").await;
+        upsert_chain_post(&c, &post(&format!("p{v}"), v, "cc", "Uploaded"), run).await.unwrap(); }
+    assert!(join_key_match_rate(&c, 200).await.unwrap() >= 0.99);
+}
 #[tokio::test]
-async fn join_key_gate_flags_when_matches_low() { /* seed all-mismatch → match_rate 0 */ }
+async fn join_key_gate_flags_when_matches_low() {
+    let (_pg, c) = setup().await;
+    let run = uuid::Uuid::new_v4();
+    for v in ["x1","x2"] { upsert_chain_post(&c, &post(&format!("p{v}"), v, "cc", "Uploaded"), run).await.unwrap(); }
+    assert_eq!(join_key_match_rate(&c, 200).await.unwrap(), 0.0);
+}
 #[tokio::test]
-async fn d_sample_and_worst_creators_returned() { /* one D video, assert it appears + creator charged */ }
+async fn d_sample_and_worst_creators_returned() {
+    let (_pg, c) = setup().await;
+    let run = uuid::Uuid::new_v4();
+    // D video: nowhere, expected, creator "cD"
+    upsert_chain_post(&c, &post("pD", "vD", "cD", "Uploaded"), run).await.unwrap();
+    let d = category_d_sample(&c, 100).await.unwrap();
+    assert!(d.iter().any(|(v, cr)| v == "vD" && cr == "cD"));
+    let worst = worst_creators(&c, 50).await.unwrap();
+    assert!(worst.iter().any(|(cr, n)| cr == "cD" && *n >= 1));
+}
 ```
 
-- [ ] **Step 2: Run to verify fail** — `cargo test -p storj-interface --lib chain_repo -- --test-threads=1` → FAIL.
+- [ ] **Step 2: Run to verify fail** — `cargo test -p storj-interface --lib chain_repo -- --test-threads=1` → FAIL (functions undefined).
 
 - [ ] **Step 3: Implement**
 
@@ -874,20 +922,61 @@ pub async fn join_key_match_rate(client: &Client, sample: i64) -> Result<f64, to
     Ok(if total == 0 { 1.0 } else { matched as f64 / total as f64 })
 }
 
-/// Up to `limit` category-D video_uids with their creator(s), for manual probing.
+/// Up to `limit` category-D video_uids (expected, non-stale, not in master, not
+/// in video_index) with one representative creator, for manual probing.
 pub async fn category_d_sample(client: &Client, limit: i64) -> Result<Vec<(String, String)>, tokio_postgres::Error> {
-    // expected, non-stale, not in master, not in video_index; join back for a creator
-    // ... SELECT p.video_uid, min(p.creator_principal) ... GROUP BY p.video_uid LIMIT $1
-    todo!("SQL analogous to chain_audit's D filter")
+    let sql = format!(r#"
+        WITH expected AS (
+            SELECT video_uid, min(creator_principal) AS creator
+            FROM yral_posts WHERE NOT stale
+            GROUP BY video_uid HAVING bool_or(status IN {expected})
+        )
+        SELECT e.video_uid, e.creator
+        FROM expected e
+        LEFT JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid
+        LEFT JOIN video_index vi ON vi.video_id = e.video_uid
+        WHERE m.video_id IS NULL AND vi.video_id IS NULL
+        ORDER BY e.video_uid
+        LIMIT $1"#, expected = EXPECTED_STATUSES);
+    let rows = client.query(&sql, &[&limit]).await?;
+    Ok(rows.iter().map(|r| (r.get::<_, String>(0), r.get::<_, String>(1))).collect())
 }
 
-/// Creators ranked by count of non-clean (B/C/D/E) expected videos they authored.
+/// Creators ranked by count of DISTINCT non-clean (B/C/D/E) expected videos they
+/// authored. A mixed-creator video is charged to EVERY creator that authored an
+/// expected post for it (join yral_posts → non-clean video set).
 pub async fn worst_creators(client: &Client, limit: i64) -> Result<Vec<(String, i64)>, tokio_postgres::Error> {
-    todo!("charge each non-clean video to every creator that authored an expected post for it")
+    let sql = format!(r#"
+        WITH expected AS (
+            SELECT video_uid FROM yral_posts WHERE NOT stale
+            GROUP BY video_uid HAVING bool_or(status IN {expected})
+        ),
+        non_clean AS (
+            SELECT e.video_uid
+            FROM expected e
+            LEFT JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid
+            LEFT JOIN servable_video_hashes h
+                ON h.video_id = e.video_uid
+               AND h.hash_kind='phash' AND h.hash_version='offchain_binary_10x8_v1'
+               AND h.input_media_version='current_stored_object_v1'
+            LEFT JOIN video_index vi ON vi.video_id = e.video_uid
+            WHERE NOT (m.video_id IS NOT NULL AND m.servable_status='servable' AND h.video_id IS NOT NULL) -- not category A
+        )
+        SELECT p.creator_principal, count(DISTINCT p.video_uid) AS n
+        FROM yral_posts p
+        JOIN non_clean nc ON nc.video_uid = p.video_uid
+        WHERE NOT p.stale AND p.status IN {expected}
+        GROUP BY p.creator_principal
+        ORDER BY n DESC
+        LIMIT $1"#, expected = EXPECTED_STATUSES);
+    let rows = client.query(&sql, &[&limit]).await?;
+    Ok(rows.iter().map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1))).collect())
 }
 ```
 
-Fill the two `todo!`s with SQL reusing the same category logic (factor the `cat` CTE into a helper string if convenient).
+> The `non_clean` "NOT category-A" predicate is the exact complement of the A
+> filter in `chain_audit` — keep them consistent (A = in master AND servable AND
+> has canonical hash).
 
 - [ ] **Step 4: Run to verify pass** — expected PASS.
 
@@ -907,29 +996,56 @@ git commit -m "feat(chain-audit): join-key gate + D sample + worst-creators"
 
 ```rust
 #[tokio::test]
-async fn remediate_b_clears_failure_rows_for_category_b_only() {
-    // seed a B video with a backing-off media_job_failures row; call remediate_missing_phash; assert row gone
+async fn remediate_b_clears_only_phash_failures() {
+    let (_pg, c) = setup().await;
+    // a phash failure row AND an unrelated import failure row for the same video
+    c.execute("INSERT INTO media_job_failures (job_kind, item_key, phase, last_error, next_retry_at) \
+               VALUES ('media_phash','v1','download','x', now()+interval '1 day')", &[]).await.unwrap();
+    c.execute("UPDATE media_job_failures SET video_id='v1' WHERE item_key='v1'", &[]).await.unwrap();
+    c.execute("INSERT INTO media_job_failures (job_kind, item_key, phase, last_error, video_id) \
+               VALUES ('legacy_video_index_import','v1','import','y','v1')", &[]).await.unwrap();
+    let n = clear_phash_failures(&c, &["v1".to_string()]).await.unwrap();
+    assert_eq!(n, 1); // only the media_phash row
+    let import_left: i64 = c.query_one("SELECT count(*) FROM media_job_failures WHERE job_kind='legacy_video_index_import'", &[]).await.unwrap().get(0);
+    assert_eq!(import_left, 1); // untouched
 }
 ```
 
 - [ ] **Step 2: Run → FAIL.**
 
-- [ ] **Step 3: Implement** (mirror `media_phash.rs:322` delete)
+- [ ] **Step 3: Implement** (mirror the SCOPED delete at `media_phash.rs:322` — `job_kind = 'media_phash'`)
 
 ```rust
-/// Clear failure rows for the given video_ids so the media-phash worker retries.
-/// Returns rows deleted. (Category-B remediation.)
+/// Clear ONLY the phash failure rows for the given video_ids so the media-phash
+/// worker retries. Scoped to `job_kind='media_phash'` so unrelated import/other
+/// failure rows are left intact. Returns rows deleted. (Category-B remediation.)
 pub async fn clear_phash_failures(client: &Client, video_ids: &[String]) -> Result<u64, tokio_postgres::Error> {
     if video_ids.is_empty() { return Ok(0); }
     client.execute(
-        "DELETE FROM media_job_failures WHERE video_id = ANY($1)",
+        "DELETE FROM media_job_failures WHERE job_kind = 'media_phash' AND video_id = ANY($1)",
         &[&video_ids],
     ).await
 }
 
-/// The category-B video_ids (servable master rows missing the canonical tuple).
+/// The category-B video_ids (coverage-expected, non-stale, in master, servable,
+/// missing the canonical hash tuple).
 pub async fn category_b_video_ids(client: &Client, limit: i64) -> Result<Vec<String>, tokio_postgres::Error> {
-    todo!("SELECT expected, in master, servable, no canonical hash; LIMIT $1")
+    let sql = format!(r#"
+        WITH expected AS (
+            SELECT video_uid FROM yral_posts WHERE NOT stale
+            GROUP BY video_uid HAVING bool_or(status IN {expected})
+        )
+        SELECT e.video_uid
+        FROM expected e
+        JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid AND m.servable_status = 'servable'
+        LEFT JOIN servable_video_hashes h
+            ON h.video_id = e.video_uid
+           AND h.hash_kind='phash' AND h.hash_version='offchain_binary_10x8_v1'
+           AND h.input_media_version='current_stored_object_v1'
+        WHERE h.video_id IS NULL
+        LIMIT $1"#, expected = EXPECTED_STATUSES);
+    let rows = client.query(&sql, &[&limit]).await?;
+    Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
 }
 ```
 
@@ -1035,6 +1151,8 @@ pub struct ChainAuditResponse {
 }
 #[derive(Serialize)] pub struct DVideo { pub video_uid: String, pub creator_principal: String }
 #[derive(Serialize)] pub struct CreatorGap { pub creator_principal: String, pub non_clean: i64 }
+// `import_triggered` = false means EITHER no category-C rows OR an import was
+// already running (contention). The response's `category_c` count disambiguates.
 #[derive(Serialize)] pub struct Remediated { pub b_failures_cleared: u64, pub import_triggered: bool }
 
 #[derive(Deserialize)]
@@ -1060,15 +1178,37 @@ pub async fn chain_audit(
     let worst = chain_repo::worst_creators(&client, 50).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let remediated = if params.remediate {
+        // B: clear phash failure rows (scoped to job_kind='media_phash').
         let b_ids = chain_repo::category_b_video_ids(&client, 100_000).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let cleared = chain_repo::clear_phash_failures(&client, &b_ids).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        // C: trigger a bulk import run only if there are category-C rows.
-        let import_triggered = rep.category_c > 0;
-        if import_triggered {
-            // Reuse the existing import single-flight + spawn path. Simplest: set the
-            // import flag + spawn import_current_video_index exactly like routes::media::import_video_index.
-            // (Factor that spawn into a helper if cleaner.)
-        }
+
+        // C: trigger a BULK import run (import_current_video_index picks up all
+        // video_index rows missing from master — there is no per-video enqueue).
+        // Reuse the exact single-flight from routes::media::import_video_index:
+        // acquire job_media_import_running; if already held, report contention
+        // (import_triggered=false) rather than lying about success.
+        let import_triggered = if rep.category_c > 0
+            && state.job_media_import_running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok()
+        {
+            let guard = JobGuard(state.job_media_import_running.clone());
+            let db_url = state.db_url.clone();
+            let cancel = state.media_job_cancel.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            tokio::spawn(async move {
+                let _guard = guard;
+                match db::connect(&db_url).await {
+                    Ok(mut c) => {
+                        if let Err(e) = crate::jobs::media_imports::import_current_video_index(
+                            &mut c, "chain_audit_remediate", None, &cancel).await {
+                            tracing::error!(error=%e, "chain_audit remediate: import failed");
+                        }
+                    }
+                    Err(e) => tracing::error!(error=%e, "chain_audit remediate: DB connect failed"),
+                }
+            });
+            true
+        } else { false };
+
         Some(Remediated { b_failures_cleared: cleared, import_triggered })
     } else { None };
 
@@ -1092,7 +1232,10 @@ pub async fn chain_snapshot_status(State(state): State<AppState>) -> Result<Json
         &[]).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let body = match row {
         Some(r) => serde_json::json!({
-            "id": r.get::<_,String>(0), "status": r.get::<_,String>(1),
+            "id": r.get::<_,String>(0),
+            "status": r.get::<_,String>(1),
+            "started_at": r.get::<_,chrono::DateTime<chrono::Utc>>(2),
+            "finished_at": r.get::<_,Option<chrono::DateTime<chrono::Utc>>>(3),
             "totals": r.get::<_,Option<serde_json::Value>>(4),
             "cursor": r.get::<_,Option<serde_json::Value>>(5),
         }),
@@ -1326,7 +1469,7 @@ git commit -m "docs(chain-audit): document chain-* mirror-client subcommands"
 
 ## Notes for the implementer
 
-- **DRY termination rules:** `walk_pages` (pure, unit-tested) and the orchestrator loop must keep identical terminate-conditions. Prefer refactoring to a single async-callback walk if the closure ergonomics stay clean; otherwise keep both and comment the coupling (as noted in Task 6).
-- **Confirm-before-final placeholders:** the `'servable'` status literal and the run success-status literal (`'completed'`) are placeholders — grep the existing writers and match them exactly. A mismatch silently mis-categorizes.
+- **Termination is centralized:** the orchestrator calls the pure `walk_step`; that function is the single source of truth for stop-conditions and is directly unit-tested. No duplicated loop to keep in sync.
+- **Confirm-before-final:** the `'servable'` status literal IS confirmed (`media_imports.rs:389`; seeds). The run literals `'completed'`/`'partial'` are NEW to this job_kind (media_job_runs has no CHECK) — do NOT swap them for media_imports' `'succeeded'`. The phash `JOB_KIND` = `"media_phash"` (`media_phash.rs:17`) — use it to scope both the remediation delete and the `backing_off` count.
 - **`--test-threads=1`** on every PG-backed test invocation (known container flake).
 - **No Patroni changes. Feature branch only. `--remediate` never runs without explicit user go.**
