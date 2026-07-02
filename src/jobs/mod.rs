@@ -1,3 +1,4 @@
+pub mod chain_snapshot;
 pub mod ingest;
 #[allow(dead_code)]
 pub mod media_imports;
