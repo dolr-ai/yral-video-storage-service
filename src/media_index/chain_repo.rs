@@ -1,6 +1,9 @@
 use chrono::{DateTime, Utc};
+use phash::{HASH_KIND, HASH_VERSION};
 use tokio_postgres::Client;
 use uuid::Uuid;
+
+use crate::jobs::media_phash::INPUT_MEDIA_VERSION;
 
 #[derive(Debug, Clone)]
 pub struct ChainPost {
@@ -60,6 +63,13 @@ pub async fn mark_stale_posts(client: &Client, run_id: Uuid) -> Result<u64, toki
 
 /// Recompute the derived rollup from non-stale posts.
 pub async fn rebuild_yral_users(client: &Client) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute(
+            "DELETE FROM yral_users WHERE creator_principal NOT IN
+                (SELECT DISTINCT creator_principal FROM yral_posts WHERE NOT stale)",
+            &[],
+        )
+        .await?;
     client
         .execute(
             "INSERT INTO yral_users (creator_principal, post_count, first_seen, last_seen)
@@ -127,9 +137,9 @@ cat AS (
     LEFT JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid
     LEFT JOIN servable_video_hashes h
         ON h.video_id = e.video_uid
-       AND h.hash_kind = 'phash'
-       AND h.hash_version = 'offchain_binary_10x8_v1'
-       AND h.input_media_version = 'current_stored_object_v1'
+       AND h.hash_kind = '{hk}'
+       AND h.hash_version = '{hv}'
+       AND h.input_media_version = '{imv}'
     LEFT JOIN video_index vi ON vi.video_id = e.video_uid
 )
 SELECT
@@ -143,7 +153,10 @@ SELECT
   count(*) FILTER (WHERE in_master AND servable AND NOT has_hash AND backing_off) AS b_backing_off
 FROM cat
     "#,
-        expected = EXPECTED_STATUSES
+        expected = EXPECTED_STATUSES,
+        hk = HASH_KIND,
+        hv = HASH_VERSION,
+        imv = INPUT_MEDIA_VERSION
     );
     let row = client.query_one(&sql, &[]).await?;
     Ok(ChainAuditReport {
@@ -239,8 +252,8 @@ pub async fn worst_creators(
             LEFT JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid
             LEFT JOIN servable_video_hashes h
                 ON h.video_id = e.video_uid
-               AND h.hash_kind='phash' AND h.hash_version='offchain_binary_10x8_v1'
-               AND h.input_media_version='current_stored_object_v1'
+               AND h.hash_kind='{hk}' AND h.hash_version='{hv}'
+               AND h.input_media_version='{imv}'
             LEFT JOIN video_index vi ON vi.video_id = e.video_uid
             WHERE NOT (m.video_id IS NOT NULL AND m.servable_status='servable' AND h.video_id IS NOT NULL)
         )
@@ -251,7 +264,10 @@ pub async fn worst_creators(
         GROUP BY p.creator_principal
         ORDER BY n DESC
         LIMIT $1"#,
-        expected = EXPECTED_STATUSES
+        expected = EXPECTED_STATUSES,
+        hk = HASH_KIND,
+        hv = HASH_VERSION,
+        imv = INPUT_MEDIA_VERSION
     );
     let rows = client.query(&sql, &[&limit]).await?;
     Ok(rows
@@ -295,14 +311,48 @@ pub async fn category_b_video_ids(
         JOIN all_servable_videos_on_yral m ON m.video_id = e.video_uid AND m.servable_status = 'servable'
         LEFT JOIN servable_video_hashes h
             ON h.video_id = e.video_uid
-           AND h.hash_kind='phash' AND h.hash_version='offchain_binary_10x8_v1'
-           AND h.input_media_version='current_stored_object_v1'
+           AND h.hash_kind='{hk}' AND h.hash_version='{hv}'
+           AND h.input_media_version='{imv}'
         WHERE h.video_id IS NULL
         LIMIT $1"#,
-        expected = EXPECTED_STATUSES
+        expected = EXPECTED_STATUSES,
+        hk = HASH_KIND,
+        hv = HASH_VERSION,
+        imv = INPUT_MEDIA_VERSION
     );
     let rows = client.query(&sql, &[&limit]).await?;
     Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotFreshness {
+    pub run_id: Option<String>,
+    pub status: Option<String>,
+    pub newest_fetched_at: Option<String>,
+}
+
+/// Latest chain_snapshot run + newest non-stale fetched_at, for audit output.
+pub async fn snapshot_freshness(
+    client: &Client,
+) -> Result<SnapshotFreshness, tokio_postgres::Error> {
+    let run = client
+        .query_opt(
+            "SELECT id::TEXT, status FROM media_job_runs
+             WHERE job_kind='chain_snapshot' ORDER BY started_at DESC LIMIT 1",
+            &[],
+        )
+        .await?;
+    let newest = client
+        .query_one(
+            "SELECT max(fetched_at)::TEXT FROM yral_posts WHERE NOT stale",
+            &[],
+        )
+        .await?;
+    Ok(SnapshotFreshness {
+        run_id: run.as_ref().map(|r| r.get::<_, String>(0)),
+        status: run.as_ref().map(|r| r.get::<_, String>(1)),
+        newest_fetched_at: newest.get::<_, Option<String>>(0),
+    })
 }
 
 #[cfg(test)]
@@ -589,5 +639,16 @@ mod tests {
         assert!(d.iter().any(|(v, cr)| v == "vD" && cr == "cD"));
         let worst = worst_creators(&c, 50).await.unwrap();
         assert!(worst.iter().any(|(cr, n)| cr == "cD" && *n >= 1));
+    }
+
+    #[tokio::test]
+    async fn snapshot_freshness_reports_newest() {
+        let (_pg, c) = setup().await;
+        let run = uuid::Uuid::new_v4();
+        upsert_chain_post(&c, &post("pf", "vf", "cc", "Uploaded"), run)
+            .await
+            .unwrap();
+        let f = snapshot_freshness(&c).await.unwrap();
+        assert!(f.newest_fetched_at.is_some());
     }
 }

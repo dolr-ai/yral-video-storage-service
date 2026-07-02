@@ -57,6 +57,7 @@ pub fn walk_step(
 const JOB_KIND: &str = "chain_snapshot";
 const PAGE: u64 = 100;
 const MAX_ITERS: u64 = 100_000;
+const PAGE_DELAY_MS: u64 = 50;
 
 #[derive(Debug, Clone)]
 pub struct ChainSnapshotSummary {
@@ -129,6 +130,7 @@ pub async fn run_chain_snapshot<S: PostPageSource>(
             if stop {
                 return Ok((pages, true));
             }
+            tokio::time::sleep(std::time::Duration::from_millis(PAGE_DELAY_MS)).await;
             cursor = next;
         }
     }

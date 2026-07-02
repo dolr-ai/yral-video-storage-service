@@ -81,6 +81,9 @@ pub struct ChainAuditResponse {
     pub d_sample: Vec<DVideo>,
     pub worst_creators: Vec<CreatorGap>,
     pub remediated: Option<Remediated>,
+    pub snapshot_run_id: Option<String>,
+    pub snapshot_status: Option<String>,
+    pub snapshot_newest_fetched_at: Option<String>,
 }
 #[derive(Serialize)]
 pub struct DVideo {
@@ -112,6 +115,10 @@ pub async fn chain_audit(
     Query(params): Query<AuditParams>,
 ) -> Result<Json<ChainAuditResponse>, StatusCode> {
     let client = db::connect(&state.db_url)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let fresh = chain_repo::snapshot_freshness(&client)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -210,6 +217,9 @@ pub async fn chain_audit(
             })
             .collect(),
         remediated,
+        snapshot_run_id: fresh.run_id,
+        snapshot_status: fresh.status,
+        snapshot_newest_fetched_at: fresh.newest_fetched_at,
     }))
 }
 

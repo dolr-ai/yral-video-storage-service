@@ -203,6 +203,9 @@ pub struct ChainAuditResult {
     pub d_sample: Vec<ChainDVideo>,
     pub worst_creators: Vec<ChainCreatorGap>,
     pub remediated: Option<serde_json::Value>,
+    pub snapshot_run_id: Option<String>,
+    pub snapshot_status: Option<String>,
+    pub snapshot_newest_fetched_at: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]

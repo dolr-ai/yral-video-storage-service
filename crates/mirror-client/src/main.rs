@@ -450,6 +450,12 @@ async fn main() {
             match client.chain_audit(remediate).await {
                 Ok(r) => {
                     println!("chain coverage audit:");
+                    println!(
+                        "  snapshot: run={} status={} newest={}",
+                        r.snapshot_run_id.as_deref().unwrap_or("none"),
+                        r.snapshot_status.as_deref().unwrap_or("none"),
+                        r.snapshot_newest_fetched_at.as_deref().unwrap_or("none")
+                    );
                     println!("  total expected videos : {}", r.total_expected);
                     println!("  A clean               : {}", r.category_a);
                     println!(
