@@ -127,33 +127,36 @@ excluded AS (
     ) t
 ),
 cat AS (
-    SELECT e.video_uid,
-        m.video_id IS NOT NULL AS in_master,
-        (m.servable_status = 'servable') AS servable,
-        h.video_id IS NOT NULL AS has_hash,
-        vi.video_id IS NOT NULL AS in_index,
+    -- EXISTS / scalar-subquery form (NOT left joins): each probe hits the
+    -- canonical-key functional index (idx_*_video_key), so the audit stays
+    -- index-driven over the 585k master / 1.17M hash rows. LEFT JOINs here made
+    -- the planner pick seq-scan hash joins → prod connection timeout.
+    SELECT
+        (SELECT m.servable_status FROM all_servable_videos_on_yral m
+           WHERE lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = e.vk
+           LIMIT 1) AS master_status,
+        EXISTS (SELECT 1 FROM servable_video_hashes h
+                WHERE lower(replace(regexp_replace(h.video_id, '^.*/', ''), '-', '')) = e.vk
+                  AND h.hash_kind = '{hk}'
+                  AND h.hash_version = '{hv}'
+                  AND h.input_media_version = '{imv}') AS has_hash,
+        EXISTS (SELECT 1 FROM video_index vi
+                WHERE lower(replace(regexp_replace(vi.video_id, '^.*/', ''), '-', '')) = e.vk) AS in_index,
         EXISTS (SELECT 1 FROM media_job_failures f
                 WHERE lower(replace(regexp_replace(f.video_id, '^.*/', ''), '-', '')) = e.vk
                   AND f.job_kind = 'media_phash'
                   AND f.next_retry_at > now()) AS backing_off
     FROM expected e
-    LEFT JOIN all_servable_videos_on_yral m ON lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = e.vk
-    LEFT JOIN servable_video_hashes h
-        ON lower(replace(regexp_replace(h.video_id, '^.*/', ''), '-', '')) = e.vk
-       AND h.hash_kind = '{hk}'
-       AND h.hash_version = '{hv}'
-       AND h.input_media_version = '{imv}'
-    LEFT JOIN video_index vi ON lower(replace(regexp_replace(vi.video_id, '^.*/', ''), '-', '')) = e.vk
 )
 SELECT
   (SELECT count(*) FROM cat) AS total_expected,
-  count(*) FILTER (WHERE in_master AND servable AND has_hash)          AS a,
-  count(*) FILTER (WHERE in_master AND servable AND NOT has_hash)      AS b,
-  count(*) FILTER (WHERE NOT in_master AND in_index)                   AS c,
-  count(*) FILTER (WHERE NOT in_master AND NOT in_index)               AS d,
-  count(*) FILTER (WHERE in_master AND NOT servable)                   AS e,
-  (SELECT n FROM excluded)                                             AS excluded,
-  count(*) FILTER (WHERE in_master AND servable AND NOT has_hash AND backing_off) AS b_backing_off
+  count(*) FILTER (WHERE master_status = 'servable' AND has_hash)                   AS a,
+  count(*) FILTER (WHERE master_status = 'servable' AND NOT has_hash)               AS b,
+  count(*) FILTER (WHERE master_status IS NULL AND in_index)                        AS c,
+  count(*) FILTER (WHERE master_status IS NULL AND NOT in_index)                    AS d,
+  count(*) FILTER (WHERE master_status IS NOT NULL AND master_status <> 'servable') AS e,
+  (SELECT n FROM excluded)                                                          AS excluded,
+  count(*) FILTER (WHERE master_status = 'servable' AND NOT has_hash AND backing_off) AS b_backing_off
 FROM cat
     "#,
         expected = EXPECTED_STATUSES,
@@ -223,9 +226,10 @@ pub async fn category_d_sample(
         )
         SELECT e.video_uid, e.creator
         FROM expected e
-        LEFT JOIN all_servable_videos_on_yral m ON lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = e.vk
-        LEFT JOIN video_index vi ON lower(replace(regexp_replace(vi.video_id, '^.*/', ''), '-', '')) = e.vk
-        WHERE m.video_id IS NULL AND vi.video_id IS NULL
+        WHERE NOT EXISTS (SELECT 1 FROM all_servable_videos_on_yral m
+                          WHERE lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = e.vk)
+          AND NOT EXISTS (SELECT 1 FROM video_index vi
+                          WHERE lower(replace(regexp_replace(vi.video_id, '^.*/', ''), '-', '')) = e.vk)
         ORDER BY e.video_uid
         LIMIT $1"#,
         expected = EXPECTED_STATUSES
@@ -252,15 +256,19 @@ pub async fn worst_creators(
             GROUP BY video_uid HAVING bool_or(status IN {expected})
         ),
         non_clean AS (
+            -- NOT category-A = NOT (servable-in-master AND has canonical hash).
+            -- EXISTS form so the index is used (see chain_audit note).
             SELECT e.video_uid
             FROM expected e
-            LEFT JOIN all_servable_videos_on_yral m ON lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = e.vk
-            LEFT JOIN servable_video_hashes h
-                ON lower(replace(regexp_replace(h.video_id, '^.*/', ''), '-', '')) = e.vk
-               AND h.hash_kind='{hk}' AND h.hash_version='{hv}'
-               AND h.input_media_version='{imv}'
-            LEFT JOIN video_index vi ON lower(replace(regexp_replace(vi.video_id, '^.*/', ''), '-', '')) = e.vk
-            WHERE NOT (m.video_id IS NOT NULL AND m.servable_status='servable' AND h.video_id IS NOT NULL)
+            WHERE NOT (
+                EXISTS (SELECT 1 FROM all_servable_videos_on_yral m
+                        WHERE lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = e.vk
+                          AND m.servable_status = 'servable')
+                AND EXISTS (SELECT 1 FROM servable_video_hashes h
+                            WHERE lower(replace(regexp_replace(h.video_id, '^.*/', ''), '-', '')) = e.vk
+                              AND h.hash_kind='{hk}' AND h.hash_version='{hv}'
+                              AND h.input_media_version='{imv}')
+            )
         )
         SELECT p.creator_principal, count(DISTINCT p.video_uid) AS n
         FROM yral_posts p
@@ -319,11 +327,10 @@ pub async fn category_b_video_ids(
         FROM expected e
         JOIN all_servable_videos_on_yral m
             ON lower(replace(regexp_replace(m.video_id, '^.*/', ''), '-', '')) = e.vk AND m.servable_status = 'servable'
-        LEFT JOIN servable_video_hashes h
-            ON lower(replace(regexp_replace(h.video_id, '^.*/', ''), '-', '')) = e.vk
-           AND h.hash_kind='{hk}' AND h.hash_version='{hv}'
-           AND h.input_media_version='{imv}'
-        WHERE h.video_id IS NULL
+        WHERE NOT EXISTS (SELECT 1 FROM servable_video_hashes h
+                          WHERE lower(replace(regexp_replace(h.video_id, '^.*/', ''), '-', '')) = e.vk
+                            AND h.hash_kind='{hk}' AND h.hash_version='{hv}'
+                            AND h.input_media_version='{imv}')
         LIMIT $1"#,
         expected = EXPECTED_STATUSES,
         hk = HASH_KIND,
