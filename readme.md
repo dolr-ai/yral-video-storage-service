@@ -6,23 +6,44 @@ Storj interface is a rest interface to upload objects to storj via the uplink cl
 
 Storj interface is configured via the following environment variables.
 
-| Name                         | Description                                                                      | Default (no default means `required`) |
-|------------------------------|----------------------------------------------------------------------------------|---------------------------------------|
-| `STORJ_MIRROR_ACCESS_GRANT`  | Storj access grant for current sfw raw/HLS uploads and mirror jobs               |                                       |
-| `STORJ_SFW_BUCKET`           | Current sfw Storj bucket                                                         | yral-sfw                              |
-| `STORJ_ACCESS_GRANT_NSFW`    | Storj access grant that is used when accessing the nsfw bucket                   |                                       |
-| `NSFW_BUCKET`                | The name of the nsfw bucket                                                      | yral-nsfw-videos                      |
-| `HETZNER_S3_ACCESS_KEY`      | Hetzner S3 access key for current sfw raw/HLS uploads                            |                                       |
-| `HETZNER_S3_SECRET_KEY`      | Hetzner S3 secret key for current sfw raw/HLS uploads                            |                                       |
-| `HETZNER_S3_BUCKET`          | Hetzner S3 bucket for current sfw raw/HLS uploads                                |                                       |
-| `STORJ_ACCESS_GRANT_SFW`     | Legacy sfw access grant kept for compatibility with older startup configuration  |                                       |
-| `SFW_BUCKET`                 | Legacy sfw bucket kept for compatibility with older startup configuration        | yral-videos                           |
-| `SERVICE_SECRET_TOKEN`       | Shared secret between storj interface and the caller                             |                                       |
+| Name                                               | Description                                                                      | Default (no default means `required`) |
+|----------------------------------------------------|----------------------------------------------------------------------------------|---------------------------------------|
+| `STORJ_MIRROR_ACCESS_GRANT`                        | Storj access grant for current sfw raw/HLS uploads and mirror jobs               |                                       |
+| `STORJ_SFW_BUCKET`                                 | Current sfw Storj bucket                                                         | yral-sfw                              |
+| `STORJ_ACCESS_GRANT_NSFW`                          | Storj access grant that is used when accessing the nsfw bucket                   |                                       |
+| `NSFW_BUCKET`                                      | The name of the nsfw bucket                                                      | yral-nsfw-videos                      |
+| `HETZNER_S3_ACCESS_KEY`                            | Hetzner S3 access key for current sfw raw/HLS uploads                            |                                       |
+| `HETZNER_S3_SECRET_KEY`                            | Hetzner S3 secret key for current sfw raw/HLS uploads                            |                                       |
+| `HETZNER_S3_BUCKET`                                | Hetzner S3 bucket for current sfw raw/HLS uploads                                |                                       |
+| `STORJ_ACCESS_GRANT_SFW`                           | Legacy sfw access grant kept for compatibility with older startup configuration  |                                       |
+| `SFW_BUCKET`                                       | Legacy sfw bucket kept for compatibility with older startup configuration        | yral-videos                           |
+| `SERVICE_SECRET_TOKEN`                             | Shared secret between storj interface and the caller                             |                                       |
+| `PUBLIC_BASE_URL`                                  | Externally-reachable base URL; used to build upload URLs                         |                                       |
+| `OFFCHAIN_EVENTS_API_TOKEN`                        | Bearer token for offchain analytics events                                      | Optional                              |
+| `YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN`     | Bearer token for push notifications                                              | Optional                              |
 
 For running locally, a Storj account is required.
 - `cp .env.example .env`
 - Create/update the current sfw bucket (`yral-sfw`) and nsfw bucket (`yral-nsfw-videos`). Update `.env` file accordingly.
 - Create access grants to the buckets. Current sfw raw/HLS uploads use `STORJ_MIRROR_ACCESS_GRANT`; nsfw uploads use `STORJ_ACCESS_GRANT_NSFW`.
+
+## Upload routes (merged from yral-video-upload-service)
+
+These public routes (no HMAC; auth is the in-body chain-verified delegated identity)
+were merged in from the former upload service:
+
+- `POST /get-upload-url` — `{publisher_user_id}` → `{upload_url, video_id}`. Validates
+  the principal via user-info-service, mints a video id, returns an upload URL built
+  from `PUBLIC_BASE_URL`.
+- `POST /update-video-metadata` — `{delegated_identity_wire, meta, post_details}`.
+  Verifies `sender() == creator_principal`, finalizes the Storj upload, registers the
+  post on user-post-service, fires analytics + notification.
+- `POST /mark-post-as-published` — `{post_id, delegated_identity_wire}`. Verifies
+  ownership, flips the post to `Uploaded`, fires analytics + notification.
+
+`/update-video-metadata` and `/mark-post-as-published` require `OFFCHAIN_EVENTS_API_TOKEN`
+and `YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN`; without them those routes return 503
+(the service still starts and all other routes work).
 
 ## Running prebuilt image
 

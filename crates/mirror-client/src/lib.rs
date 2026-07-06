@@ -17,6 +17,48 @@ pub enum MirrorError {
     Http(#[from] reqwest::Error),
 }
 
+/// Coverage stats from the media audit endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct CoverageStats {
+    pub total_servable: i64,
+    pub with_canonical_phash: i64,
+    pub missing_canonical_phash: i64,
+}
+
+/// Running status of media import and phash jobs.
+#[derive(Debug, serde::Deserialize)]
+pub struct MediaJobsStatus {
+    pub import_running: bool,
+    pub phash_running: bool,
+}
+
+/// Liveness view of the steady-state sweep worker's lease.
+#[derive(Debug, serde::Deserialize)]
+pub struct SweepStatus {
+    pub owner: Option<String>,
+    pub heartbeat: Option<String>,
+    pub last_discovery_at: Option<String>,
+}
+
+/// A single event from the media feed.
+#[derive(Debug, serde::Deserialize)]
+pub struct MediaFeedEvent {
+    pub cursor: i64,
+    pub event_kind: String,
+    pub video_id: String,
+    pub hash_kind: Option<String>,
+    pub hash_version: Option<String>,
+    pub input_media_version: Option<String>,
+    pub payload: serde_json::Value,
+    pub created_at: String,
+}
+
+/// Response from the media feed endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct MediaFeedResponse {
+    pub events: Vec<MediaFeedEvent>,
+}
+
 /// Response from cancel_all endpoint.
 #[derive(Debug, serde::Deserialize)]
 pub struct CancelResponse {
@@ -77,6 +119,8 @@ pub struct VideoEntry {
 #[derive(Debug, serde::Deserialize)]
 pub struct DuplicateEntry {
     pub phash: String,
+    pub hash_kind: String,
+    pub hash_version: String,
     pub videos: Vec<VideoEntry>,
 }
 
@@ -90,6 +134,8 @@ pub struct DuplicatesResponse {
 #[derive(Debug, serde::Deserialize)]
 pub struct DuplicateGroup {
     pub phash: String,
+    pub hash_kind: String,
+    pub hash_version: String,
     pub count: usize,
     pub videos: Vec<VideoEntry>,
 }
@@ -109,6 +155,69 @@ pub struct FailedJobsResponse {
 #[derive(Debug, serde::Deserialize)]
 pub struct RetryResponse {
     pub reset_count: i64,
+}
+
+/// A single job run record from the media/jobs/runs endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct JobRunView {
+    pub job_kind: String,
+    pub status: String,
+    pub requested_by: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub totals: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+}
+
+/// Response from the media/jobs/runs endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct JobRunsResponse {
+    pub runs: Vec<JobRunView>,
+}
+
+/// A single failure group from the media/jobs/failures endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct FailureGroupView {
+    pub phase: String,
+    pub count: i64,
+    pub samples: Vec<String>,
+}
+
+/// Response from the media/jobs/failures endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct FailuresResponse {
+    pub failures: Vec<FailureGroupView>,
+}
+
+/// Result of the chain coverage reconciliation audit.
+#[derive(Debug, serde::Deserialize)]
+pub struct ChainAuditResult {
+    pub total_expected: i64,
+    pub category_a: i64,
+    pub category_b: i64,
+    pub category_c: i64,
+    pub category_d: i64,
+    pub category_e: i64,
+    pub excluded_by_status: i64,
+    pub b_backing_off: i64,
+    pub d_sample: Vec<ChainDVideo>,
+    pub worst_creators: Vec<ChainCreatorGap>,
+    pub remediated: Option<serde_json::Value>,
+    pub snapshot_run_id: Option<String>,
+    pub snapshot_status: Option<String>,
+    pub snapshot_newest_fetched_at: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ChainDVideo {
+    pub video_uid: String,
+    pub creator_principal: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ChainCreatorGap {
+    pub creator_principal: String,
+    pub non_clean: i64,
 }
 
 pub struct MirrorClient {
@@ -146,6 +255,7 @@ impl MirrorClient {
         limit: Option<u64>,
         prefix: Option<&str>,
         full_scan: Option<bool>,
+        shard: Option<(i64, i64)>,
     ) -> Result<(), MirrorError> {
         let mut url = self.http.post(format!("{}{}", self.base_url, path));
         if let Some(n) = limit {
@@ -156,6 +266,9 @@ impl MirrorClient {
         }
         if let Some(f) = full_scan {
             url = url.query(&[("full_scan", f.to_string())]);
+        }
+        if let Some((of, idx)) = shard {
+            url = url.query(&[("shard", idx.to_string()), ("of", of.to_string())]);
         }
         let (ts, sig) = self.sign("POST", path);
         let resp = url
@@ -188,7 +301,7 @@ impl MirrorClient {
         prefix: Option<&str>,
         full_scan: Option<bool>,
     ) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/scan-storj", limit, prefix, full_scan)
+        self.post_job("/mirror/jobs/scan-storj", limit, prefix, full_scan, None)
             .await
     }
 
@@ -198,16 +311,17 @@ impl MirrorClient {
         prefix: Option<&str>,
         full_scan: Option<bool>,
     ) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/scan-hetzner", limit, prefix, full_scan)
+        self.post_job("/mirror/jobs/scan-hetzner", limit, prefix, full_scan, None)
             .await
     }
 
     pub async fn phash_backfill(&self, limit: Option<u64>) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/phash", limit, None, None).await
+        self.post_job("/mirror/jobs/phash", limit, None, None, None)
+            .await
     }
 
     pub async fn mirror(&self, limit: Option<u64>) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/mirror", limit, None, None)
+        self.post_job("/mirror/jobs/mirror", limit, None, None, None)
             .await
     }
 
@@ -219,7 +333,7 @@ impl MirrorClient {
         prefix: Option<&str>,
         full_scan: Option<bool>,
     ) -> Result<(), MirrorError> {
-        self.post_job("/mirror/jobs/run-pipeline", limit, prefix, full_scan)
+        self.post_job("/mirror/jobs/run-pipeline", limit, prefix, full_scan, None)
             .await
     }
 
@@ -393,6 +507,207 @@ impl MirrorClient {
         }
     }
 
+    /// Trigger video-index import job (202 accepted, 409 already running).
+    pub async fn media_import(&self, limit: Option<u64>) -> Result<(), MirrorError> {
+        self.post_job("/media/import/video-index", limit, None, None, None)
+            .await
+    }
+
+    /// Trigger pHash computation job (202 accepted, 409 already running).
+    pub async fn media_phash(
+        &self,
+        limit: Option<u64>,
+        shard: Option<(i64, i64)>,
+    ) -> Result<(), MirrorError> {
+        self.post_job("/media/phash/run", limit, None, None, shard)
+            .await
+    }
+
+    /// Cancel any running media import / phash jobs (returns 200 with JSON body).
+    pub async fn media_cancel(&self) -> Result<serde_json::Value, MirrorError> {
+        let path = "/media/jobs/cancel";
+        let (ts, sig) = self.sign("POST", path);
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<serde_json::Value>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Get the running status of media import and phash jobs.
+    pub async fn media_status(&self) -> Result<MediaJobsStatus, MirrorError> {
+        let path = "/media/jobs/status";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<MediaJobsStatus>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Get the steady-state sweep worker lease state (owner + heartbeat + last discovery).
+    pub async fn media_sweep(&self) -> Result<SweepStatus, MirrorError> {
+        let path = "/media/sweep/status";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<SweepStatus>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Get coverage stats: how many servable videos have a canonical pHash.
+    pub async fn media_audit(&self) -> Result<CoverageStats, MirrorError> {
+        let path = "/media/audit/missing-phash";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<CoverageStats>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Stream events from the media feed.  Query params are appended to the
+    /// request URL; the HMAC signs the path only (query excluded), matching
+    /// server-side signing behaviour.
+    pub async fn media_feed(
+        &self,
+        after: Option<i64>,
+        limit: Option<u64>,
+    ) -> Result<MediaFeedResponse, MirrorError> {
+        let path = "/media/feed/events";
+        let (ts, sig) = self.sign("GET", path);
+        let mut req = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"));
+        if let Some(a) = after {
+            req = req.query(&[("after", a.to_string())]);
+        }
+        if let Some(n) = limit {
+            req = req.query(&[("limit", n.to_string())]);
+        }
+        let resp = req.send().await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<MediaFeedResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// List recent job runs, optionally filtered by job_kind and limited to N rows.
+    /// Signs the bare path only; query params are appended after signing.
+    pub async fn media_runs(
+        &self,
+        job_kind: Option<&str>,
+        limit: Option<u64>,
+    ) -> Result<JobRunsResponse, MirrorError> {
+        let path = "/media/jobs/runs";
+        let (ts, sig) = self.sign("GET", path);
+        let mut req = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"));
+        if let Some(k) = job_kind {
+            req = req.query(&[("job_kind", k)]);
+        }
+        if let Some(n) = limit {
+            req = req.query(&[("limit", n.to_string())]);
+        }
+        let resp = req.send().await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<JobRunsResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// List failure groups, optionally filtered by job_kind and limited to N rows.
+    /// Signs the bare path only; query params are appended after signing.
+    pub async fn media_failures(
+        &self,
+        job_kind: Option<&str>,
+        limit: Option<u64>,
+    ) -> Result<FailuresResponse, MirrorError> {
+        let path = "/media/jobs/failures";
+        let (ts, sig) = self.sign("GET", path);
+        let mut req = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"));
+        if let Some(k) = job_kind {
+            req = req.query(&[("job_kind", k)]);
+        }
+        if let Some(n) = limit {
+            req = req.query(&[("limit", n.to_string())]);
+        }
+        let resp = req.send().await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<FailuresResponse>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
     pub async fn config_update(
         &self,
         payload: &ConfigUpdate,
@@ -411,6 +726,88 @@ impl MirrorClient {
         match resp.status().as_u16() {
             200 => Ok(resp.json::<ConfigResponse>().await?),
             401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Trigger the chain snapshot walk (202 accepted, 409 already running).
+    /// `limit` caps posts upserted (bounded sample for preview/testing); None = full walk.
+    pub async fn chain_snapshot(&self, limit: Option<u64>) -> Result<(), MirrorError> {
+        self.post_job("/chain/snapshot", limit, None, None, None)
+            .await
+    }
+
+    /// Latest chain snapshot run status.
+    pub async fn chain_status(&self) -> Result<serde_json::Value, MirrorError> {
+        let path = "/chain/snapshot/status";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<serde_json::Value>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Read-only join-key diagnostic: sampled master/video_index membership +
+    /// example rows, to diagnose why the audit join-key gate tripped.
+    pub async fn chain_diagnose(&self) -> Result<serde_json::Value, MirrorError> {
+        let path = "/chain/diagnose";
+        let (ts, sig) = self.sign("GET", path);
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"))
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<serde_json::Value>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            status => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(MirrorError::ServerError { status, body })
+            }
+        }
+    }
+
+    /// Run the reconciliation audit. `remediate=true` appends `?remediate=true`.
+    /// Signs the bare path only; query params are appended after signing,
+    /// matching server-side signing behaviour (see `media_feed`).
+    pub async fn chain_audit(&self, remediate: bool) -> Result<ChainAuditResult, MirrorError> {
+        let path = "/chain/audit";
+        let (ts, sig) = self.sign("GET", path);
+        let mut req = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("X-Timestamp", &ts)
+            .header("Authorization", format!("HMAC-SHA256 {sig}"));
+        if remediate {
+            req = req.query(&[("remediate", "true")]);
+        }
+        let resp = req.send().await?;
+
+        match resp.status().as_u16() {
+            200 => Ok(resp.json::<ChainAuditResult>().await?),
+            401 | 403 => Err(MirrorError::Unauthorized),
+            422 => Err(MirrorError::ServerError {
+                status: 422,
+                body: "join-key match rate too low — snapshot/audit skew; investigate before trusting counts".to_string(),
+            }),
             status => {
                 let body = resp.text().await.unwrap_or_default();
                 Err(MirrorError::ServerError { status, body })

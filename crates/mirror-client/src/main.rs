@@ -19,11 +19,30 @@ Commands:
   config               Show dynamic configuration
   config-set           Update configuration (use --phash, --mirror, --page)
 
+  media-import         Trigger video-index import into media master table [--limit N]
+  media-phash          Trigger pHash computation for media master entries [--limit N] [--shard I --of N]
+  media-cancel         Cancel any running media import / phash jobs
+  media-status         Show running status of media import and phash jobs
+  media-audit          Show pHash coverage stats for servable videos
+  media-sweep          Show steady-state sweep worker lease (owner/heartbeat/last discovery)
+  media-feed           Stream events from the media feed [--after CURSOR] [--limit N]
+  media-runs           List recent job runs [--job-kind KIND] [--limit N]
+  media-failures       List failure groups [--job-kind KIND] [--limit N]
+
+  chain-snapshot       Snapshot chain posts (user_post_service.fetch_posts) into yral_posts/yral_users [--limit N for a bounded sample]
+  chain-diagnose       Read-only join-key diagnostic (sample master/index membership + example rows)
+  chain-status         Show latest chain snapshot run status
+  chain-audit          Reconcile chain videos vs master+phash [--remediate to clear B + kick C import]
+
 Options:
-  --limit N           Stop after processing N items (scan/phash/mirror/run-pipeline)
+  --limit N           Stop after processing N items (scan/phash/mirror/run-pipeline/media-*)
   --prefix PREFIX     Filter by object key prefix, e.g. publisher-id/  (scan/run-pipeline)
   --full-scan         Scan entire S3 bucket and reset failed jobs instead of resuming (scan/run-pipeline)
   --video VIDEO_ID    Video ID for video-duplicates command
+  --after CURSOR      Cursor (i64) for media-feed pagination
+  --job-kind KIND     Job kind filter for media-runs / media-failures (e.g. media_phash)
+  --shard I --of N    Process only shard I of N (0 <= I < N) for media-phash; both required together
+  --remediate         Clear category-B and kick category-C import for chain-audit
 
 Environment:
   MIRROR_SERVICE_URL    Base URL of the service (required)
@@ -46,6 +65,43 @@ fn parse_full_scan(args: &[String]) -> Option<bool> {
         Some(true)
     } else {
         None
+    }
+}
+
+fn parse_after(args: &[String]) -> Option<i64> {
+    args.windows(2)
+        .find(|w| w[0] == "--after")
+        .and_then(|w| w[1].parse().ok())
+}
+
+fn parse_job_kind(args: &[String]) -> Option<String> {
+    args.windows(2)
+        .find(|w| w[0] == "--job-kind")
+        .map(|w| w[1].clone())
+}
+
+fn parse_shard_arg(args: &[String]) -> Option<i64> {
+    args.windows(2)
+        .find(|w| w[0] == "--shard")
+        .and_then(|w| w[1].parse().ok())
+}
+
+fn parse_of(args: &[String]) -> Option<i64> {
+    args.windows(2)
+        .find(|w| w[0] == "--of")
+        .and_then(|w| w[1].parse().ok())
+}
+
+/// Resolve `--shard`/`--of` into the `(of, idx)` tuple the client expects.
+///
+/// `Ok(None)` when neither flag is set. Both must be present together with
+/// `of >= 1` and `0 <= shard < of`; otherwise `Err(msg)`.
+fn resolve_shard(args: &[String]) -> Result<Option<(i64, i64)>, String> {
+    match (parse_shard_arg(args), parse_of(args)) {
+        (None, None) => Ok(None),
+        (Some(idx), Some(of)) if of >= 1 && (0..of).contains(&idx) => Ok(Some((of, idx))),
+        (Some(_), Some(_)) => Err("--shard must satisfy 0 <= shard < of, and of >= 1".to_string()),
+        _ => Err("--shard and --of must be provided together".to_string()),
     }
 }
 
@@ -83,7 +139,10 @@ async fn main() {
                     println!("\nduplicate phashes ({}):", r.duplicate_phashes.len());
                     for d in &r.duplicate_phashes {
                         let ids: Vec<&str> = d.videos.iter().map(|v| v.video_id.as_str()).collect();
-                        println!("  {} → {:?}", d.phash, ids);
+                        println!(
+                            "  {}/{} {} → {:?}",
+                            d.hash_kind, d.hash_version, d.phash, ids
+                        );
                     }
                 }
                 Ok(())
@@ -95,7 +154,10 @@ async fn main() {
                 println!("duplicate groups:  {}", r.total_groups);
                 println!("duplicate videos:  {}", r.total_duplicate_videos);
                 for g in &r.groups {
-                    println!("\n  phash: {} ({} videos)", g.phash, g.count);
+                    println!(
+                        "\n  phash: {}/{} {} ({} videos)",
+                        g.hash_kind, g.hash_version, g.phash, g.count
+                    );
                     for v in &g.videos {
                         println!("    video_id:    {}", v.video_id);
                         println!("    storj_key:   {}", v.storj_key.as_deref().unwrap_or("—"));
@@ -141,7 +203,8 @@ async fn main() {
             };
             match client.video_duplicates(vid).await {
                 Ok(Some(g)) => {
-                    println!("phash: {}", g.phash);
+                    println!("phash: {} {}", g.hash_version, g.phash);
+                    println!("kind: {}", g.hash_kind);
                     println!("count: {}", g.count);
                     for v in &g.videos {
                         println!("  {}", v.video_id);
@@ -253,6 +316,184 @@ async fn main() {
                 Err(e) => Err(e),
             }
         }
+        "media-import" => client
+            .media_import(limit)
+            .await
+            .map(|_| println!("media-import accepted")),
+        "media-phash" => match resolve_shard(&args) {
+            Ok(shard) => client
+                .media_phash(limit, shard)
+                .await
+                .map(|_| println!("media-phash accepted")),
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+        },
+        "media-cancel" => match client.media_cancel().await {
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "media-status" => match client.media_status().await {
+            Ok(s) => {
+                println!(
+                    "import: {}",
+                    if s.import_running { "running" } else { "idle" }
+                );
+                println!(
+                    "phash:  {}",
+                    if s.phash_running { "running" } else { "idle" }
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "media-audit" => match client.media_audit().await {
+            Ok(r) => {
+                println!("total_servable:         {}", r.total_servable);
+                println!("with_canonical_phash:   {}", r.with_canonical_phash);
+                println!("missing_canonical_phash:{}", r.missing_canonical_phash);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "media-sweep" => match client.media_sweep().await {
+            Ok(s) => {
+                println!(
+                    "owner:             {}",
+                    s.owner.as_deref().unwrap_or("<none>")
+                );
+                println!(
+                    "heartbeat:         {}",
+                    s.heartbeat.as_deref().unwrap_or("<none>")
+                );
+                println!(
+                    "last_discovery_at: {}",
+                    s.last_discovery_at.as_deref().unwrap_or("<never>")
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "media-feed" => {
+            let after = parse_after(&args);
+            match client.media_feed(after, limit).await {
+                Ok(r) => {
+                    println!("{:#?}", r);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "media-runs" => {
+            let job_kind = parse_job_kind(&args);
+            match client.media_runs(job_kind.as_deref(), limit).await {
+                Ok(r) => {
+                    if r.runs.is_empty() {
+                        println!("no runs found");
+                    }
+                    for run in &r.runs {
+                        let totals_str = run
+                            .totals
+                            .as_ref()
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "—".to_string());
+                        let finished = run.finished_at.as_deref().unwrap_or("—");
+                        let err = run
+                            .error_message
+                            .as_deref()
+                            .map(|e| format!("  error: {e}"))
+                            .unwrap_or_default();
+                        println!(
+                            "{:<20}  {:<12}  totals: {:<30}  started: {}  finished: {}{}",
+                            run.job_kind, run.status, totals_str, run.started_at, finished, err
+                        );
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "media-failures" => {
+            let job_kind = parse_job_kind(&args);
+            match client.media_failures(job_kind.as_deref(), limit).await {
+                Ok(r) => {
+                    if r.failures.is_empty() {
+                        println!("no failures found");
+                    }
+                    for group in &r.failures {
+                        println!("{:<30}  count: {}", group.phase, group.count);
+                        for sample in &group.samples {
+                            println!("    {sample}");
+                        }
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "chain-snapshot" => client
+            .chain_snapshot(limit)
+            .await
+            .map(|_| println!("chain snapshot started (202). poll with: chain-status")),
+        "chain-status" => match client.chain_status().await {
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "chain-diagnose" => match client.chain_diagnose().await {
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        "chain-audit" => {
+            let remediate = args.iter().any(|a| a == "--remediate");
+            match client.chain_audit(remediate).await {
+                Ok(r) => {
+                    println!("chain coverage audit:");
+                    println!(
+                        "  snapshot: run={} status={} newest={}",
+                        r.snapshot_run_id.as_deref().unwrap_or("none"),
+                        r.snapshot_status.as_deref().unwrap_or("none"),
+                        r.snapshot_newest_fetched_at.as_deref().unwrap_or("none")
+                    );
+                    println!("  total expected videos : {}", r.total_expected);
+                    println!("  A clean               : {}", r.category_a);
+                    println!(
+                        "  B no canonical phash  : {}  (backing off: {})",
+                        r.category_b, r.b_backing_off
+                    );
+                    println!("  C unimported          : {}", r.category_c);
+                    println!("  D not in buckets      : {}", r.category_d);
+                    println!("  E dead in master      : {}", r.category_e);
+                    println!("  excluded (status)     : {}", r.excluded_by_status);
+                    if !r.d_sample.is_empty() {
+                        println!("  category-D sample (video_uid  creator):");
+                        for d in r.d_sample.iter().take(20) {
+                            println!("    {}  {}", d.video_uid, d.creator_principal);
+                        }
+                    }
+                    if !r.worst_creators.is_empty() {
+                        println!("  worst creators (non-clean count):");
+                        for c in r.worst_creators.iter().take(20) {
+                            println!("    {}  {}", c.creator_principal, c.non_clean);
+                        }
+                    }
+                    if let Some(rem) = &r.remediated {
+                        println!("  remediated: {rem}");
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(1);
@@ -354,6 +595,38 @@ mod tests {
     }
 
     #[test]
+    fn parses_job_kind_flag() {
+        let a = args(&["bin", "media-runs", "--job-kind", "media_phash"]);
+        assert_eq!(parse_job_kind(&a), Some("media_phash".to_string()));
+        let none: Vec<String> = args(&["bin", "media-runs"]);
+        assert_eq!(parse_job_kind(&none), None);
+    }
+
+    #[test]
+    fn resolve_shard_none_when_both_absent() {
+        assert_eq!(resolve_shard(&args(&["bin", "media-phash"])), Ok(None));
+    }
+
+    #[test]
+    fn resolve_shard_valid_pair_returns_of_idx() {
+        let a = args(&["bin", "media-phash", "--shard", "1", "--of", "3"]);
+        assert_eq!(resolve_shard(&a), Ok(Some((3, 1))));
+    }
+
+    #[test]
+    fn resolve_shard_rejects_partial_pair() {
+        assert!(resolve_shard(&args(&["bin", "media-phash", "--shard", "0"])).is_err());
+        assert!(resolve_shard(&args(&["bin", "media-phash", "--of", "3"])).is_err());
+    }
+
+    #[test]
+    fn resolve_shard_rejects_out_of_range() {
+        assert!(resolve_shard(&args(&["bin", "p", "--shard", "3", "--of", "3"])).is_err());
+        assert!(resolve_shard(&args(&["bin", "p", "--shard", "-1", "--of", "3"])).is_err());
+        assert!(resolve_shard(&args(&["bin", "p", "--shard", "0", "--of", "0"])).is_err());
+    }
+
+    #[test]
     fn parse_limit_returns_value() {
         assert_eq!(
             parse_limit(&args(&["mirror-client", "mirror", "--limit", "10"])),
@@ -393,5 +666,13 @@ mod tests {
             parse_full_scan(&args(&["mirror-client", "scan-hetzner"])),
             None
         );
+    }
+
+    #[test]
+    fn parses_after_flag() {
+        let a = args(&["bin", "media-feed", "--after", "42"]);
+        assert_eq!(parse_after(&a), Some(42));
+        let none = args(&["bin", "media-feed"]);
+        assert_eq!(parse_after(&none), None);
     }
 }

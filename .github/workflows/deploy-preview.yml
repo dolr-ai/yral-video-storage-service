@@ -111,7 +111,7 @@ jobs:
           echo "preview_url=${PREVIEW_URL}" >> "$GITHUB_OUTPUT"
           echo "service_name=${SERVICE_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Import Coolify Secrets from Vault
+      - name: Import Secrets from Vault
         uses: hashicorp/vault-action@v3
         with:
           url: https://vault.yral.com
@@ -119,17 +119,21 @@ jobs:
           role: yral-video-storage-service-role
           jwtGithubAudience: "https://github.com/dolr-ai"
           secrets: |
-            secret/data/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
-            secret/data/COOLIFY_PROJECT_UUID value | COOLIFY_PROJECT_UUID ;
-            secret/data/COOLIFY_SERVER_UUID value | COOLIFY_SERVER_UUID ;
-            secret/data/COOLIFY_ENV_UUID value | COOLIFY_ENV_UUID ;
+            secret/data/yral-video-storage-service/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
+            secret/data/yral-video-storage-service/COOLIFY_PROJECT_UUID value | COOLIFY_PROJECT_UUID ;
+            secret/data/yral-video-storage-service/COOLIFY_SERVER_UUID value | COOLIFY_SERVER_UUID ;
+            secret/data/yral-video-storage-service/COOLIFY_ENV_UUID value | COOLIFY_ENV_UUID ;
+            secret/data/yral-video-storage-service/BACKEND_ADMIN_IDENTITY value | BACKEND_ADMIN_IDENTITY ;
+            secret/data/yral-video-storage-service/INTERNAL_ENCRYPTION_SECRET value | INTERNAL_ENCRYPTION_SECRET ;
+            secret/data/yral-video-storage-service/MODERATION_HMAC_SECRET value | MODERATION_HMAC_SECRET ;
+            secret/data/yral-video-storage-service/YRAL_METADATA_USER_NOTIFICATION_API_KEY value | YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN ;
 
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY_PRAKASH }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H 138.201.129.173 >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H 138.201.129.173 94.130.13.115 88.99.151.102 >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Provision Preview Postgres
         env:
@@ -142,6 +146,15 @@ jobs:
           if [ -z "$COOLIFY_IP" ]; then
             echo "ERROR: could not determine Coolify server IP — iptables rule will not be added"
             exit 1
+          fi
+          # Resolve hostname to IP if the API returned a hostname instead of an IP
+          if ! echo "$COOLIFY_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Coolify API returned hostname '${COOLIFY_IP}', resolving to IP..."
+            COOLIFY_IP=$(getent hosts "$COOLIFY_IP" | awk '{print $1}' | head -n1)
+            if [ -z "$COOLIFY_IP" ]; then
+              echo "ERROR: could not resolve hostname to IP"
+              exit 1
+            fi
           fi
           echo "Coolify server IP: ${COOLIFY_IP}"
 
@@ -168,6 +181,35 @@ jobs:
             fi
           "
           echo "$REMOTE_SCRIPT" | ssh deploy@138.201.129.173 bash
+
+      - name: Open RabbitMQ firewall for Coolify server
+        run: |
+          COOLIFY_IP=$(curl -s "https://coolify.yral.com/api/v1/servers/${COOLIFY_SERVER_UUID}" \
+            -H "Authorization: Bearer ${COOLIFY_TOKEN}" | jq -r '.ip // empty')
+          if [ -z "$COOLIFY_IP" ]; then
+            echo "ERROR: could not determine Coolify server IP"
+            exit 1
+          fi
+          # Resolve hostname to IP if the API returned a hostname instead of an IP
+          if ! echo "$COOLIFY_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Coolify API returned hostname '${COOLIFY_IP}', resolving to IP..."
+            COOLIFY_IP=$(getent hosts "$COOLIFY_IP" | awk '{print $1}' | head -n1)
+            if [ -z "$COOLIFY_IP" ]; then
+              echo "ERROR: could not resolve hostname to IP"
+              exit 1
+            fi
+          fi
+          echo "Opening RabbitMQ port 5671 for Coolify IP: ${COOLIFY_IP}"
+          for NODE in 94.130.13.115 88.99.151.102 138.201.129.173; do
+            ssh deploy@${NODE} "
+              sudo iptables -N RABBITMQ-FILTER 2>/dev/null || true
+              sudo iptables -C INPUT -p tcp --dport 5671 -j RABBITMQ-FILTER 2>/dev/null \
+                || sudo iptables -I INPUT 1 -p tcp --dport 5671 -j RABBITMQ-FILTER
+              sudo iptables -C RABBITMQ-FILTER -p tcp --dport 5671 -s ${COOLIFY_IP} -j ACCEPT 2>/dev/null \
+                || sudo iptables -I RABBITMQ-FILTER 1 -p tcp --dport 5671 -s ${COOLIFY_IP} -j ACCEPT
+              echo 'rule ok on ${NODE}'
+            "
+          done
 
       - name: Create Coolify Application
         id: coolify_app
@@ -228,11 +270,21 @@ jobs:
 
           echo "app_uuid=${APP_UUID}" >> "$GITHUB_OUTPUT"
 
+      - name: Validate Required Secrets
+        env:
+          VIDEOGEN_SERVICE_AUTH_TOKEN: ${{ secrets.VIDEOGEN_SERVICE_AUTH_TOKEN }}
+        run: |
+          if [ -z "$VIDEOGEN_SERVICE_AUTH_TOKEN" ]; then
+            echo "ERROR: VIDEOGEN_SERVICE_AUTH_TOKEN secret is not set in GitHub repo secrets."
+            echo "Add it under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
       - name: Push Environment Variables
         env:
           STORJ_ACCESS_GRANT_SFW: ${{ secrets.STORJ_ACCESS_GRANT }}
           STORJ_ACCESS_GRANT_NSFW: ${{ secrets.STORJ_ACCESS_GRANT_NSFW }}
-          SFW_BUCKET: yral-videos
+          SFW_BUCKET: yral-sfw
           NSFW_BUCKET: yral-nsfw-videos
           SERVICE_SECRET_TOKEN: ${{ secrets.SERVICE_SECRET_TOKEN }}
           HETZNER_S3_ENDPOINT: ${{ secrets.HETZNER_S3_ENDPOINT }}
@@ -243,9 +295,18 @@ jobs:
           STORJ_EU1_GATEWAY_ACCESS_KEY: ${{ secrets.STORJ_EU1_GATEWAY_ACCESS_KEY }}
           STORJ_EU1_GATEWAY_SECRET_KEY: ${{ secrets.STORJ_EU1_GATEWAY_SECRET_KEY }}
           STORJ_MIRROR_ACCESS_GRANT: ${{ secrets.STORJ_MIRROR_ACCESS_GRANT }}
+          SFW_SHARE_EU1_URL: ${{ secrets.SFW_SHARE_EU1_URL }}
           ENVIRONMENT: staging
+          VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD: ${{ secrets.VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD }}
+          VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64: ${{ secrets.VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64 }}
+          VIDEOGEN_SERVICE_AUTH_TOKEN: ${{ secrets.VIDEOGEN_SERVICE_AUTH_TOKEN }}
+          BACKEND_ADMIN_IDENTITY: ${{ env.BACKEND_ADMIN_IDENTITY }}
+          INTERNAL_ENCRYPTION_SECRET: ${{ env.INTERNAL_ENCRYPTION_SECRET }}
+          MODERATION_HMAC_SECRET: ${{ env.MODERATION_HMAC_SECRET }}
+          YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN: ${{ env.YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN }}
         run: |
           APP_UUID="${{ steps.coolify_app.outputs.app_uuid }}"
+          PREVIEW_URL="${{ steps.meta.outputs.preview_url }}"
 
           ENV_JSON=$(jq -n \
             --arg database_url "postgres://storj:${{ secrets.PREVIEW_DB_PASSWORD }}@138.201.129.173:5433/video_fingerprint_index" \
@@ -262,7 +323,16 @@ jobs:
             --arg storj_eu1_gateway_access_key "$STORJ_EU1_GATEWAY_ACCESS_KEY" \
             --arg storj_eu1_gateway_secret_key "$STORJ_EU1_GATEWAY_SECRET_KEY" \
             --arg storj_mirror_access_grant "$STORJ_MIRROR_ACCESS_GRANT" \
+            --arg sfw_share_eu1_url "$SFW_SHARE_EU1_URL" \
             --arg environment "$ENVIRONMENT" \
+            --arg public_base_url "$PREVIEW_URL" \
+            --arg videogen_rabbitmq_publisher_password "$VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD" \
+            --arg videogen_rabbitmq_tls_ca_cert_pem_b64 "$VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64" \
+            --arg videogen_service_auth_token "$VIDEOGEN_SERVICE_AUTH_TOKEN" \
+            --arg backend_admin_identity "$BACKEND_ADMIN_IDENTITY" \
+            --arg internal_encryption_secret "$INTERNAL_ENCRYPTION_SECRET" \
+            --arg moderation_hmac_secret "$MODERATION_HMAC_SECRET" \
+            --arg yral_metadata_notification_service_api_token "$YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN" \
             '{
               "data": [
                 {"key": "DATABASE_URL", "value": $database_url, "is_literal": true},
@@ -279,7 +349,19 @@ jobs:
                 {"key": "STORJ_EU1_GATEWAY_ACCESS_KEY", "value": $storj_eu1_gateway_access_key, "is_literal": true},
                 {"key": "STORJ_EU1_GATEWAY_SECRET_KEY", "value": $storj_eu1_gateway_secret_key, "is_literal": true},
                 {"key": "STORJ_MIRROR_ACCESS_GRANT", "value": $storj_mirror_access_grant, "is_literal": true},
-                {"key": "ENVIRONMENT", "value": $environment, "is_literal": true}
+                {"key": "SFW_SHARE_EU1_URL", "value": $sfw_share_eu1_url, "is_literal": true},
+                {"key": "ENVIRONMENT", "value": $environment, "is_literal": true},
+                {"key": "PUBLIC_BASE_URL", "value": $public_base_url, "is_literal": true},
+                {"key": "VIDEOGEN_VAST_SUBMIT_TRANSPORT", "value": "rabbitmq", "is_literal": true},
+                {"key": "VIDEOGEN_UPLOAD_SERVICE_URL", "value": "https://upload.yral.com", "is_literal": true},
+                {"key": "MODERATION_MODE", "value": "remote", "is_literal": true},
+                {"key": "VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD", "value": $videogen_rabbitmq_publisher_password, "is_literal": true},
+                {"key": "VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64", "value": $videogen_rabbitmq_tls_ca_cert_pem_b64, "is_literal": true},
+                {"key": "VIDEOGEN_SERVICE_AUTH_TOKEN", "value": $videogen_service_auth_token, "is_literal": true},
+                {"key": "BACKEND_ADMIN_IDENTITY", "value": $backend_admin_identity, "is_multiline": true},
+                {"key": "INTERNAL_ENCRYPTION_SECRET", "value": $internal_encryption_secret, "is_literal": true},
+                {"key": "MODERATION_HMAC_SECRET", "value": $moderation_hmac_secret, "is_literal": true},
+                {"key": "YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN", "value": $yral_metadata_notification_service_api_token, "is_literal": true}
               ]
             }')
 
@@ -386,7 +468,7 @@ jobs:
           role: yral-video-storage-service-role
           jwtGithubAudience: "https://github.com/dolr-ai"
           secrets: |
-            secret/data/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
+            secret/data/yral-video-storage-service/COOLIFY_TOKEN value | COOLIFY_TOKEN ;
 
       - name: Find and Delete Coolify Application
         run: |

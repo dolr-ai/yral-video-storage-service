@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 use anyhow::Context;
 use axum::{
     extract::{DefaultBodyLimit, Request},
@@ -12,7 +13,7 @@ use consts::{
     HETZNER_S3_ENDPOINT, HETZNER_S3_REGION, HETZNER_S3_SECRET_KEY, SERVICE_SECRET_TOKEN,
     YRAL_VIDEOS,
 };
-use ic_agent::Agent;
+use ic_agent::{identity::Secp256k1Identity, Agent};
 use once_cell::sync::Lazy;
 use reqwest::{header::AUTHORIZATION, StatusCode};
 use sentry_tower::{NewSentryLayer, SentryHttpLayer};
@@ -29,11 +30,13 @@ use utoipa_swagger_ui::SwaggerUi;
 pub(crate) mod consts;
 mod db;
 mod jobs;
+mod media_index;
 mod routes;
 mod s3_client;
 pub(crate) mod sentry_utils;
 mod storj_s3_client;
 mod thumbnail;
+mod videogen;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -48,7 +51,17 @@ pub(crate) struct AppState {
     pub job_phash_running: Arc<AtomicBool>,
     pub job_mirror_running: Arc<AtomicBool>,
     pub job_pipeline_running: Arc<AtomicBool>,
+    pub job_media_import_running: Arc<AtomicBool>,
+    /// Separate cancellation token for the two media jobs (import + pHash).
+    /// Cancelling this does NOT affect the mirror jobs and vice-versa.
+    pub media_job_cancel: Arc<Mutex<CancellationToken>>,
+    pub job_media_phash_running: Arc<AtomicBool>,
+    pub job_chain_snapshot_running: Arc<AtomicBool>,
     pub ic_agent: Agent,
+    /// Optional best-effort upload side-effect clients (offchain events + push
+    /// notifications). Each is independently `None` when its token is unset; the
+    /// core publish flow works regardless.
+    pub upload: routes::upload::UploadState,
 }
 
 #[derive(OpenApi)]
@@ -74,7 +87,21 @@ pub(crate) struct AppState {
         routes::mirror::status,
         routes::mirror::get_config,
         routes::mirror::update_config,
-        routes::videogen::get_in_progress_drafts,
+        routes::media::import_video_index,
+        routes::media::missing_phash_audit,
+        routes::media::feed_events,
+        routes::media::run_phash,
+        routes::media::cancel_media_jobs,
+        routes::media::media_jobs_status,
+        routes::media::media_jobs_runs,
+        routes::media::media_jobs_failures,
+        routes::media::media_sweep_status,
+        routes::videogen::drafts::get_in_progress_drafts,
+        routes::videogen::generate::generate_video,
+        routes::videogen::providers::get_providers,
+        routes::videogen::providers::get_providers_all,
+        routes::videogen::complete::complete_video,
+        routes::videogen::upload_refresh::refresh_upload_url,
         // routes::videogen::get_in_progress_by_principal,
         // routes::videogen::get_all_status_by_principal,
     ),
@@ -92,21 +119,51 @@ pub(crate) struct AppState {
         routes::mirror::JobStatus,
         routes::mirror::ConfigResponse,
         routes::mirror::ConfigUpdate,
+        routes::media::CoverageStatsResponse,
+        routes::media::FeedEvent,
+        routes::media::FeedResponse,
+        routes::media::MediaJobsStatus,
+        routes::media::MediaCancelResponse,
+        routes::media::JobRunView,
+        routes::media::JobRunsResponse,
+        routes::media::FailureGroupView,
+        routes::media::FailuresResponse,
         routes::videogen::InProgressDraftsRequest,
         routes::videogen::InProgressDraftItem,
         routes::videogen::InProgressDraftsResponse,
+        routes::videogen::GenerateVideoRequest,
+        routes::videogen::GenerateVideoRequestBody,
+        routes::videogen::GenerateResponse,
+        routes::videogen::GenerateTokenType,
+        routes::videogen::ImageInput,
+        routes::videogen::ImageSource,
+        routes::videogen::VideoGenError,
+        routes::videogen::VideoUploadHandling,
+        routes::videogen::ProvidersResponse,
+        routes::videogen::ProviderItem,
+        routes::videogen::ProviderCost,
+        routes::videogen::CompleteVideoRequest,
+        routes::videogen::CompletionStatus,
+        routes::videogen::CompletionError,
+        routes::videogen::CompletionRequestKey,
+        routes::videogen::UploadRefreshRequest,
+        routes::videogen::UploadRefreshResponse,
+        routes::videogen::RefreshError,
         // routes::videogen::AllStatusItem,
         // routes::videogen::AllStatusResponse,
     )),
     tags(
         (name = "videos", description = "Video management endpoints"),
         (name = "mirror", description = "Mirror job management"),
+        (name = "media", description = "Media ownership and feed endpoints"),
         (name = "videogen", description = "Video generation status"),
     )
 )]
 struct ApiDoc;
 
 fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Initialize Sentry
     let _guard = sentry::init((
         "https://9c27a9c734fcc4481e858a089f2c8fee@sentry.prakash.yral.com/7",
@@ -187,13 +244,36 @@ async fn run_server() -> anyhow::Result<()> {
     db::init_schema(&db_client)
         .await
         .context("Failed to init DB schema")?;
+    media_index::init_schema(&db_client)
+        .await
+        .context("Failed to init media index schema")?;
     drop(db_client); // jobs create their own connections
 
     let storj_client = storj_s3_client::StorjS3Client::new().await;
-    let ic_agent = Agent::builder()
-        .with_url(consts::IC_URL.as_str())
-        .build()
-        .context("Failed to build IC agent")?;
+    let ic_agent = {
+        let mut builder = Agent::builder().with_url(consts::IC_URL.as_str());
+        if let Ok(pem) = std::env::var("BACKEND_ADMIN_IDENTITY") {
+            let identity =
+                Secp256k1Identity::from_pem(stringreader::StringReader::new(pem.as_str()))
+                    .context("Failed to parse BACKEND_ADMIN_IDENTITY")?;
+            builder = builder.with_identity(identity);
+        }
+        builder.build().context("Failed to build IC agent")?
+    };
+    let upload = routes::upload::UploadState::from_env();
+    if upload.events_service.is_none() {
+        tracing::warn!(
+            "OFFCHAIN_EVENTS_API_TOKEN not set — upload analytics events disabled \
+             (publishing still works)"
+        );
+    }
+    if upload.notification_client.is_none() {
+        tracing::warn!(
+            "YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN not set — push notifications \
+             disabled (publishing still works)"
+        );
+    }
+
     let cancel = CancellationToken::new();
     let job_cancel = CancellationToken::new();
 
@@ -210,8 +290,36 @@ async fn run_server() -> anyhow::Result<()> {
         job_phash_running: Arc::new(AtomicBool::new(false)),
         job_mirror_running: Arc::new(AtomicBool::new(false)),
         job_pipeline_running: Arc::new(AtomicBool::new(false)),
+        job_media_import_running: Arc::new(AtomicBool::new(false)),
+        media_job_cancel: Arc::new(Mutex::new(CancellationToken::new())),
+        job_media_phash_running: Arc::new(AtomicBool::new(false)),
+        job_chain_snapshot_running: Arc::new(AtomicBool::new(false)),
         ic_agent,
+        upload,
     };
+
+    // Steady-state sweep worker (leased; single-runner across boxes). Ships disabled
+    // via RUN_SWEEP_WORKER; enabling on all 3 boxes is safe because the DB lease elects
+    // exactly one. `me` = NODE_NAME (stable per box across redeploys) so a restart
+    // re-adopts its own lease without waiting a TTL.
+    if consts::run_sweep_worker() {
+        let me = std::env::var("NODE_NAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| format!("sweep-{}", uuid::Uuid::new_v4()));
+        let worker = jobs::worker::SweepWorker {
+            s3: app_state.s3_client.clone(),
+            storj: app_state.storj_client.clone(),
+            db_url: app_state.db_url.clone(),
+            drain_flag: app_state.job_media_phash_running.clone(),
+            import_flag: app_state.job_media_import_running.clone(),
+            media_cancel: app_state.media_job_cancel.clone(),
+            me,
+            drain_interval: std::time::Duration::from_secs(consts::drain_interval_secs()),
+            discovery_interval: std::time::Duration::from_secs(consts::discovery_interval_secs()),
+            lease_ttl: std::time::Duration::from_secs(consts::sweep_lease_ttl_secs()),
+        };
+        tokio::spawn(worker.run(cancel.clone()));
+    }
 
     // Configure CORS to allow cross-origin requests
     let cors = CorsLayer::new()
@@ -234,6 +342,22 @@ async fn run_server() -> anyhow::Result<()> {
         .route(
             "/duplicate_raw/finalize",
             post(routes::duplicate::handler_raw_finalize).with_state(app_state.clone()),
+        )
+        // Upload-service routes (merged in). PUBLIC — no `authorize` layer; auth is the
+        // in-body chain-verified delegated identity. Small JSON bodies → default 2MB limit.
+        .route(
+            "/get-upload-url",
+            post(routes::upload::get_upload_url::get_upload_url).with_state(app_state.clone()),
+        )
+        .route(
+            "/update-video-metadata",
+            post(routes::upload::update_video_metadata::update_video_metadata)
+                .with_state(app_state.clone()),
+        )
+        .route(
+            "/mark-post-as-published",
+            post(routes::upload::mark_post_as_published::mark_post_as_published)
+                .with_state(app_state.clone()),
         )
         // NOTE: This will be removed as the upload happens in the very end of the pipeline and nsfw flag is passed into duplicate
         .route(
@@ -328,8 +452,104 @@ async fn run_server() -> anyhow::Result<()> {
                 .layer(middleware::from_fn(authorize)),
         )
         .route(
+            "/media/import/video-index",
+            post(routes::media::import_video_index)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/audit/missing-phash",
+            get(routes::media::missing_phash_audit)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/feed/events",
+            get(routes::media::feed_events)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/phash/run",
+            post(routes::media::run_phash)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/jobs/cancel",
+            post(routes::media::cancel_media_jobs)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/jobs/status",
+            get(routes::media::media_jobs_status)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/jobs/runs",
+            get(routes::media::media_jobs_runs)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/jobs/failures",
+            get(routes::media::media_jobs_failures)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/media/sweep/status",
+            get(routes::media::media_sweep_status)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/chain/snapshot",
+            post(routes::chain::chain_snapshot_start)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/chain/snapshot/status",
+            get(routes::chain::chain_snapshot_status)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/chain/audit",
+            get(routes::chain::chain_audit)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
+            "/chain/diagnose",
+            get(routes::chain::chain_diagnose)
+                .with_state(app_state.clone())
+                .layer(middleware::from_fn(authorize)),
+        )
+        .route(
             "/api/v2/videogen/drafts/in-progress",
             post(routes::videogen::get_in_progress_drafts).with_state(app_state.clone()),
+        )
+        .route(
+            "/api/v2/videogen/generate",
+            post(routes::videogen::generate_video)
+                .with_state(app_state.clone())
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+        )
+        .route(
+            "/api/v2/videogen/complete",
+            post(routes::videogen::complete_video)
+                .with_state(app_state.clone())
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/api/v2/videogen/upload-url/refresh",
+            post(routes::videogen::refresh_upload_url)
+                .with_state(app_state.clone())
+                .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         // .route(
         //     "/api/v2/videogen/in-progress/{principal}",
@@ -339,6 +559,14 @@ async fn run_server() -> anyhow::Result<()> {
         //     "/api/v2/videogen/status/{principal}/all",
         //     get(routes::videogen::get_all_status_by_principal).with_state(app_state.clone()),
         // )
+        .route(
+            "/api/v2/videogen/providers",
+            get(routes::videogen::get_providers),
+        )
+        .route(
+            "/api/v2/videogen/providers-all",
+            get(routes::videogen::get_providers_all),
+        )
         .route("/health", get(health))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(middleware::from_fn(sentry_utils::sentry_request_logger))

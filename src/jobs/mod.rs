@@ -1,7 +1,15 @@
+pub mod chain_snapshot;
+pub mod ingest;
+#[allow(dead_code)]
+pub mod media_imports;
+#[allow(dead_code)]
+pub mod media_phash;
 pub mod mirror;
 pub mod phash_backfill;
 pub mod scan_hetzner;
 pub mod scan_storj;
+#[allow(dead_code)]
+pub mod worker;
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -31,6 +39,28 @@ pub fn video_id_from_key(key: &str) -> Option<String> {
 pub fn thumb_key_from_mp4_key(key: &str) -> Option<String> {
     key.strip_suffix(".mp4")
         .map(|stem| format!("{stem}-thumbnail.png"))
+}
+
+/// Delete an object from Storj via uplink CLI.
+pub async fn uplink_rm(storj_url: &str, access_grant: &str) -> Result<()> {
+    let output = Command::new("uplink")
+        .args([
+            "rm",
+            "--interactive=false",
+            "--analytics=false",
+            "--access",
+            access_grant,
+            storj_url,
+        ])
+        .output()
+        .await
+        .context("failed to spawn uplink")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("uplink rm {storj_url} failed: {stderr}");
+    }
+    Ok(())
 }
 
 /// Upload a local file to Storj via uplink CLI.

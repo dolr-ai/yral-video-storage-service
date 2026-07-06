@@ -45,6 +45,14 @@ impl StorjS3Client {
     pub async fn object_exists(&self, key: &str) -> Result<bool, String> {
         self.0.object_exists(key).await
     }
+
+    pub async fn download_to_file(
+        &self,
+        key: &str,
+        file: &mut tokio::fs::File,
+    ) -> Result<(), String> {
+        self.0.download_to_file(key, file).await
+    }
 }
 
 #[cfg(test)]

@@ -232,9 +232,6 @@ async fn upload_thumbnail_to_s3(
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
-    Network(#[from] reqwest::Error),
-
-    #[error(transparent)]
     Io(#[from] std::io::Error),
 
     #[error(transparent)]
@@ -248,7 +245,7 @@ impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         tracing::error!("request error: {self}");
         let (status, message) = match self {
-            Error::Network(_) | Error::Io(_) | Error::Hyper(_) => (
+            Error::Io(_) | Error::Hyper(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error. Check server logs.",
             ),

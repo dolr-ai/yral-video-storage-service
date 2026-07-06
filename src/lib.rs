@@ -1,7 +1,10 @@
+#![recursion_limit = "256"]
 pub mod consts;
 pub mod db;
 pub mod jobs;
+pub mod media_index;
 pub mod storj_s3_client;
+pub mod videogen;
 
 pub mod s3_client;
 pub mod thumbnail;
