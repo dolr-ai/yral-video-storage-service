@@ -40,7 +40,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y \
             libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
             libavfilter-dev libavdevice-dev libswresample-dev \
-            clang pkg-config
+            clang pkg-config ffmpeg
 
       - name: Check formatting
         run: cargo fmt --check
@@ -50,6 +50,9 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Test MP4 faststart remux
+        run: cargo test --test transcode_faststart ensure_faststart_mp4_remuxes_back_index_video -- --ignored
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

@@ -36,6 +36,7 @@ mod s3_client;
 pub(crate) mod sentry_utils;
 mod storj_s3_client;
 mod thumbnail;
+mod transcode;
 mod videogen;
 
 #[derive(Clone)]

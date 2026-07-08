@@ -1,6 +1,7 @@
 use axum::extract::{Multipart, State};
 use axum::response::IntoResponse;
 use axum::Json;
+use bytes::Bytes;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::json;
@@ -537,7 +538,9 @@ pub async fn handler_raw_upload_initial(
         ))
     })?;
 
-    // Extract thumbnail from video
+    let body_data = ensure_uploaded_video_faststart(&params.video_id, body_data).await;
+
+    // Extract thumbnail from the exact bytes staged as the video object.
     let thumbnail_data = extract_thumbnail(&body_data).await?;
 
     let mut pending_metadata = BTreeMap::new();
@@ -607,6 +610,28 @@ pub async fn handler_raw_upload_initial(
         "expires_in_hours": PENDING_UPLOAD_TTL_HOURS,
         "message": "Video uploaded successfully. Call /duplicate_raw/finalize to complete the upload."
     })))
+}
+
+async fn ensure_uploaded_video_faststart(video_id: &str, body_data: Bytes) -> Bytes {
+    match crate::transcode::ensure_faststart_mp4(body_data.clone()).await {
+        Ok(result) => {
+            tracing::info!(
+                video_id,
+                outcome = ?result.outcome,
+                bytes = result.data.len(),
+                "mp4 faststart check completed"
+            );
+            result.data
+        }
+        Err(err) => {
+            tracing::warn!(
+                video_id,
+                error = %err,
+                "mp4 faststart check failed; uploading original bytes"
+            );
+            body_data
+        }
+    }
 }
 
 #[utoipa::path(

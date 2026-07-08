@@ -32,6 +32,7 @@ pub mod duplicate {
 
 pub mod s3_client;
 pub mod thumbnail;
+pub mod transcode;
 
 pub mod move2nsfw {
     use serde::{Deserialize, Serialize};

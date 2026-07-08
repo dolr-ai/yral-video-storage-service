@@ -45,6 +45,8 @@ Code claims verified against `main` (3303d9b) on 2026-07-07/08.
 | Master table already has the columns this feature needs: `moov_atom_front BOOLEAN`, `canonical_encoding_version TEXT`, plus width/height/fps/codec/container fields, upserted with COALESCE (later fills don't clobber earlier values) | `src/media_index/schema.rs:26-27`, `src/media_index/repo.rs:156-157` |
 | Precedent for best-effort inline master registration from a request handler exists (videogen completion hook) | `src/jobs/ingest.rs:107-114` |
 | A sharded, leased-job backfill fleet pattern exists and has run at catalog scale (pHash backfill, 3 boxes) | `docs/superpowers/plans/2026-06-24-sharded-phash-backfill.md` |
+| Real LTX output sample is encoding-compliant but not faststart: H.264 High L4.0, yuv420p, 1024x1920, 25 fps, 2.77 Mbps total, AAC-LC 128k stereo; MP4 box order was `mdat` then `moov` | Local LTX sample probed 2026-07-08 with `ffprobe` |
+| The same LTX sample remuxed losslessly with `ffmpeg -c copy -movflags +faststart` in ~0.05 s; raw box walk verified `ftyp` at offset 0, `moov` at offset 32, then `mdat` | Local `video-faststart.mp4` verification 2026-07-08 |
 
 ### Ingress inventory
 
@@ -178,7 +180,7 @@ Re-evaluate only if, after Phases 1–2 are live, stall-rate for the low-bandwid
 
 ## 9. Pre-implementation verification
 
-1. **Probe ~50 recent videogen outputs** (moov position, codec, dims, bitrate) from master rows. If providers already write faststart, Phase 1a shrinks further and this spec's cost estimate drops; if not, the gate earns its keep from day one. (~10 min against prod.)
+1. **Probe ~50 recent videogen outputs** (moov position, codec, dims, bitrate) from master rows. Initial local evidence from one real LTX output already shows the expected pattern: encoding is compliant, but `moov` is at the back, and lossless faststart remux fixes it in ~0.05 s. The production sample is still useful as a breadth check across providers, recent model versions, and output shapes. (~10 min against prod.)
 2. Confirm `/duplicate` and `/hls/duplicate` receive zero traffic (Q6) — then delete rather than wrap.
 3. Verify stock Debian ffmpeg HE-AAC situation (see §4 audio note).
 
