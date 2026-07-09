@@ -52,7 +52,7 @@ jobs:
           sudo apt-get install -y \
             libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
             libavfilter-dev libavdevice-dev libswresample-dev \
-            clang pkg-config
+            clang pkg-config ffmpeg
 
       - name: Check formatting
         run: cargo fmt --check
@@ -62,6 +62,9 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Test MP4 faststart remux
+        run: cargo test --test transcode_faststart ensure_faststart_mp4_remuxes_back_index_video -- --ignored
 
       # The native test build above leaves a multi-GB ./target on the runner.
       # The Docker build then does its own `cargo build --release`, so on the
