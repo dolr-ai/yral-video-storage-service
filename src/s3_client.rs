@@ -15,6 +15,21 @@ use crate::consts::{
 const MAX_RETRIES: u32 = 3;
 const BASE_DELAY_MS: u64 = 500;
 
+fn log_s3_retry_exhausted(
+    operation_name: &str,
+    key: &str,
+    attempts: u32,
+    error: impl std::fmt::Display,
+) {
+    tracing::warn!(
+        operation = operation_name,
+        key = key,
+        attempts,
+        error = %error,
+        "S3 operation failed after all retries"
+    );
+}
+
 async fn retry_s3_op<F, Fut, T>(
     operation_name: &str,
     key: &str,
@@ -30,13 +45,7 @@ where
             Ok(val) => return Ok(val),
             Err(e) => {
                 if attempt == MAX_RETRIES {
-                    tracing::error!(
-                        operation = operation_name,
-                        key = key,
-                        attempts = attempt + 1,
-                        error = %e,
-                        "S3 operation failed after all retries"
-                    );
+                    log_s3_retry_exhausted(operation_name, key, attempt + 1, &e);
                     last_err = Some(e);
                     break;
                 }
@@ -74,13 +83,7 @@ where
             Ok(val) => return Ok(val),
             Err(e) => {
                 if attempt == MAX_RETRIES {
-                    tracing::error!(
-                        operation = operation_name,
-                        key = key,
-                        attempts = attempt + 1,
-                        error = %e,
-                        "S3 operation failed after all retries"
-                    );
+                    log_s3_retry_exhausted(operation_name, key, attempt + 1, &e);
                     last_err = e;
                     break;
                 }
@@ -460,13 +463,7 @@ impl S3Client {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     if attempt == MAX_RETRIES {
-                        tracing::error!(
-                            operation = "download_to_file",
-                            key = key,
-                            attempts = attempt + 1,
-                            error = %e,
-                            "S3 operation failed after all retries"
-                        );
+                        log_s3_retry_exhausted("download_to_file", key, attempt + 1, &e);
                         return Err(e);
                     }
                     last_err = e;
@@ -524,5 +521,97 @@ impl S3Client {
             Ok(())
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone, Debug)]
+    struct CapturedEvent {
+        level: tracing::Level,
+        message: String,
+    }
+
+    #[derive(Clone)]
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            struct MessageVisitor {
+                message: String,
+            }
+
+            impl tracing::field::Visit for MessageVisitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.message = format!("{value:?}");
+                    }
+                }
+
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "message" {
+                        self.message = value.to_string();
+                    }
+                }
+            }
+
+            let mut visitor = MessageVisitor {
+                message: String::new(),
+            };
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push(CapturedEvent {
+                level: *event.metadata().level(),
+                message: visitor.message,
+            });
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retry_exhaustion_logs_warning_not_error() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+            events: events.clone(),
+        });
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let result: Result<(), String> = retry_s3_op_string("unit_test", "videos/unit.mp4", || {
+            let attempts = attempts.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err("service error".to_string())
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap_err(), "service error");
+        assert_eq!(attempts.load(Ordering::SeqCst), MAX_RETRIES + 1);
+
+        let captured = events.lock().unwrap();
+        assert!(
+            captured.iter().any(|e| e.level == tracing::Level::WARN
+                && e.message.contains("S3 operation failed after all retries")),
+            "retry exhaustion should be logged as a warning"
+        );
+        assert!(
+            !captured.iter().any(|e| e.level == tracing::Level::ERROR
+                && e.message.contains("S3 operation failed after all retries")),
+            "retry exhaustion should not become a Sentry error event by itself"
+        );
     }
 }
