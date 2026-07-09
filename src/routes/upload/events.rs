@@ -27,7 +27,7 @@ impl EventService {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_str(format!("Bearer {}", &auth_token).as_ref()).unwrap(),
+            HeaderValue::from_str(format!("Bearer {}", auth_token).as_ref()).unwrap(),
         );
         Self {
             reqwest_client: ClientBuilder::new()
