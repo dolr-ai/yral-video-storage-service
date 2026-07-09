@@ -327,12 +327,7 @@ pub async fn persist_one(
             tx.commit().await?;
         }
         Err((phase, err)) => {
-            tracing::error!(
-                video_id = %row.video_id,
-                phase,
-                error = %err,
-                "media_phash: row failed"
-            );
+            log_row_failure(row, phase, &err);
             record_row_failure_txn(&tx, job_run_id, &row.video_id, phase, &err).await?;
             tx.commit().await?;
             summary.row_failures += 1;
@@ -340,6 +335,15 @@ pub async fn persist_one(
     }
 
     Ok(())
+}
+
+fn log_row_failure(row: &MissingHashRow, phase: &str, err: &str) {
+    tracing::warn!(
+        video_id = %row.video_id,
+        phase,
+        error = %err,
+        "media_phash: row failed"
+    );
 }
 
 fn build_metadata_json(meta: &VideoMetadata) -> Value {
@@ -514,9 +518,61 @@ pub(crate) fn make_row(video_id: &str) -> MissingHashRow {
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
 
     use super::*;
     use crate::media_index::test_support::test_client;
+
+    #[derive(Clone, Debug)]
+    struct CapturedEvent {
+        level: tracing::Level,
+        message: String,
+    }
+
+    #[derive(Clone)]
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            struct MessageVisitor {
+                message: String,
+            }
+
+            impl tracing::field::Visit for MessageVisitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.message = format!("{value:?}");
+                    }
+                }
+
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "message" {
+                        self.message = value.to_string();
+                    }
+                }
+            }
+
+            let mut visitor = MessageVisitor {
+                message: String::new(),
+            };
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push(CapturedEvent {
+                level: *event.metadata().level(),
+                message: visitor.message,
+            });
+        }
+    }
 
     async fn init_test_schema(client: &tokio_postgres::Client) {
         crate::db::init_schema(client).await.unwrap();
@@ -546,6 +602,34 @@ mod tests {
 
     fn make_run_id() -> Uuid {
         Uuid::new_v4()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn row_failure_logs_warning_not_error() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+            events: events.clone(),
+        });
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let row = make_row("video-warn");
+        log_row_failure(
+            &row,
+            "phash_download",
+            "hetzner download videos/video-warn.mp4: service error",
+        );
+
+        let captured = events.lock().unwrap();
+        assert!(
+            captured.iter().any(|e| e.level == tracing::Level::WARN
+                && e.message.contains("media_phash: row failed")),
+            "handled row failure should be logged as a warning"
+        );
+        assert!(
+            !captured.iter().any(|e| e.level == tracing::Level::ERROR
+                && e.message.contains("media_phash: row failed")),
+            "handled row failure must not become a Sentry error event"
+        );
     }
 
     #[tokio::test]
