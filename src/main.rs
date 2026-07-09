@@ -69,7 +69,6 @@ pub(crate) struct AppState {
     info(title = "Storj Interface API", version = "0.1.0"),
     paths(
         health,
-        routes::duplicate::handler,
         routes::duplicate::handler_raw_upload_initial,
         routes::duplicate::handler_raw_finalize,
         routes::move2nsfw::handler,
@@ -107,7 +106,6 @@ pub(crate) struct AppState {
         // routes::videogen::get_all_status_by_principal,
     ),
     components(schemas(
-        storj_interface::duplicate::Args,
         storj_interface::move2nsfw::Args,
         routes::duplicate::RawFinalizeBody,
         routes::mirror::VideoEntry,
@@ -335,12 +333,6 @@ async fn run_server() -> anyhow::Result<()> {
         .layer(SentryHttpLayer::default());
 
     let app = Router::new()
-        .route(
-            "/duplicate",
-            post(routes::duplicate::handler)
-                .with_state(app_state.clone())
-                .layer(middleware::from_fn(authorize)),
-        )
         .route(
             "/duplicate_raw/upload",
             post(routes::duplicate::handler_raw_upload_initial)
