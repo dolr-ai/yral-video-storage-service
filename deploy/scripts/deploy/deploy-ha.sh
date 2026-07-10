@@ -47,11 +47,11 @@ else
   export ETCD_INITIAL_CLUSTER_STATE=new
 fi
 
-if [[ "${RUN_APP:-false}" == "true" ]]; then
-  export COMPOSE_PROFILES="app"
-else
-  export COMPOSE_PROFILES=""
-fi
+# Compose profiles: `app` runs storj-interface, `backup` runs the db-backup loop.
+PROFILES=""
+[[ "${RUN_APP:-false}" == "true" ]] && PROFILES="app"
+[[ "${RUN_DB_BACKUP:-false}" == "true" ]] && PROFILES="${PROFILES:+${PROFILES},}backup"
+export COMPOSE_PROFILES="${PROFILES}"
 
 cd "${APP_DIR}"
 
@@ -62,7 +62,9 @@ if [[ "${RUN_APP:-false}" == "true" ]]; then
 fi
 
 if [[ -n "${IMAGE_REF:-}" ]]; then
-  docker compose -f docker-compose.ha.yml build patroni
+  # db-backup is a build service too; build it alongside patroni so the
+  # --no-build up below has its image available when the backup profile is on.
+  docker compose -f docker-compose.ha.yml build patroni db-backup
   docker compose -f docker-compose.ha.yml up -d --no-build --remove-orphans
 else
   docker compose -f docker-compose.ha.yml up -d --build --remove-orphans

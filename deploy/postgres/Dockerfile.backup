@@ -1,0 +1,10 @@
+# Image for the db-backup service: pg_dump/pg_restore (from postgres:16-alpine,
+# matching the cluster's PG major) plus rclone (S3 upload + age-based retention)
+# and curl (Patroni primary gate). The backup/restore scripts are bind-mounted at
+# runtime, so this image only provides the tooling.
+FROM postgres:16-alpine
+
+RUN set -eux; \
+    ALPINE_VER="$(cut -d. -f1,2 /etc/alpine-release)"; \
+    echo "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/community" >> /etc/apk/repositories; \
+    apk add --no-cache rclone curl
