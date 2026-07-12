@@ -46,39 +46,46 @@ export RCLONE_CONFIG_HZ_REGION="$REGION"
 export RCLONE_CONFIG_HZ_ACL=private
 REMOTE="hz:${BUCKET}/${PREFIX}"
 
-# Patroni REST answers at all (any HTTP status) => it finished starting. Lets us tell
-# "not ready yet" (TCP refused at boot) apart from "ready but a replica" (HTTP 503), so
-# a startup race doesn't cost a full poll interval before the first backup.
-patroni_rest_up() {
-  code="$(curl -s -o /dev/null --max-time 10 -w '%{http_code}' \
-    "http://${PATRONI_HOST}:${PATRONI_PORT}/patroni" 2>/dev/null || echo 000)"
-  [ "$code" != "000" ]
+# Query Patroni's /primary and echo the HTTP status (000 on connection failure).
+# 200 = this node is the leader; 503 = up but a replica.
+primary_code() {
+  curl -s -o /dev/null --max-time 10 -w '%{http_code}' \
+    "http://${PATRONI_HOST}:${PATRONI_PORT}/primary" 2>/dev/null || echo 000
 }
 
-wait_for_patroni() {
+# Poll /primary until Patroni gives a definitive role (200 or 503), tolerating
+# connection failures (000) during startup / leader-election flaps so a boot race
+# never costs a full poll interval. A single call was not enough: Patroni's REST can
+# be reachable one moment and bounce the next while the cluster forms, which would
+# otherwise be misread as "not primary". Echoes the final code.
+wait_for_role() {
+  code=000
   i=0
   while [ "$i" -lt "${PATRONI_WAIT_TRIES:-30}" ]; do
-    patroni_rest_up && return 0
+    code="$(primary_code)"
+    case "$code" in
+      200 | 503) echo "$code"; return 0 ;;
+    esac
     i=$((i + 1))
     sleep "${PATRONI_WAIT_SECS:-5}"
   done
+  echo "$code"
   return 1
 }
 
-is_primary() {
-  curl -fsS -o /dev/null --max-time 10 \
-    "http://${PATRONI_HOST}:${PATRONI_PORT}/primary"
-}
-
 run_cycle() {
-  if ! wait_for_patroni; then
-    log "patroni REST unreachable after wait — skipping this cycle"
-    return 0
-  fi
-  if ! is_primary; then
-    log "local node is not the primary — skipping"
-    return 0
-  fi
+  role="$(wait_for_role)"
+  case "$role" in
+    200) : ;; # leader — proceed to back up
+    503)
+      log "local node is not the primary — skipping"
+      return 0
+      ;;
+    *)
+      log "patroni role undetermined (last code=${role}) — skipping"
+      return 0
+      ;;
+  esac
 
   DATE="$(date -u +%Y%m%d)"
   OBJ="${DB_NAME}_${DATE}.dump"
