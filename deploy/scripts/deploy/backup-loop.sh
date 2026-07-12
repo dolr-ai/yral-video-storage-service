@@ -46,12 +46,35 @@ export RCLONE_CONFIG_HZ_REGION="$REGION"
 export RCLONE_CONFIG_HZ_ACL=private
 REMOTE="hz:${BUCKET}/${PREFIX}"
 
+# Patroni REST answers at all (any HTTP status) => it finished starting. Lets us tell
+# "not ready yet" (TCP refused at boot) apart from "ready but a replica" (HTTP 503), so
+# a startup race doesn't cost a full poll interval before the first backup.
+patroni_rest_up() {
+  code="$(curl -s -o /dev/null --max-time 10 -w '%{http_code}' \
+    "http://${PATRONI_HOST}:${PATRONI_PORT}/patroni" 2>/dev/null || echo 000)"
+  [ "$code" != "000" ]
+}
+
+wait_for_patroni() {
+  i=0
+  while [ "$i" -lt "${PATRONI_WAIT_TRIES:-30}" ]; do
+    patroni_rest_up && return 0
+    i=$((i + 1))
+    sleep "${PATRONI_WAIT_SECS:-5}"
+  done
+  return 1
+}
+
 is_primary() {
   curl -fsS -o /dev/null --max-time 10 \
     "http://${PATRONI_HOST}:${PATRONI_PORT}/primary"
 }
 
 run_cycle() {
+  if ! wait_for_patroni; then
+    log "patroni REST unreachable after wait — skipping this cycle"
+    return 0
+  fi
   if ! is_primary; then
     log "local node is not the primary — skipping"
     return 0
