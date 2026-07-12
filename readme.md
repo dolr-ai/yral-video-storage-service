@@ -21,6 +21,11 @@ Storj interface is configured via the following environment variables.
 | `PUBLIC_BASE_URL`                                  | Externally-reachable base URL; used to build upload URLs                         |                                       |
 | `OFFCHAIN_EVENTS_API_TOKEN`                        | Bearer token for offchain analytics events                                      | Optional                              |
 | `YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN`     | Bearer token for push notifications                                              | Optional                              |
+| `RUN_DB_BACKUP`                                    | Enable the `db-backup` service (daily pg_dump -> Hetzner)                        | false                                 |
+| `BACKUP_S3_BUCKET`                                 | Hetzner bucket for DB backups (same project as `HETZNER_S3_*` creds)            | prakash-yral                          |
+| `BACKUP_S3_PREFIX`                                 | Key prefix (folder) for DB backups within the bucket                            | yral-video-storage-service            |
+| `BACKUP_RETENTION_DAYS`                            | Rolling retention window; objects older than this are pruned each cycle          | 30                                    |
+| `BACKUP_POLL_SECS`                                 | How often the backup loop wakes to check/back up (one dump per UTC day)          | 3600                                  |
 
 For running locally, a Storj account is required.
 - `cp .env.example .env`
@@ -79,6 +84,43 @@ hurl test/duplicate_raw_multipart.hurl --variables-file test/local-test.vars --t
 For more thorough e2e testing,
 create [linksharing links to your buckets](https://storj.dev/learn/concepts/linksharing-service)
 and refer to [testing workflow](./.github/workflows/e2e-tests.yml).
+
+## Database backups (Hetzner Object Storage)
+
+The HA stack includes a `db-backup` compose service (profile `backup`, enabled by
+`RUN_DB_BACKUP=true`). It runs on every node but only the node whose local Patroni is
+the primary actually dumps — it gates on `GET patroni:8008/primary` — so exactly one
+backup is produced cluster-wide and the job follows the primary across failovers.
+
+Each cycle (`BACKUP_POLL_SECS`, default hourly), on the primary:
+
+1. Skip if today's object already exists (idempotent across redeploys).
+2. `pg_dump -Fc` the DB as the `postgres` superuser via `postgres-router` (always the primary).
+3. Upload to `s3://$BACKUP_S3_BUCKET/$BACKUP_S3_PREFIX/video_fingerprint_index_<UTCdate>.dump`
+   on `HETZNER_S3_ENDPOINT` (reuses the `HETZNER_S3_*` creds — the bucket must be in the
+   same Hetzner project), then verify the uploaded size.
+4. Prune objects older than `BACKUP_RETENTION_DAYS` → a rolling ~30-file window, so
+   storage stays bounded.
+
+**Precondition:** the `BACKUP_S3_BUCKET` (default `prakash-yral`) must exist in the same
+Hetzner project as `HETZNER_S3_ACCESS_KEY`.
+
+### Restore
+
+Backups are custom-format (`-Fc`) → restore with `pg_restore`, not the plain-SQL
+`restore-backup.sh`. Run inside the same image (has `rclone` + `pg_restore`) on any node:
+
+```sh
+cd deploy
+COMPOSE_PROJECT_NAME=yral-video-storage-service \
+  docker compose -f docker-compose.ha.yml --profile backup \
+  run --rm --entrypoint sh db-backup /restore-from-hetzner.sh [YYYYMMDD]
+```
+
+(`--entrypoint sh` is required — the service's default entrypoint is the backup loop.)
+
+No date → newest backup. This is destructive (`pg_restore --clean`); it routes to the
+current primary via `postgres-router`.
 
 ## Deployment
 

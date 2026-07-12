@@ -139,6 +139,13 @@ jobs:
       # Steady-state sweep worker on/off. Editable repo variable (default "false" = disabled).
       # Flip to "true" in repo Settings → Variables + redeploy to enable; lease elects one runner.
       RUN_SWEEP_WORKER: ${{ vars.RUN_SWEEP_WORKER || 'false' }}
+      # Daily DB backup -> Hetzner Object Storage (bucket/prefix below), rolling
+      # BACKUP_RETENTION_DAYS window. Reuses HETZNER_S3_* creds (same hel1 project).
+      # Editable repo variables; defaults enable it against the prakash-yral bucket.
+      RUN_DB_BACKUP: ${{ vars.RUN_DB_BACKUP || 'true' }}
+      BACKUP_S3_BUCKET: ${{ vars.BACKUP_S3_BUCKET || 'prakash-yral' }}
+      BACKUP_S3_PREFIX: ${{ vars.BACKUP_S3_PREFIX || 'yral-video-storage-service' }}
+      BACKUP_RETENTION_DAYS: ${{ vars.BACKUP_RETENTION_DAYS || '30' }}
 
     steps:
       - name: Checkout repository
@@ -250,6 +257,10 @@ jobs:
                export RUN_APP='${RUN_APP}'; \
                export HOST_PORT='${HOST_PORT}'; \
                export POSTGRES_READONLY_ALLOWLIST='${POSTGRES_READONLY_ALLOWLIST}'; \
+               export RUN_DB_BACKUP='${RUN_DB_BACKUP}'; \
+               export BACKUP_S3_BUCKET='${BACKUP_S3_BUCKET}'; \
+               export BACKUP_S3_PREFIX='${BACKUP_S3_PREFIX}'; \
+               export BACKUP_RETENTION_DAYS='${BACKUP_RETENTION_DAYS}'; \
                ${APP_VARS} \
                echo '${GITHUB_TOKEN}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin && \
                bash '${APP_DIR}/deploy/scripts/deploy/deploy-ha.sh'"

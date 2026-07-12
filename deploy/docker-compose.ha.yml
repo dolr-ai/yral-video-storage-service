@@ -148,6 +148,35 @@ services:
       NODE_NAME: ${NODE_NAME}
     restart: always
 
+  # Continuous DB backup to Hetzner Object Storage. Runs on every node but only the
+  # one whose local Patroni is the primary actually dumps (gate on /primary), so
+  # exactly one backup is produced cluster-wide and it follows the primary on failover.
+  # Enabled via the `backup` profile (deploy-ha.sh sets it when RUN_DB_BACKUP=true).
+  db-backup:
+    build:
+      context: ./postgres
+      dockerfile: Dockerfile.backup
+    profiles:
+      - backup
+    depends_on:
+      - patroni
+      - postgres-router
+    environment:
+      POSTGRES_SUPERUSER_PASSWORD: "${POSTGRES_SUPERUSER_PASSWORD}"
+      HETZNER_S3_ENDPOINT: "${HETZNER_S3_ENDPOINT}"
+      HETZNER_S3_ACCESS_KEY: "${HETZNER_S3_ACCESS_KEY}"
+      HETZNER_S3_SECRET_KEY: "${HETZNER_S3_SECRET_KEY}"
+      HETZNER_S3_REGION: "${HETZNER_S3_REGION:-hel1}"
+      BACKUP_S3_BUCKET: "${BACKUP_S3_BUCKET:-prakash-yral}"
+      BACKUP_S3_PREFIX: "${BACKUP_S3_PREFIX:-yral-video-storage-service}"
+      BACKUP_RETENTION_DAYS: "${BACKUP_RETENTION_DAYS:-30}"
+      BACKUP_POLL_SECS: "${BACKUP_POLL_SECS:-3600}"
+    volumes:
+      - ./scripts/deploy/backup-loop.sh:/backup-loop.sh:ro
+      - ./scripts/deploy/restore-from-hetzner.sh:/restore-from-hetzner.sh:ro
+    entrypoint: ["/bin/sh", "/backup-loop.sh"]
+    restart: always
+
 volumes:
   etcd_data:
   patroni_data:
