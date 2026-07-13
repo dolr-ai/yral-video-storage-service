@@ -248,18 +248,41 @@ pub struct DeleteProfileImageRequest { pub delegated_identity_wire: DelegatedIde
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::upload::test_support::signed_wire_with_sender;
+    use ic_agent::identity::Secp256k1Identity;
+    use k256::{elliptic_curve::rand_core::OsRng, SecretKey};
+
     #[test]
     fn strips_data_url_prefix() { assert_eq!(strip_data_url("data:image/png;base64,QUJD"), "QUJD"); }
     #[test]
     fn rejects_oversized() { assert!(validate_base64_len(&"x".repeat(7*1024*1024 + 1)).is_err()); }
+
+    // Contract fidelity: a forged/invalid delegated identity must map to 401 (not 400).
+    #[tokio::test]
+    async fn upload_forged_identity_is_401() {
+        let (mut wire, _) = signed_wire_with_sender();
+        let other = Secp256k1Identity::from_private_key(SecretKey::random(&mut OsRng));
+        wire.from_key = other.public_key().expect("pubkey"); // forged chain
+        let req = UploadProfileImageRequest { delegated_identity_wire: wire, image_data: "QUJD".into() };
+        let err = handle_upload_profile_image(axum::Json(req)).await.err().expect("must reject");
+        assert_eq!(err.0, axum::http::StatusCode::UNAUTHORIZED);
+    }
 }
 ```
 
 - [ ] **Step 2: Run — verify fail.** Run: `cargo test -p storj-interface profile_image::tests`. Expected: FAIL.
 
-- [ ] **Step 3: Implement helpers + POST handler.** Port off-chain-agent's `handle_upload_profile_image` flow: `strip_data_url`, `validate_base64_len` (≤ `7*1024*1024`, non-empty, decodable), `verified_identity` → `(identity, principal)`, `ProfileS3Config::from_env()` + `create_client`, `upload_profile_image`, then user agent + `UserInfoService(USER_INFO_SERVICE_ID, &agent).update_profile_details(ProfileUpdateDetails { profile_picture_url: Some(url.clone()), bio: None, website_url: None })`. Error mapping mirrors off-chain-agent status codes: 400 bad/oversized/undecodable, 500 upload/agent, 403 canister "not authorized", 500 other canister/`Err`. Return `Json(UploadProfileImageResponse { profile_image_url: url })`.
+- [ ] **Step 3: Implement helpers + POST handler.** Port off-chain-agent's `handle_upload_profile_image` flow: `strip_data_url`, `validate_base64_len` (≤ `7*1024*1024`, non-empty, decodable), `verified_identity` → `(identity, principal)`, `crate::sentry_utils::set_sentry_user(&principal.to_text(), None)` (telemetry parity), `ProfileS3Config::from_env()` + `create_client`, `upload_profile_image`, then user agent + `UserInfoService(USER_INFO_SERVICE_ID, &agent).update_profile_details(ProfileUpdateDetails { profile_picture_url: Some(url.clone()), bio: None, website_url: None })`. Return `Json(UploadProfileImageResponse { profile_image_url: url })`.
 
-- [ ] **Step 4: Implement DELETE handler.** `verified_identity` → principal + identity; `delete_profile_images`; then **F5**: build user agent + `update_profile_details` clearing the URL (use the canister API's clear representation confirmed in Task 0 — e.g. `Some(String::new())`). Return `StatusCode::OK`.
+  **Error mapping (contract fidelity — match off-chain-agent exactly):**
+  - `verified_identity` failure → **401** UNAUTHORIZED (bad/forged delegated identity). ⚠️ NOT 400 — off-chain-agent returns 401 here (`profile_image.rs:51,191`) and clients may branch on it.
+  - image empty / >5 MB / undecodable base64 / decode failure → **400** BAD_REQUEST.
+  - `upload_profile_image` / agent build failure → **500** INTERNAL_SERVER_ERROR.
+  - canister `Result_::Err(e)` containing "not authorized"/"Not authorized" → **403** FORBIDDEN; any other canister `Err` / transport `Err(e)` → **500**.
+
+  Add `#[utoipa::path(post, path = "/profile-image", request_body = UploadProfileImageRequest, tag = "user", responses((status=200, body=UploadProfileImageResponse),(status=400),(status=401),(status=403),(status=500)))]` on the handler (this repo serves swagger — `main.rs:68` `#[derive(OpenApi)]`).
+
+- [ ] **Step 4: Implement DELETE handler.** `verified_identity` → `(identity, principal)`; `set_sentry_user`; `delete_profile_images`; then **F5**: build user agent + `update_profile_details` clearing the URL (use the canister API's clear representation confirmed in Task 0 — e.g. `Some(String::new())`). Same error mapping: `verified_identity` failure → **401**, S3/agent/canister failure → **500**. Return `StatusCode::OK`. Add the matching `#[utoipa::path(delete, path = "/profile-image", ...)]`.
 
 - [ ] **Step 5: Run — verify pass.** Run: `cargo test -p storj-interface profile_image::tests`. Expected: PASS.
 
@@ -286,12 +309,14 @@ git commit -m "feat: /profile-image upload + delete handlers (off-chain-agent co
 ```
 (No `.with_state` — handlers take only `Json`.)
 
-- [ ] **Step 2: Build.** Run: `cargo build -p storj-interface`. Expected: compiles.
+- [ ] **Step 2: Register swagger paths.** In `main.rs`'s `#[derive(OpenApi)]` `paths(...)` list, add `routes::user::profile_image::handle_upload_profile_image` and `handle_delete_profile_image`; add `UploadProfileImageRequest`, `UploadProfileImageResponse`, `DeleteProfileImageRequest` to the `components(schemas(...))` list. (Skip only if these routes are intentionally excluded from the served OpenApi.)
 
-- [ ] **Step 3: Commit.**
+- [ ] **Step 3: Build.** Run: `cargo build -p storj-interface`. Expected: compiles.
+
+- [ ] **Step 4: Commit.**
 ```bash
 git add src/main.rs
-git commit -m "feat: register POST/DELETE /profile-image"
+git commit -m "feat: register POST/DELETE /profile-image (+ swagger)"
 ```
 
 ---
