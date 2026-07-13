@@ -360,6 +360,15 @@ async fn run_server() -> anyhow::Result<()> {
             post(routes::upload::mark_post_as_published::mark_post_as_published)
                 .with_state(app_state.clone()),
         )
+        // Profile-image upload/delete (moved from off-chain-agent). PUBLIC — auth is the
+        // in-body chain-verified delegated identity; handlers need no shared state.
+        // Body limit raised for ~5MB images (base64-inflated).
+        .route(
+            "/profile-image",
+            post(routes::user::profile_image::handle_upload_profile_image)
+                .delete(routes::user::profile_image::handle_delete_profile_image)
+                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         // NOTE: This will be removed as the upload happens in the very end of the pipeline and nsfw flag is passed into duplicate
         .route(
             "/move-to-nsfw",
