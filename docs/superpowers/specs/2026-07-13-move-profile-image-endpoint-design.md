@@ -29,7 +29,14 @@ Source: `off-chain-agent/src/user/profile_image.rs`, `off-chain-agent/src/utils/
 
 **`DELETE /profile-image`** — body `{ delegated_identity_wire }` → 200:
 1. Verify identity, resolve principal.
-2. List `users/<principal>/profile-` and delete all matching objects. (Does **not** clear `profile_picture_url` in the canister — matching current behavior.)
+2. List `users/<principal>/profile-` and delete all matching objects.
+
+### Deviations from off-chain-agent (deliberate improvements)
+
+These two off-chain-agent behaviors are wasteful/buggy; this implementation fixes them rather than copying them. Neither changes the request/response contract, so dual-run stays seamless.
+
+- **F4 — delete prior images on upload.** off-chain-agent's timestamp-keyed upload never removes a user's previous `profile-*` objects (only the DELETE endpoint does), so every propic change leaks an orphaned public object, growing unboundedly per user. On successful upload here, first delete the user's existing `users/<principal>/profile-*` objects (best-effort; log-and-continue on failure so a stale-delete never fails the upload).
+- **F5 — DELETE clears the canister URL.** off-chain-agent's DELETE removes the S3 objects but leaves `profile_picture_url` on the canister pointing at a now-deleted object (broken image). Here, DELETE also builds the user agent and calls `update_profile_details({ profile_picture_url: Some("") /* or the None-equivalent the canister API expects */, .. })` so reads fall back to the GobGob default. Confirm the exact "clear" representation the `user_info_service` API expects during the F2 gate.
 
 Error mapping: 401 (identity/user-info failure), 400 (bad/oversized/undecodable image), 403 (canister "not authorized"), 500 (upload / agent / canister errors).
 
@@ -46,32 +53,40 @@ The endpoints reuse this repo's existing public-route conventions (JSON body car
 
 ### Auth + canister write
 - Extend `src/routes/upload/auth.rs`: today `verified_sender(wire) -> Principal` builds a chain-verified `DelegatedIdentity` (via `DelegatedIdentity::new`, which validates the delegation chain and `delegated_principal == to.sender()`) then returns `.sender()`. Add `verified_identity(wire) -> DelegatedIdentity` (or return `(DelegatedIdentity, Principal)`) so the handler can both learn the principal and build a user `ic_agent` from the same verified identity. `verified_sender` stays (used by the video routes) and can delegate to the new function.
-- Handler flow: verify → upload → build user agent from the verified identity → `update_profile_details`. The canister write is **as the user**; `BACKEND_ADMIN_IDENTITY` is not used.
+- The user agent is built **per request** from the verified identity: `Agent::builder().with_url(IC_URL).with_identity(delegated).build()` — exactly the `main.rs` admin-agent pattern, with **no `fetch_root_key`** (mainnet `ic0.app`). It is NOT the shared admin agent (`BACKEND_ADMIN_IDENTITY`) — the canister write must be signed by the user.
+- Handler flow: verify → upload → build user agent → `update_profile_details`.
+
+> **⚠️ Blocking dependency gate (do first).** This repo pins `yral-canisters-client` at yral-common rev `55e7ec1d`; off-chain-agent pins `b207047b`. This repo's code currently uses `get_user_profile_details_v_6` / `Result6`, whereas the canister write needs `update_profile_details` + `ProfileUpdateDetails { profile_picture_url, bio, website_url }` + the matching `Result_`. **Before implementing, confirm this repo's pinned rev exposes those.** If it does not, bump `yral-canisters-client` to a rev that does and reconcile the yral-common dependency graph (this can ripple into other `user_info_service` call sites like `get_upload_url`). Treat this as the first task — it gates everything else.
 
 ### Credentials + bucket (env-driven, one creds set)
 Reuse this service's existing `HETZNER_S3_ACCESS_KEY` / `HETZNER_S3_SECRET_KEY` / `HETZNER_S3_ENDPOINT` / `HETZNER_S3_REGION` (already verified to write `prakash-yral` on hel1; expected to cover the whole hel1 project including `yral-profile`). Bucket, key prefix, and public URL base are configurable so the fallback is a config flip, not a code change:
 
 | Env | Default (primary) | Fallback |
 |---|---|---|
-| `PROFILE_S3_BUCKET` | `yral-profile` | `prakash-yral` |
-| `PROFILE_S3_KEY_PREFIX` | `users/` | `profile-images/users/` |
-| `PROFILE_S3_PUBLIC_URL_BASE` | `https://yral-profile.hel1.your-objectstorage.com` | `https://prakash-yral.hel1.your-objectstorage.com` |
+| `PROFILE_S3_BUCKET` | `yral-profile` | a **dedicated public** bucket, e.g. `yral-profile-hel1` |
+| `PROFILE_S3_KEY_PREFIX` | `users/` | `users/` |
+| `PROFILE_S3_PUBLIC_URL_BASE` | `https://yral-profile.hel1.your-objectstorage.com` | `https://<fallback-bucket>.hel1.your-objectstorage.com` |
 
 Object key: `<PROFILE_S3_KEY_PREFIX><principal>/profile-<unix_ts>.jpg`. DELETE lists/deletes under `<PROFILE_S3_KEY_PREFIX><principal>/profile-`.
 
-**Verification step (implementation):** confirm the existing creds can `put_object`/`list`/`delete` in `yral-profile`. If they cannot, set the three envs to the fallback so images land in `prakash-yral` beside the `yral-video-storage-service/` backup prefix.
+**Verification step (implementation):** confirm the existing creds can `put_object`/`list`/`delete` in `yral-profile`. If they cannot, create a **new dedicated public bucket** in the same hel1 project and point the three envs at it.
+
+> **⚠️ Do NOT fall back to `prakash-yral`.** That is the **private DB-backup** bucket. Profile images are uploaded `public-read`; serving them from `prakash-yral` would require enabling public object access on a bucket that holds private backups, risking exposure of the `yral-video-storage-service/` backup prefix. The fallback must be a separate bucket provisioned for public reads.
 
 **Dual-run caveat (only if the effective bucket differs from off-chain-agent's `yral-profile`):** uploads split across two buckets by which service handled them. Reads stay correct because the canister stores the full, self-describing `profile_picture_url`. Cross-service DELETE does not reach the other bucket (a user who uploaded via the new service but deletes via an old app build leaves an orphaned public object). Accepted for the migration window.
 
 ### Dependencies + config wiring
-- Add `image` (with the `jpeg` feature) to the main crate `Cargo.toml` (already a workspace dep for `backfill-thumbnails`/`phash`).
+- Add `image = "0.25"` to the **main crate** `Cargo.toml`. The main `storj-interface` crate does **not** currently depend on `image` (only the `backfill-thumbnails` / `phash` workspace members do, and those pin `default-features = false, features = ["png"]` — insufficient here). Profile-image must **decode arbitrary user uploads** (jpeg, png, webp, gif, …), so enable **default features** (matching off-chain-agent's `image = "0.25"`), i.e. do not disable the input decoders. Output is always JPEG q85.
+- **Decode safety (F6):** cap decode work with `image::Limits` (max dimensions / allocation) before `load_from_memory`, so a small malicious file can't expand into a decompression bomb. The ~5 MB base64 input cap bounds input but not decoded size; off-chain-agent sets no such limit — this is an improvement.
 - Add the three `PROFILE_S3_*` envs to `deploy/docker-compose.ha.yml` (storj-interface service), `.github/workflows/deploy-prakash-servers.yml`, `.env.example`, and the readme config table. The `HETZNER_S3_*` creds are already passed to the app.
 
 ### Data flow
 ```
 client ──POST /profile-image {wire, image_data}──▶ storj-interface
   verify wire (chain-checked) ─▶ principal + user identity
-  decode+process image ─▶ put_object(PROFILE_S3_BUCKET, users/<principal>/profile-<ts>.jpg, public-read)
+  decode (image::Limits) + process image
+  delete prior users/<principal>/profile-*   (F4, best-effort)
+  put_object(PROFILE_S3_BUCKET, users/<principal>/profile-<ts>.jpg, public-read)
   user_agent(identity) ─▶ UserInfoService.update_profile_details(profile_picture_url)
   ◀── { profile_image_url }
 ```
@@ -83,21 +98,29 @@ Mirror off-chain-agent's status mapping exactly (401/400/403/500 as above), usin
 
 ## Testing
 
-- **Unit:** `process_image` (resize threshold at 1000px, non-resize passthrough, JPEG output); base64 validation (empty, oversized >5 MB, invalid); `data:` prefix stripping; object-key formatting from prefix + principal + timestamp.
+- **Unit:** `process_image` (resize threshold at 1000px, non-resize passthrough, JPEG output for jpeg/png/webp inputs); `image::Limits` rejects an oversized-dimension decode (F6); base64 validation (empty, oversized >5 MB, invalid); `data:` prefix stripping; object-key formatting from prefix + principal + timestamp.
 - **Auth:** reuse `routes/upload/test_support::signed_wire_with_sender` — valid wire resolves to expected sender; forged `from_key` rejected (extends the existing `auth.rs` tests to the new `verified_identity`).
-- **Integration (`#[ignore]`, env-gated like `hetzner_both_thumbnail_names_uploaded`):** real upload → object exists at expected key/URL with `image/jpeg`; DELETE removes all `users/<principal>/profile-*`. Gated on `HETZNER_S3_*` + `PROFILE_S3_*`.
-- **Canister update:** exercised manually against a test principal (off-chain-agent's canister path has no automated test to port); handler unit-tested up to the canister boundary.
+- **Integration (`#[ignore]`, env-gated like `hetzner_both_thumbnail_names_uploaded`):** real upload → object exists at expected key/URL with `image/jpeg`; a second upload removes the first user object (F4); DELETE removes all `users/<principal>/profile-*`. Gated on `HETZNER_S3_*` + `PROFILE_S3_*`.
+- **Canister update:** exercised manually against a test principal (off-chain-agent's canister path has no automated test to port); handler unit-tested up to the canister boundary. Include the DELETE→clear path (F5).
 
 ---
 
 ## Rollout
 
-1. Implement endpoints + config here; verify creds against `yral-profile` (else flip to fallback env).
+0. **Dependency gate (F2):** confirm this repo's `yral-canisters-client` exposes `update_profile_details` + `ProfileUpdateDetails`; bump the dep if not. Nothing else starts until this is settled.
+1. Implement endpoints + config here; verify creds against `yral-profile` (else point env at a **new dedicated public bucket** — never `prakash-yral`).
 2. Deploy this service (endpoints live, additive — off-chain-agent unchanged).
 3. Migrate web (`hot-or-not-web-leptos-ssr`) then mobile (`yral-mobile`) to call this service's `/profile-image` base URL — separate client PRs, no coordination required.
 4. Once client traffic to off-chain-agent's `/profile-image` drains (old mobile builds aged out), retire off-chain-agent's handlers + the dead `CF_IMAGES_API_TOKEN` — tracked under #2107 (out of scope here).
 
+## Out of Scope / Follow-ups
+
+- **Rate limiting (F7):** the endpoint is public (HMAC-free; gated only by the chain-verified identity) and accepts ~5 MB uploads plus a cycle-costing canister write per call. off-chain-agent has the same exposure; adding per-principal rate limiting is a separate hardening ticket.
+- GobGob default-avatar migration off Cloudflare Images (#2066 proper); retiring off-chain-agent's copy (#2107).
+
 ## Open Items
 
-- Confirm existing `HETZNER_S3_*` creds write `yral-profile` (drives primary-vs-fallback bucket).
+- **F2 (blocking):** verify `update_profile_details`/`ProfileUpdateDetails` in this repo's pinned `yral-canisters-client` rev; bump + reconcile yral-common deps if absent.
+- Confirm existing `HETZNER_S3_*` creds write `yral-profile` (drives primary vs. a new dedicated public fallback bucket — **not** `prakash-yral`).
+- Confirm the canister API's "clear profile picture" representation for the F5 DELETE path.
 - Client base-URL config: how web/mobile currently point at off-chain-agent's `/profile-image` (env vs hardcoded) — needed for step 3, tracked in the client repos.
