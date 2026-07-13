@@ -230,4 +230,62 @@ mod tests {
         assert!(decoded.width() <= 1000 && decoded.height() <= 1000);
         assert_eq!(decoded.width(), 1000, "longest side scaled to 1000");
     }
+
+    // --- Integration (ignored): real Hetzner round-trip. Run with a TEST bucket:
+    //   HETZNER_S3_ACCESS_KEY=… HETZNER_S3_SECRET_KEY=… PROFILE_S3_BUCKET=<test-bucket> \
+    //     cargo test -p storj-interface profile_s3 -- --ignored
+    async fn count_user_objects(cfg: &ProfileS3Config, client: &Client, principal: &str) -> usize {
+        client
+            .list_objects_v2()
+            .bucket(&cfg.bucket)
+            .prefix(&cfg.user_prefix(principal))
+            .send()
+            .await
+            .expect("list")
+            .contents()
+            .len()
+    }
+
+    fn tiny_png_b64() -> String {
+        let mut buf = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::new(32, 32))
+            .write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)
+            .unwrap();
+        BASE64.encode(buf)
+    }
+
+    #[tokio::test]
+    #[ignore = "integration: requires HETZNER_S3_* + PROFILE_S3_BUCKET (use a TEST bucket)"]
+    async fn hetzner_profile_upload_delete_roundtrip() {
+        if std::env::var("HETZNER_S3_ACCESS_KEY").is_err() {
+            eprintln!("skip: HETZNER_S3_ACCESS_KEY not set");
+            return;
+        }
+        let cfg = ProfileS3Config::from_env();
+        let client = create_client(&cfg).await.expect("client");
+        let principal = format!("test-{}", uuid::Uuid::new_v4());
+
+        let img = tiny_png_b64();
+        let url1 = upload_profile_image(&cfg, &client, &img, &principal)
+            .await
+            .expect("upload1");
+        assert!(url1.starts_with(&cfg.public_url_base));
+        assert_eq!(count_user_objects(&cfg, &client, &principal).await, 1);
+
+        // F4: distinct timestamp so a missing delete-prior would leave 2 objects.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let _url2 = upload_profile_image(&cfg, &client, &img, &principal)
+            .await
+            .expect("upload2");
+        assert_eq!(
+            count_user_objects(&cfg, &client, &principal).await,
+            1,
+            "re-upload must delete the prior image (F4)"
+        );
+
+        delete_profile_images(&cfg, &client, &principal)
+            .await
+            .expect("delete");
+        assert_eq!(count_user_objects(&cfg, &client, &principal).await, 0);
+    }
 }
