@@ -295,6 +295,11 @@ jobs:
           HETZNER_S3_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
           HETZNER_S3_BUCKET: ${{ secrets.HETZNER_S3_BUCKET }}
           HETZNER_S3_REGION: ${{ secrets.HETZNER_S3_REGION }}
+          # Profile-image bucket (reuses HETZNER_S3_* creds). Defaults to yral-profile;
+          # switch to a preview-isolated bucket here if you don't want preview writing prod.
+          PROFILE_S3_BUCKET: ${{ vars.PROFILE_S3_BUCKET || 'yral-profile' }}
+          PROFILE_S3_KEY_PREFIX: ${{ vars.PROFILE_S3_KEY_PREFIX || 'users/' }}
+          PROFILE_S3_PUBLIC_URL_BASE: ${{ vars.PROFILE_S3_PUBLIC_URL_BASE || 'https://yral-profile.hel1.your-objectstorage.com' }}
           STORJ_EU1_GATEWAY_ACCESS_KEY: ${{ secrets.STORJ_EU1_GATEWAY_ACCESS_KEY }}
           STORJ_EU1_GATEWAY_SECRET_KEY: ${{ secrets.STORJ_EU1_GATEWAY_SECRET_KEY }}
           STORJ_MIRROR_ACCESS_GRANT: ${{ secrets.STORJ_MIRROR_ACCESS_GRANT }}
@@ -323,6 +328,9 @@ jobs:
             --arg hetzner_s3_secret_key "$HETZNER_S3_SECRET_KEY" \
             --arg hetzner_s3_bucket "$HETZNER_S3_BUCKET" \
             --arg hetzner_s3_region "$HETZNER_S3_REGION" \
+            --arg profile_s3_bucket "$PROFILE_S3_BUCKET" \
+            --arg profile_s3_key_prefix "$PROFILE_S3_KEY_PREFIX" \
+            --arg profile_s3_public_url_base "$PROFILE_S3_PUBLIC_URL_BASE" \
             --arg storj_eu1_gateway_access_key "$STORJ_EU1_GATEWAY_ACCESS_KEY" \
             --arg storj_eu1_gateway_secret_key "$STORJ_EU1_GATEWAY_SECRET_KEY" \
             --arg storj_mirror_access_grant "$STORJ_MIRROR_ACCESS_GRANT" \
@@ -349,6 +357,9 @@ jobs:
                 {"key": "HETZNER_S3_SECRET_KEY", "value": $hetzner_s3_secret_key, "is_literal": true},
                 {"key": "HETZNER_S3_BUCKET", "value": $hetzner_s3_bucket, "is_literal": true},
                 {"key": "HETZNER_S3_REGION", "value": $hetzner_s3_region, "is_literal": true},
+                {"key": "PROFILE_S3_BUCKET", "value": $profile_s3_bucket, "is_literal": true},
+                {"key": "PROFILE_S3_KEY_PREFIX", "value": $profile_s3_key_prefix, "is_literal": true},
+                {"key": "PROFILE_S3_PUBLIC_URL_BASE", "value": $profile_s3_public_url_base, "is_literal": true},
                 {"key": "STORJ_EU1_GATEWAY_ACCESS_KEY", "value": $storj_eu1_gateway_access_key, "is_literal": true},
                 {"key": "STORJ_EU1_GATEWAY_SECRET_KEY", "value": $storj_eu1_gateway_secret_key, "is_literal": true},
                 {"key": "STORJ_MIRROR_ACCESS_GRANT", "value": $storj_mirror_access_grant, "is_literal": true},
