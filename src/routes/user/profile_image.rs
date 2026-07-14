@@ -9,6 +9,7 @@ use axum::{http::StatusCode, response::IntoResponse, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use ic_agent::{identity::DelegatedIdentity, Agent};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use yral_canisters_client::{
     ic::USER_INFO_SERVICE_ID,
     user_info_service::{ProfileUpdateDetails, Result_, UserInfoService},
@@ -20,20 +21,23 @@ use super::profile_s3::{
 };
 use crate::routes::upload::auth::verified_identity;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UploadProfileImageRequest {
+    // DelegatedIdentityWire has no ToSchema; represent it as a generic object (repo pattern).
+    #[schema(value_type = Object)]
     pub delegated_identity_wire: DelegatedIdentityWire,
     /// Base64-encoded image data (optional `data:` URL prefix tolerated).
     pub image_data: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct UploadProfileImageResponse {
     pub profile_image_url: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct DeleteProfileImageRequest {
+    #[schema(value_type = Object)]
     pub delegated_identity_wire: DelegatedIdentityWire,
 }
 
@@ -117,6 +121,19 @@ async fn set_canister_profile_url(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/user/profile-image",
+    request_body = UploadProfileImageRequest,
+    tag = "user",
+    responses(
+        (status = 200, description = "Profile image uploaded", body = UploadProfileImageResponse),
+        (status = 400, description = "Invalid image data"),
+        (status = 401, description = "Invalid delegated identity"),
+        (status = 403, description = "Not authorized to update profile"),
+        (status = 500, description = "Storage or canister error"),
+    )
+)]
 pub async fn handle_upload_profile_image(
     Json(request): Json<UploadProfileImageRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -152,6 +169,18 @@ pub async fn handle_upload_profile_image(
     Ok(Json(UploadProfileImageResponse { profile_image_url }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/user/profile-image",
+    request_body = DeleteProfileImageRequest,
+    tag = "user",
+    responses(
+        (status = 200, description = "Profile image deleted"),
+        (status = 401, description = "Invalid delegated identity"),
+        (status = 403, description = "Not authorized to update profile"),
+        (status = 500, description = "Storage or canister error"),
+    )
+)]
 pub async fn handle_delete_profile_image(
     Json(request): Json<DeleteProfileImageRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {

@@ -60,12 +60,15 @@ Hetzner `PROFILE_S3_BUCKET` (reusing the `HETZNER_S3_*` creds); the canister wri
 as the user via a per-request agent. Contract matches off-chain-agent so clients migrate
 by base URL only.
 
-- `POST /profile-image` — `{delegated_identity_wire, image_data}` (base64, optional
-  `data:` prefix; ≤5 MB) → `{profile_image_url}`. Resizes ≤1000px, encodes JPEG q85,
-  deletes the user's prior images, uploads public-read, then sets `profile_picture_url`
+- `POST /api/v1/user/profile-image` — `{delegated_identity_wire, image_data}` (base64,
+  optional `data:` prefix; ≤5 MB) → `{profile_image_url}`. Resizes ≤1000px, encodes JPEG
+  q85, deletes the user's prior images, uploads public-read, then sets `profile_picture_url`
   on user-info-service.
-- `DELETE /profile-image` — `{delegated_identity_wire}` → 200. Deletes the user's images
-  and clears `profile_picture_url` (reads fall back to the GobGob default avatar).
+- `DELETE /api/v1/user/profile-image` — `{delegated_identity_wire}` → 200. Deletes the
+  user's images and clears `profile_picture_url` (reads fall back to the GobGob default).
+
+Path matches off-chain-agent's `/api/v1/user/profile-image` so clients migrate by base URL
+only. Registered in the served OpenAPI (`/api-docs`).
 
 Status codes: 401 (bad/forged identity), 400 (empty/oversized/undecodable image), 403
 (canister not authorized), 500 (storage/canister error). Runs on all app nodes; the
