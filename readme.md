@@ -26,9 +26,9 @@ Storj interface is configured via the following environment variables.
 | `BACKUP_S3_PREFIX`                                 | Key prefix (folder) for DB backups within the bucket                            | yral-video-storage-service            |
 | `BACKUP_RETENTION_DAYS`                            | Rolling retention window; objects older than this are pruned each cycle          | 30                                    |
 | `BACKUP_POLL_SECS`                                 | How often the backup loop wakes to check/back up (one dump per UTC day)          | 3600                                  |
-| `PROFILE_S3_BUCKET`                                | Hetzner bucket for profile images (reuses `HETZNER_S3_*` creds/endpoint)         | yral-profile                          |
-| `PROFILE_S3_KEY_PREFIX`                            | Key prefix for profile images (`<prefix><principal>/profile-<ts>.jpg`)           | users/                                |
-| `PROFILE_S3_PUBLIC_URL_BASE`                       | Public base URL images are served from                                          | https://yral-profile.hel1.your-objectstorage.com |
+| `PROFILE_S3_BUCKET`                                | Hetzner bucket for profile images (reuses `HETZNER_S3_*` creds/endpoint)         | prakash-yral                          |
+| `PROFILE_S3_KEY_PREFIX`                            | Key prefix for profile images (`<prefix><principal>/profile-<ts>.jpg`)           | yral-profile/users/                   |
+| `PROFILE_S3_PUBLIC_URL_BASE`                       | Public base URL images are served from                                          | https://prakash-yral.hel1.your-objectstorage.com |
 
 For running locally, a Storj account is required.
 - `cp .env.example .env`

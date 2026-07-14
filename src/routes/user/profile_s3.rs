@@ -30,10 +30,14 @@ impl ProfileS3Config {
             endpoint: env::var("HETZNER_S3_ENDPOINT")
                 .unwrap_or_else(|_| "https://hel1.your-objectstorage.com".to_string()),
             region: env::var("HETZNER_S3_REGION").unwrap_or_else(|_| "hel1".to_string()),
-            bucket: env::var("PROFILE_S3_BUCKET").unwrap_or_else(|_| "yral-profile".to_string()),
-            key_prefix: env::var("PROFILE_S3_KEY_PREFIX").unwrap_or_else(|_| "users/".to_string()),
+            // Profile images live in the prakash-yral bucket under a `yral-profile/` folder
+            // (team decision — one bucket, folder-scoped). Public URL is bucket root; the
+            // folder is part of the object key.
+            bucket: env::var("PROFILE_S3_BUCKET").unwrap_or_else(|_| "prakash-yral".to_string()),
+            key_prefix: env::var("PROFILE_S3_KEY_PREFIX")
+                .unwrap_or_else(|_| "yral-profile/users/".to_string()),
             public_url_base: env::var("PROFILE_S3_PUBLIC_URL_BASE")
-                .unwrap_or_else(|_| "https://yral-profile.hel1.your-objectstorage.com".to_string()),
+                .unwrap_or_else(|_| "https://prakash-yral.hel1.your-objectstorage.com".to_string()),
         }
     }
 

@@ -125,11 +125,11 @@ jobs:
       HETZNER_S3_ACCESS_KEY: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
       HETZNER_S3_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
       HETZNER_S3_REGION: ${{ secrets.HETZNER_S3_REGION }}
-      # Profile-image bucket (reuses HETZNER_S3_* creds). Editable repo variables;
-      # default targets yral-profile. Fallback must be a dedicated PUBLIC bucket — never prakash-yral.
-      PROFILE_S3_BUCKET: ${{ vars.PROFILE_S3_BUCKET || 'yral-profile' }}
-      PROFILE_S3_KEY_PREFIX: ${{ vars.PROFILE_S3_KEY_PREFIX || 'users/' }}
-      PROFILE_S3_PUBLIC_URL_BASE: ${{ vars.PROFILE_S3_PUBLIC_URL_BASE || 'https://yral-profile.hel1.your-objectstorage.com' }}
+      # Profile images: prakash-yral bucket, `yral-profile/` folder (reuses HETZNER_S3_* creds).
+      # Editable repo variables.
+      PROFILE_S3_BUCKET: ${{ vars.PROFILE_S3_BUCKET || 'prakash-yral' }}
+      PROFILE_S3_KEY_PREFIX: ${{ vars.PROFILE_S3_KEY_PREFIX || 'yral-profile/users/' }}
+      PROFILE_S3_PUBLIC_URL_BASE: ${{ vars.PROFILE_S3_PUBLIC_URL_BASE || 'https://prakash-yral.hel1.your-objectstorage.com' }}
       SERVICE_SECRET_TOKEN: ${{ secrets.SERVICE_SECRET_TOKEN }}
       STORJ_EU1_GATEWAY_ACCESS_KEY: ${{ secrets.STORJ_EU1_GATEWAY_ACCESS_KEY }}
       STORJ_EU1_GATEWAY_SECRET_KEY: ${{ secrets.STORJ_EU1_GATEWAY_SECRET_KEY }}
