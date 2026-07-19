@@ -1,0 +1,86 @@
+name: CF Stream cleanup (DESTRUCTIVE)
+
+# Deletes ALL Cloudflare Stream videos, sharded across parallel runners so each
+# runner gets its own IP (and therefore its own CF rate-limit budget).
+#
+# SAFETY:
+#  * Triggers ONLY on pushes to the dedicated branch below — never on main, never on cron.
+#  * Coverage was verified before enabling: every live post exists in yral-sfw /
+#    yral-nsfw-videos (2,305-sample = 0 misses + chain-coverage audit).
+#  * ⚠️ Any future push to this branch re-runs a full delete-all. When the cleanup is
+#    finished, DELETE this branch and this workflow file so it cannot fire again
+#    (e.g. if Cloudflare Stream is ever used for new content).
+#
+# Resumable: each job re-reads its shard and skips uids already in deleted.log
+# (uploaded as artifacts). Re-push the branch to continue where it left off.
+# Actions jobs cap at 6h, so very large runs may need a couple of pushes.
+
+on:
+  push:
+    branches: [chore/cf-stream-cleanup]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cf-stream-cleanup
+  cancel-in-progress: false
+
+jobs:
+  enumerate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enumerate all Stream uids
+        env:
+          CF_STREAM_API_TOKEN: ${{ secrets.CF_STREAM_API_TOKEN }}
+        run: ./scripts/enumerate_cf_stream.sh cf_uids.txt
+      - name: Summary
+        run: echo "uids=$(wc -l < cf_uids.txt)" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cf-uids
+          path: cf_uids.txt
+          retention-days: 7
+
+  delete:
+    needs: enumerate
+    runs-on: ubuntu-latest
+    timeout-minutes: 350          # under the 6h job cap
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cf-uids
+      - name: Delete shard ${{ matrix.shard }}
+        env:
+          CF_STREAM_API_TOKEN: ${{ secrets.CF_STREAM_API_TOKEN }}
+          ASSUME_YES: DELETE ALL
+          UID_FILE: cf_uids.txt
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: 8
+          # Each runner has its own IP/budget; keep per-runner concurrency modest
+          # (measured: ~35% 429s even on a fresh IP above this).
+          PARALLEL: 12
+          LOG_DIR: ${{ github.workspace }}/cf_logs
+        run: ./scripts/delete_cf_stream.sh
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### shard ${{ matrix.shard }}"
+            echo "deleted: $(wc -l < cf_logs/deleted.log 2>/dev/null || echo 0)"
+            echo "failed:  $(wc -l < cf_logs/failed.log 2>/dev/null || echo 0)"
+            echo "429s:    $(wc -c < cf_logs/throttle.log 2>/dev/null || echo 0)"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cf-logs-shard-${{ matrix.shard }}
+          path: cf_logs/
+          retention-days: 7
