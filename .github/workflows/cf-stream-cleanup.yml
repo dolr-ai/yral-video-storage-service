@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: read
+  actions: read      # needed to list/download the previous run's cf-uids artifact
 
 concurrency:
   group: cf-stream-cleanup
@@ -33,17 +34,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Reuse the uid list across re-pushes so we don't re-enumerate (~20 min) each time.
-      # A stale list is harmless: already-deleted uids return 404, which the delete script
-      # treats as done. Bump the key suffix (v1 -> v2) to force a fresh enumeration.
+      # Fastest path: a uid list committed to the branch (cf_uids.txt[.gz]).
+      # Enumeration takes ~45 min, so if you already have a list, commit it and skip it.
+      # A stale list is fine — already-deleted uids return 404, treated as done.
+      - name: Resolve uid list (committed file, else previous run's artifact)
+        id: committed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 1) a list committed to the branch (cf_uids.txt or .gz)
+          [ -f cf_uids.txt.gz ] && gunzip -c cf_uids.txt.gz > cf_uids.txt
+          if [ -s cf_uids.txt ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "source: committed file ($(wc -l < cf_uids.txt) uids)"; exit 0
+          fi
+          # 2) reuse the cf-uids artifact from a recent run — avoids a ~45 min re-enumeration
+          for rid in $(gh run list --workflow cf-stream-cleanup.yml --limit 15 \
+                        --json databaseId -q '.[].databaseId' 2>/dev/null); do
+            if gh run download "$rid" -n cf-uids -D . 2>/dev/null && [ -s cf_uids.txt ]; then
+              echo "found=true" >> "$GITHUB_OUTPUT"
+              echo "source: artifact from run $rid ($(wc -l < cf_uids.txt) uids)"; exit 0
+            fi
+          done
+          echo "found=false" >> "$GITHUB_OUTPUT"
+          echo "no existing list — will use cache or enumerate"
+
+      # Otherwise reuse across re-pushes. Bump v1 -> v2 to force a fresh enumeration.
       - id: uidcache
+        if: steps.committed.outputs.found != 'true'
         uses: actions/cache@v4
         with:
           path: cf_uids.txt
           key: cf-uids-v1
 
-      - name: Enumerate all Stream uids (cache miss only)
-        if: steps.uidcache.outputs.cache-hit != 'true'
+      - name: Enumerate all Stream uids (only if no list available)
+        if: steps.committed.outputs.found != 'true' && steps.uidcache.outputs.cache-hit != 'true'
         env:
           CF_STREAM_API_TOKEN: ${{ secrets.CF_STREAM_API_TOKEN }}
         run: ./scripts/enumerate_cf_stream.sh cf_uids.txt
@@ -52,7 +77,7 @@ jobs:
         run: |
           {
             echo "uids=$(wc -l < cf_uids.txt)"
-            echo "from_cache=${{ steps.uidcache.outputs.cache-hit == 'true' }}"
+            echo "source=${{ steps.committed.outputs.found == 'true' && 'committed' || (steps.uidcache.outputs.cache-hit == 'true' && 'cache' || 'enumerated') }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
