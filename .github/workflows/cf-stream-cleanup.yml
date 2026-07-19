@@ -117,9 +117,14 @@ jobs:
           UID_FILE: cf_uids.txt
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_TOTAL: 8
-          # Each runner has its own IP/budget; keep per-runner concurrency modest
-          # (measured: ~35% 429s even on a fresh IP above this).
-          PARALLEL: 12
+          # MEASURED: Cloudflare clamps at the ACCOUNT level (~20 req/s aggregate), not
+          # per-IP. With 8 shards that is ~2.5 req/s per shard, so PARALLEL=12 (96 total
+          # in flight) was ~5x oversubscribed — workers sat in 429 backoff and some hit
+          # retry-exhaustion. 4 per shard (32 total) sustains the same throughput with
+          # far less churn. Raising this does NOT go faster; it just creates 429s.
+          PARALLEL: 4
+          # Stop ~20 min before the job timeout so cache/artifact post-steps run cleanly.
+          MAX_RUNTIME_SECS: 19800   # 5.5h (job timeout is 350m)
           LOG_DIR: ${{ github.workspace }}/cf_logs
         run: ./scripts/delete_cf_stream.sh
       - name: Summary

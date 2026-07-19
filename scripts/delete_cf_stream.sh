@@ -132,9 +132,28 @@ if [ -n "${UID_FILE:-}" ]; then
   progress_loop & PROG_PID=$!
   trap 'kill "$PROG_PID" 2>/dev/null' EXIT INT TERM
 
-  xargs -P "$PARALLEL" -n 1 bash -c 'del_one "$1"' _ < "$LOG_DIR/.todo"
+  # Optional graceful time-box (MAX_RUNTIME_SECS). CI jobs get hard-killed at their
+  # timeout, which can skip cache/artifact post-steps; stopping ourselves a bit early
+  # means the run ends cleanly and progress is always persisted. Re-push to continue.
+  timeboxed=0
+  if [ -n "${MAX_RUNTIME_SECS:-}" ] && command -v timeout >/dev/null 2>&1; then
+    timeout "$MAX_RUNTIME_SECS" \
+      xargs -P "$PARALLEL" -n 1 bash -c 'del_one "$1"' _ < "$LOG_DIR/.todo" || {
+        [ "$?" -eq 124 ] && timeboxed=1
+      }
+  else
+    xargs -P "$PARALLEL" -n 1 bash -c 'del_one "$1"' _ < "$LOG_DIR/.todo"
+  fi
 
   kill "$PROG_PID" 2>/dev/null; trap - EXIT INT TERM
+
+  if [ "$timeboxed" -eq 1 ]; then
+    deleted_now=$(( $(wc -l < "$DELETED_LOG" | tr -d ' ') - base_deleted ))
+    left=$(( todo - deleted_now )); [ "$left" -lt 0 ] && left=0
+    echo "TIME-BOXED after ${MAX_RUNTIME_SECS}s: deleted=$deleted_now of $todo, $left remaining."
+    echo "::notice::shard $SHARD_INDEX time-boxed — re-push to continue (progress is cached)"
+    exit 0
+  fi
 
   # ---- retry pass: 429-exhausted / transient failures deserve a second try ----
   # Only retry uids in THIS shard that are still not deleted.
