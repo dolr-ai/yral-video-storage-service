@@ -115,11 +115,57 @@ if [ -n "${UID_FILE:-}" ]; then
   [ "$todo" -eq 0 ] && { echo "nothing to do for this shard — DONE"; exit 0; }
 
   start=$(date +%s)
+  base_deleted=$(wc -l < "$DELETED_LOG" | tr -d ' ')
+
+  # ---- periodic progress: a 100k-uid shard runs for hours; don't go silent ----
+  progress_loop() {
+    while : ; do
+      sleep "${PROGRESS_EVERY:-60}"
+      el=$(( $(date +%s) - start )); [ "$el" -eq 0 ] && el=1
+      d=$(( $(wc -l < "$DELETED_LOG" | tr -d ' ') - base_deleted ))
+      r=$(( d / el ))
+      left=$(( todo - d )); [ "$left" -lt 0 ] && left=0
+      if [ "$r" -gt 0 ]; then eta="$(( left / r / 60 ))m"; else eta="?"; fi
+      echo "progress shard=$SHARD_INDEX deleted=$d/$todo ($(( d * 100 / todo ))%) rate=${r}/s 429s=$(wc -c < "$THROTTLE_LOG" | tr -d ' ') failed=$(wc -l < "$FAILED_LOG" | tr -d ' ') eta=$eta"
+    done
+  }
+  progress_loop & PROG_PID=$!
+  trap 'kill "$PROG_PID" 2>/dev/null' EXIT INT TERM
+
   xargs -P "$PARALLEL" -n 1 bash -c 'del_one "$1"' _ < "$LOG_DIR/.todo"
+
+  kill "$PROG_PID" 2>/dev/null; trap - EXIT INT TERM
+
+  # ---- retry pass: 429-exhausted / transient failures deserve a second try ----
+  # Only retry uids in THIS shard that are still not deleted.
+  sort -u "$DELETED_LOG" > "$LOG_DIR/.done2"
+  awk '{print $1}' "$FAILED_LOG" 2>/dev/null | sort -u > "$LOG_DIR/.failed_uids"
+  comm -23 "$LOG_DIR/.failed_uids" "$LOG_DIR/.done2" \
+    | comm -12 - "$LOG_DIR/.shard" > "$LOG_DIR/.retry"
+  retry_n=$(wc -l < "$LOG_DIR/.retry" | tr -d ' ')
+  if [ "$retry_n" -gt 0 ]; then
+    echo "retry pass: $retry_n failed uids, at gentler concurrency"
+    mv "$FAILED_LOG" "$LOG_DIR/failed.prev"; : > "$FAILED_LOG"
+    RETRY_PAR=$(( PARALLEL / 2 )); [ "$RETRY_PAR" -lt 1 ] && RETRY_PAR=1
+    xargs -P "$RETRY_PAR" -n 1 bash -c 'del_one "$1"' _ < "$LOG_DIR/.retry"
+  fi
+
+  # ---- final status ----
   dur=$(( $(date +%s) - start )); [ "$dur" -eq 0 ] && dur=1
-  done_n=$(wc -l < "$DELETED_LOG" | tr -d ' ')
-  echo "SHARD_DONE index=$SHARD_INDEX deleted_total=$done_n rate=$(( todo / dur ))/s 429s=$(wc -c < "$THROTTLE_LOG" | tr -d ' ') failed=$(wc -l < "$FAILED_LOG" | tr -d ' ')"
-  echo "(re-run to retry any that failed; it resumes from deleted.log)"
+  deleted_now=$(( $(wc -l < "$DELETED_LOG" | tr -d ' ') - base_deleted ))
+  residual=$(wc -l < "$FAILED_LOG" | tr -d ' ')
+  echo "SHARD_DONE index=$SHARD_INDEX processed=$todo deleted=$deleted_now rate=$(( deleted_now / dur ))/s 429s=$(wc -c < "$THROTTLE_LOG" | tr -d ' ') retried=$retry_n residual_failures=$residual"
+
+  if [ "$residual" -gt 0 ]; then
+    echo "::warning::shard $SHARD_INDEX: $residual uids still failing after retry (see failed.log)"
+    echo "--- first failures ---"; head -5 "$FAILED_LOG"
+    # fail the job only if it's a meaningful share (>1%), so a handful doesn't go red
+    if [ "$residual" -gt $(( todo / 100 )) ]; then
+      echo "::error::shard $SHARD_INDEX: residual failures exceed 1% of shard — re-push to resume"
+      exit 1
+    fi
+  fi
+  echo "(re-push to resume: deleted.log is cached, so completed uids are skipped)"
   exit 0
 fi
 

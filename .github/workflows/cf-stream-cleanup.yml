@@ -32,12 +32,29 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Enumerate all Stream uids
+
+      # Reuse the uid list across re-pushes so we don't re-enumerate (~20 min) each time.
+      # A stale list is harmless: already-deleted uids return 404, which the delete script
+      # treats as done. Bump the key suffix (v1 -> v2) to force a fresh enumeration.
+      - id: uidcache
+        uses: actions/cache@v4
+        with:
+          path: cf_uids.txt
+          key: cf-uids-v1
+
+      - name: Enumerate all Stream uids (cache miss only)
+        if: steps.uidcache.outputs.cache-hit != 'true'
         env:
           CF_STREAM_API_TOKEN: ${{ secrets.CF_STREAM_API_TOKEN }}
         run: ./scripts/enumerate_cf_stream.sh cf_uids.txt
+
       - name: Summary
-        run: echo "uids=$(wc -l < cf_uids.txt)" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          {
+            echo "uids=$(wc -l < cf_uids.txt)"
+            echo "from_cache=${{ steps.uidcache.outputs.cache-hit == 'true' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/upload-artifact@v4
         with:
           name: cf-uids
@@ -57,6 +74,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: cf-uids
+
+      # Carry this shard's deleted.log across re-pushes: the script skips uids already
+      # in it, so a resumed run doesn't burn rate-limit budget re-deleting (404-ing)
+      # what's already gone. Rolling key + restore-keys = "save new, restore latest".
+      - uses: actions/cache@v4
+        with:
+          path: cf_logs
+          key: cf-logs-shard-${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: |
+            cf-logs-shard-${{ matrix.shard }}-
+
       - name: Delete shard ${{ matrix.shard }}
         env:
           CF_STREAM_API_TOKEN: ${{ secrets.CF_STREAM_API_TOKEN }}
