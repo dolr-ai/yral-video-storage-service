@@ -114,6 +114,10 @@ services:
       HETZNER_S3_ACCESS_KEY: ${HETZNER_S3_ACCESS_KEY}
       HETZNER_S3_SECRET_KEY: ${HETZNER_S3_SECRET_KEY}
       HETZNER_S3_REGION: ${HETZNER_S3_REGION:-eu-central}
+      # Profile images: prakash-yral bucket, `yral-profile/` folder (reuses HETZNER_S3_* creds).
+      PROFILE_S3_BUCKET: ${PROFILE_S3_BUCKET:-prakash-yral}
+      PROFILE_S3_KEY_PREFIX: ${PROFILE_S3_KEY_PREFIX:-yral-profile/users/}
+      PROFILE_S3_PUBLIC_URL_BASE: ${PROFILE_S3_PUBLIC_URL_BASE:-https://prakash-yral.hel1.your-objectstorage.com}
       SERVICE_SECRET_TOKEN: ${SERVICE_SECRET_TOKEN}
       ENVIRONMENT: ${ENVIRONMENT:-production}
       DATABASE_URL: postgres://storj:${APP_DB_PASSWORD}@pgbouncer:6432/video_fingerprint_index

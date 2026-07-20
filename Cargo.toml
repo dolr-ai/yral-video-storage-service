@@ -22,6 +22,9 @@ aws-sdk-s3 = "1.64"
 axum = { version = "0.8.1", features = ["multipart"] }
 base64 = "0.22"
 bytes = "1.8"
+# Profile-image decode/resize/encode. Default features so arbitrary user uploads
+# (jpeg/png/webp/gif) decode; output is always JPEG. See routes/user/profile_s3.rs.
+image = "0.25"
 chrono = "0.4"
 futures = "0.3"
 futures-util = "0.3.31"

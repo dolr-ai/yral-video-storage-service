@@ -5,6 +5,7 @@ pub mod media;
 pub mod mirror;
 pub mod move2nsfw;
 pub mod upload;
+pub mod user;
 pub mod videogen;
 
 #[cfg(test)]

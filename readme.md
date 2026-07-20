@@ -26,6 +26,9 @@ Storj interface is configured via the following environment variables.
 | `BACKUP_S3_PREFIX`                                 | Key prefix (folder) for DB backups within the bucket                            | yral-video-storage-service            |
 | `BACKUP_RETENTION_DAYS`                            | Rolling retention window; objects older than this are pruned each cycle          | 30                                    |
 | `BACKUP_POLL_SECS`                                 | How often the backup loop wakes to check/back up (one dump per UTC day)          | 3600                                  |
+| `PROFILE_S3_BUCKET`                                | Hetzner bucket for profile images (reuses `HETZNER_S3_*` creds/endpoint)         | prakash-yral                          |
+| `PROFILE_S3_KEY_PREFIX`                            | Key prefix for profile images (`<prefix><principal>/profile-<ts>.jpg`)           | yral-profile/users/                   |
+| `PROFILE_S3_PUBLIC_URL_BASE`                       | Public base URL images are served from                                          | https://prakash-yral.hel1.your-objectstorage.com |
 
 For running locally, a Storj account is required.
 - `cp .env.example .env`
@@ -49,6 +52,27 @@ were merged in from the former upload service:
 `/update-video-metadata` and `/mark-post-as-published` require `OFFCHAIN_EVENTS_API_TOKEN`
 and `YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN`; without them those routes return 503
 (the service still starts and all other routes work).
+
+## Profile image routes (moved from off-chain-agent)
+
+Same public auth model (in-body chain-verified delegated identity). Images live in the
+Hetzner `PROFILE_S3_BUCKET` (reusing the `HETZNER_S3_*` creds); the canister write runs
+as the user via a per-request agent. Contract matches off-chain-agent so clients migrate
+by base URL only.
+
+- `POST /api/v1/user/profile-image` — `{delegated_identity_wire, image_data}` (base64,
+  optional `data:` prefix; ≤5 MB) → `{profile_image_url}`. Resizes ≤1000px, encodes JPEG
+  q85, deletes the user's prior images, uploads public-read, then sets `profile_picture_url`
+  on user-info-service.
+- `DELETE /api/v1/user/profile-image` — `{delegated_identity_wire}` → 200. Deletes the
+  user's images and clears `profile_picture_url` (reads fall back to the GobGob default).
+
+Path matches off-chain-agent's `/api/v1/user/profile-image` so clients migrate by base URL
+only. Registered in the served OpenAPI (`/api-docs`).
+
+Status codes: 401 (bad/forged identity), 400 (empty/oversized/undecodable image), 403
+(canister not authorized), 500 (storage/canister error). Runs on all app nodes; the
+`off-chain-agent` copy stays live during migration (dual-run).
 
 ## Running prebuilt image
 

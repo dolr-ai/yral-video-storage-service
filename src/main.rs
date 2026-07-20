@@ -103,6 +103,8 @@ pub(crate) struct AppState {
         routes::videogen::providers::get_providers_all,
         routes::videogen::complete::complete_video,
         routes::videogen::upload_refresh::refresh_upload_url,
+        routes::user::profile_image::handle_upload_profile_image,
+        routes::user::profile_image::handle_delete_profile_image,
         // routes::videogen::get_in_progress_by_principal,
         // routes::videogen::get_all_status_by_principal,
     ),
@@ -150,6 +152,9 @@ pub(crate) struct AppState {
         routes::videogen::UploadRefreshRequest,
         routes::videogen::UploadRefreshResponse,
         routes::videogen::RefreshError,
+        routes::user::profile_image::UploadProfileImageRequest,
+        routes::user::profile_image::UploadProfileImageResponse,
+        routes::user::profile_image::DeleteProfileImageRequest,
         // routes::videogen::AllStatusItem,
         // routes::videogen::AllStatusResponse,
     )),
@@ -158,6 +163,7 @@ pub(crate) struct AppState {
         (name = "mirror", description = "Mirror job management"),
         (name = "media", description = "Media ownership and feed endpoints"),
         (name = "videogen", description = "Video generation status"),
+        (name = "user", description = "User profile endpoints"),
     )
 )]
 struct ApiDoc;
@@ -359,6 +365,16 @@ async fn run_server() -> anyhow::Result<()> {
             "/mark-post-as-published",
             post(routes::upload::mark_post_as_published::mark_post_as_published)
                 .with_state(app_state.clone()),
+        )
+        // Profile-image upload/delete (moved from off-chain-agent). PUBLIC — auth is the
+        // in-body chain-verified delegated identity; handlers need no shared state. Path
+        // matches off-chain-agent exactly so clients migrate by base URL only. Body limit
+        // raised for ~5MB images (base64-inflated).
+        .route(
+            "/api/v1/user/profile-image",
+            post(routes::user::profile_image::handle_upload_profile_image)
+                .delete(routes::user::profile_image::handle_delete_profile_image)
+                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
         // NOTE: This will be removed as the upload happens in the very end of the pipeline and nsfw flag is passed into duplicate
         .route(

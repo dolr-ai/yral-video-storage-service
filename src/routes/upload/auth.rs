@@ -17,13 +17,13 @@ use yral_types::delegated_identity::DelegatedIdentityWire;
 
 use super::types::AppError;
 
-/// Reconstruct the delegated identity WITH chain verification and return its sender
-/// principal. Rejects forged/unverified chains. Used by the update-video-metadata and
-/// mark-post-as-published handlers to enforce `sender() == creator_principal`.
-// allow(dead_code): consumed by the update-video-metadata / mark-post-as-published
-// handlers added in later tasks.
-#[allow(dead_code)]
-pub fn verified_sender(wire: &DelegatedIdentityWire) -> Result<Principal, AppError> {
+/// Reconstruct the delegated identity WITH chain verification and return it alongside
+/// its sender principal. Rejects forged/unverified chains. The identity is returned so
+/// callers can build a user `ic_agent` (e.g. the profile-image handler updating the
+/// user_info_service canister as the user).
+pub fn verified_identity(
+    wire: &DelegatedIdentityWire,
+) -> Result<(DelegatedIdentity, Principal), AppError> {
     let to_secret = k256::SecretKey::from_jwk(&wire.to_secret)
         .map_err(|e| AppError::InvalidDelegatedIdentity(e.to_string()))?;
     let to_identity = Secp256k1Identity::from_private_key(to_secret);
@@ -33,9 +33,16 @@ pub fn verified_sender(wire: &DelegatedIdentityWire) -> Result<Principal, AppErr
         wire.delegation_chain.clone(),
     )
     .map_err(|e| AppError::InvalidDelegatedIdentity(e.to_string()))?;
-    identity
+    let sender = identity
         .sender()
-        .map_err(AppError::InvalidDelegatedIdentity)
+        .map_err(AppError::InvalidDelegatedIdentity)?;
+    Ok((identity, sender))
+}
+
+/// Chain-verified sender principal only. Used by the update-video-metadata and
+/// mark-post-as-published handlers to enforce `sender() == creator_principal`.
+pub fn verified_sender(wire: &DelegatedIdentityWire) -> Result<Principal, AppError> {
+    verified_identity(wire).map(|(_, sender)| sender)
 }
 
 #[cfg(test)]
@@ -49,6 +56,14 @@ mod tests {
     fn valid_wire_resolves_to_root_sender() {
         let (wire, expected) = signed_wire_with_sender();
         assert_eq!(verified_sender(&wire).expect("verified"), expected);
+    }
+
+    #[test]
+    fn verified_identity_returns_identity_and_sender() {
+        let (wire, expected) = signed_wire_with_sender();
+        let (identity, sender) = verified_identity(&wire).expect("verified");
+        assert_eq!(sender, expected);
+        assert_eq!(identity.sender().unwrap(), expected);
     }
 
     #[test]
