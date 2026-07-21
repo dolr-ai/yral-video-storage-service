@@ -5686,7 +5686,7 @@ dependencies = [
  "lapin",
  "once_cell",
  "phash",
- "rand 0.8.7",
+ "rand 0.10.2",
  "reqwest",
  "rustls",
  "sentry",
