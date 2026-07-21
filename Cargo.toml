@@ -18,7 +18,10 @@ path = "src/main.rs"
 anyhow = "1.0.97"
 async-trait = "0.1"
 aws-config = { version = "1.5", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1.64"
+# `default-features = false` avoids the `rustls` feature, which routes TLS through
+# the legacy rustls-0.21 / rustls-webpki-0.101 stack (GHSA / Dependabot #21).
+# `default-https-client` selects the modern rustls-aws-lc (rustls-0.23) path instead.
+aws-sdk-s3 = { version = "1.64", default-features = false, features = ["default-https-client", "rt-tokio", "sigv4a", "http-1x"] }
 axum = { version = "0.8.1", features = ["multipart"] }
 base64 = "0.22"
 bytes = "1.8"
