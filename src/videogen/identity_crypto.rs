@@ -20,6 +20,11 @@ impl IdentityCrypto {
     pub fn from_env() -> Result<Self> {
         let secret = std::env::var(INTERNAL_ENCRYPTION_SECRET_ENV)
             .with_context(|| format!("{INTERNAL_ENCRYPTION_SECRET_ENV} must be set"))?;
+        Self::from_secret(&secret)
+    }
+
+    /// Same key derivation as [`Self::from_env`], for callers that already hold the secret.
+    pub fn from_secret(secret: &str) -> Result<Self> {
         if secret.is_empty() {
             return Err(anyhow!(
                 "{INTERNAL_ENCRYPTION_SECRET_ENV} must not be empty"
@@ -39,10 +44,10 @@ impl IdentityCrypto {
 
         let mut nonce_bytes = [0u8; 12];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         let ciphertext = cipher
-            .encrypt(nonce, json.as_bytes())
+            .encrypt(&nonce, json.as_bytes())
             .map_err(|e| anyhow!("encrypt: {e}"))?;
 
         let mut combined = nonce_bytes.to_vec();
@@ -60,12 +65,15 @@ impl IdentityCrypto {
         }
 
         let (nonce_bytes, ciphertext) = combined.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce_bytes: [u8; 12] = nonce_bytes
+            .try_into()
+            .map_err(|_| anyhow!("invalid nonce length"))?;
+        let nonce = Nonce::from(nonce_bytes);
         let cipher =
             Aes256Gcm::new_from_slice(&self.key).map_err(|e| anyhow!("invalid key: {e}"))?;
 
         let plaintext = cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|e| anyhow!("decrypt: {e}"))?;
 
         serde_json::from_slice(&plaintext).context("deserialize identity")
@@ -76,12 +84,10 @@ impl IdentityCrypto {
 mod tests {
     use super::*;
 
+    // Built from the secret directly: mutating the process env here would race
+    // with `rejects_empty_secret` running on another test thread.
     fn test_crypto() -> IdentityCrypto {
-        std::env::set_var(
-            INTERNAL_ENCRYPTION_SECRET_ENV,
-            "test_secret_key_for_unit_tests!!",
-        );
-        IdentityCrypto::from_env().unwrap()
+        IdentityCrypto::from_secret("test_secret_key_for_unit_tests!!").unwrap()
     }
 
     #[test]
@@ -105,8 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn from_env_fails_when_empty() {
-        std::env::set_var(INTERNAL_ENCRYPTION_SECRET_ENV, "");
-        assert!(IdentityCrypto::from_env().is_err());
+    fn rejects_empty_secret() {
+        assert!(IdentityCrypto::from_secret("").is_err());
     }
 }

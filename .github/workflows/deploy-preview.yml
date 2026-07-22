@@ -129,7 +129,7 @@ jobs:
             secret/data/yral-video-storage-service/BACKEND_ADMIN_IDENTITY value | BACKEND_ADMIN_IDENTITY ;
             secret/data/yral-video-storage-service/INTERNAL_ENCRYPTION_SECRET value | INTERNAL_ENCRYPTION_SECRET ;
             secret/data/yral-video-storage-service/MODERATION_HMAC_SECRET value | MODERATION_HMAC_SECRET ;
-            secret/data/yral-video-storage-service/YRAL_METADATA_USER_NOTIFICATION_API_KEY value | YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN ;
+            secret/data/yral-video-storage-service/NAITIK_MULTI_SERVICE_NOTIFICATION_API_TOKEN value | YRAL_METADATA_NOTIFICATION_SERVICE_API_TOKEN ;
 
       - name: Setup SSH
         run: |

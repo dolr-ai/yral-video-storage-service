@@ -10,7 +10,7 @@ use std::fmt::Display;
 use candid::Principal;
 use serde::{Deserialize, Serialize};
 
-const METADATA_SERVER_URL: &str = "https://metadata.yral.com";
+const METADATA_SERVER_URL: &str = "https://multi-service.naitik.yral.com/api/v1";
 
 // Consumed by handlers + UploadState in later tasks; allow(dead_code) until then.
 #[allow(dead_code)]
