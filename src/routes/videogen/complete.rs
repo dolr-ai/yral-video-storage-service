@@ -8,17 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    consts::{self, RATE_LIMITS_CANISTER_ID},
+    consts,
     videogen::{
         config::VideogenConfig,
         draft::{DraftCreationRequest, DraftServiceError},
         hmac::{body_sha256_hex, verify_completion_signature, HmacError, HmacKeyRegistry},
-        rate_limiter::{to_canister_request_key, RateLimiterRequestKey},
+        rate_limiter::RateLimiterRequestKey,
     },
     AppState,
-};
-use yral_canisters_client::rate_limits::{
-    RateLimits, Result1 as CanisterResult, VideoGenRequestStatus,
 };
 
 // ─── Request / response types ────────────────────────────────────────────────
@@ -104,22 +101,6 @@ pub trait CompletionDeps: Send + Sync {
 
     /// Allowed timestamp skew in seconds.
     fn hmac_skew_secs(&self) -> i64;
-
-    /// Notify the rate limiter that generation completed successfully (best-effort).
-    async fn mark_rate_limit_complete(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        bucket_url: &str,
-    ) -> Result<(), String>;
-
-    async fn mark_rate_limit_failed(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        reason: &str,
-    ) -> Result<(), String>;
-
-    async fn decrement_rate_limit(&self, request_key: &RateLimiterRequestKey)
-        -> Result<(), String>;
 
     async fn release_upload_destination(
         &self,
@@ -239,11 +220,6 @@ async fn handle_success_completion<D: CompletionDeps>(
         )
     })?;
 
-    // Notify rate limiter of success (best-effort)
-    if let Err(e) = deps.mark_rate_limit_complete(request_key, bucket_url).await {
-        tracing::warn!("mark_rate_limit_complete failed (best-effort): {e}");
-    }
-
     // Register into master table for steady-state pHash (best-effort; swallows its own errors)
     deps.register_ingested(video_id, bucket_url).await;
 
@@ -267,13 +243,7 @@ async fn handle_failure_completion<D: CompletionDeps>(
         .as_deref()
         .unwrap_or("unknown failure reason");
 
-    // Best-effort side effects
-    if let Err(e) = deps.mark_rate_limit_failed(request_key, reason).await {
-        tracing::warn!("mark_rate_limit_failed failed: {e}");
-    }
-    if let Err(e) = deps.decrement_rate_limit(request_key).await {
-        tracing::warn!("decrement_rate_limit failed: {e}");
-    }
+    // Best-effort: release upload destination
     let vid = req.video_id.as_deref();
     let key = req.object_key.as_deref();
     if let Err(e) = deps.release_upload_destination(request_key, vid, key).await {
@@ -433,9 +403,8 @@ pub async fn complete_video(
 
 struct RuntimeCompletionDeps {
     config: VideogenConfig,
-    // Hold the whole AppState: the rate-limiter calls need `ic_agent`, the in-process
-    // draft client (Phase 2) needs the shared agent + upload deps, and register_ingested
-    // (steady-state pHash) needs `db_url`.
+    // Hold the whole AppState: the in-process draft client needs the shared
+    // agent + upload deps, and register_ingested (steady-state pHash) needs `db_url`.
     state: AppState,
 }
 
@@ -463,59 +432,6 @@ impl CompletionDeps for RuntimeCompletionDeps {
 
     fn hmac_skew_secs(&self) -> i64 {
         self.config.completion_hmac_skew_secs as i64
-    }
-
-    async fn mark_rate_limit_complete(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        bucket_url: &str,
-    ) -> Result<(), String> {
-        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.state.ic_agent);
-        let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
-        match rate_limits
-            .update_video_generation_status(
-                key,
-                VideoGenRequestStatus::Complete(bucket_url.to_string()),
-            )
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            CanisterResult::Ok => Ok(()),
-            CanisterResult::Err(e) => Err(e),
-        }
-    }
-
-    async fn mark_rate_limit_failed(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        reason: &str,
-    ) -> Result<(), String> {
-        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.state.ic_agent);
-        let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
-        match rate_limits
-            .update_video_generation_status(key, VideoGenRequestStatus::Failed(reason.to_string()))
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            CanisterResult::Ok => Ok(()),
-            CanisterResult::Err(e) => Err(e),
-        }
-    }
-
-    async fn decrement_rate_limit(
-        &self,
-        request_key: &RateLimiterRequestKey,
-    ) -> Result<(), String> {
-        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.state.ic_agent);
-        let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
-        match rate_limits
-            .decrement_video_generation_counter_v_1(key, "VIDEOGEN".to_string())
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            CanisterResult::Ok => Ok(()),
-            CanisterResult::Err(e) => Err(e),
-        }
     }
 
     async fn release_upload_destination(

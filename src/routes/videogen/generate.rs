@@ -7,32 +7,23 @@ use ic_agent::Agent;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, fmt, str::FromStr};
+use std::{collections::HashMap, fmt, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
 use utoipa::ToSchema;
 use uuid::Uuid;
-use yral_canisters_client::rate_limits::{
-    RateLimits, Result1 as CanisterResult, Result_ as CanisterCreateResult,
-    TokenType as CanisterTokenType, VideoGenRequestStatus,
-};
 use yral_types::delegated_identity::DelegatedIdentityWire;
 
 use crate::{
-    consts::RATE_LIMITS_CANISTER_ID,
     videogen::{
         config::{ModerationMode, VideogenConfig},
         fingerprint::{compute_request_fingerprint, ImageIdentityInput, RequestFingerprintInput},
         moderation::{ModerationDecision, ModerationError, ModerationInput, ModerationSubject},
-        rate_limiter::{
-            prepare_create_request_options, to_canister_request_key, RateLimiterCreateOptions,
-            RateLimiterRequestKey, RateLimiterTokenType,
-        },
+        rate_limiter::RateLimiterRequestKey,
         upload_destination::UploadDestination,
         vast::{VastHttpClient, VastSubmitAccepted, VastSubmitError, VastSubmitRequest},
     },
     AppState,
 };
 
-const VIDEOGEN_PROPERTY: &str = "VIDEOGEN";
 const LTX_PROVIDER: &str = "Ltx2";
 const UPLOAD_URL_REFRESH_ENABLED_ENV: &str = "VIDEOGEN_UPLOAD_URL_REFRESH_ENABLED";
 const VAST_GENERATE_URL_ENV: &str = "VIDEOGEN_VAST_GENERATE_URL";
@@ -277,21 +268,6 @@ pub enum WorkflowError {
 pub trait GenerateDeps: Send + Sync {
     async fn moderate(&self, input: ModerationInput)
         -> Result<ModerationDecision, ModerationError>;
-    async fn create_rate_limit(
-        &self,
-        request: &GenerateRequest,
-        options: RateLimiterCreateOptions,
-    ) -> Result<RateLimiterRequestKey, RateLimiterError>;
-    async fn mark_rate_limit_failed(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        reason: &str,
-    ) -> Result<(), RateLimiterError>;
-    async fn decrement_rate_limit(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        property: &str,
-    ) -> Result<(), RateLimiterError>;
     async fn reserve_upload_destination(
         &self,
         request: UploadDestinationRequest,
@@ -327,8 +303,6 @@ pub enum GenerateError {
     InvalidInput(String),
     #[error("moderation failed: {0}")]
     Moderation(#[from] ModerationError),
-    #[error("rate limiter failed: {0}")]
-    RateLimiter(#[from] RateLimiterError),
     #[error("upload destination failed: {0}")]
     UploadDestination(#[from] UploadDestinationError),
     #[error("image staging failed: {0}")]
@@ -364,14 +338,6 @@ impl From<GenerateError> for GenerateHttpError {
                     error: VideoGenError::InvalidInput("Invalid input prompt".to_string()),
                 }
             }
-            GenerateError::RateLimiter(RateLimiterError::Limited(message)) => Self {
-                status: StatusCode::TOO_MANY_REQUESTS,
-                error: VideoGenError::ProviderError(message),
-            },
-            GenerateError::RateLimiter(error) => Self {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                error: VideoGenError::NetworkError(error.to_string()),
-            },
             GenerateError::ImageStage(error) => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 error: VideoGenError::NetworkError(error.to_string()),
@@ -597,14 +563,14 @@ async fn generate_inner<D: GenerateDeps>(
         ));
     }
 
-    let rate_limit_options = prepare_create_request_options(
-        RateLimiterRequestKey {
-            principal: request.user_id.clone(),
-            counter: 0,
-        },
-        request.token_type.map(rate_limiter_token_type),
-    );
-    let request_key = deps.create_rate_limit(&request, rate_limit_options).await?;
+    // Generate a local request key (replaces the canister's create_video_generation_request_v_2).
+    let request_key = RateLimiterRequestKey {
+        principal: request.user_id.clone(),
+        counter: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64,
+    };
     let operation_id = operation_id(&request_key);
 
     // For base64 images already staged above; for URL images, stage_image is a no-op passthrough.
@@ -622,7 +588,7 @@ async fn generate_inner<D: GenerateDeps>(
             Ok(Some((url, key))) => (Some(url), key),
             Ok(None) => (None, None),
             Err(error) => {
-                fail_after_rate_limit(deps, &request_key, None, "image staging failed").await;
+                fail_after_submit(deps, &request_key, None, "image staging failed").await;
                 return Err(error.into());
             }
         }
@@ -634,7 +600,7 @@ async fn generate_inner<D: GenerateDeps>(
     {
         Ok(workflow_json) => workflow_json,
         Err(error) => {
-            fail_after_rate_limit(deps, &request_key, None, "workflow selection failed").await;
+            fail_after_submit(deps, &request_key, None, "workflow selection failed").await;
             return Err(error.into());
         }
     };
@@ -647,7 +613,7 @@ async fn generate_inner<D: GenerateDeps>(
     {
         Ok(destination) => destination,
         Err(error) => {
-            fail_after_rate_limit(deps, &request_key, None, "upload destination failed").await;
+            fail_after_submit(deps, &request_key, None, "upload destination failed").await;
             return Err(error.into());
         }
     };
@@ -693,11 +659,11 @@ async fn generate_inner<D: GenerateDeps>(
                 accepted.status,
                 accepted.request_id == request_id
             );
-            fail_after_rate_limit(deps, &request_key, Some(&upload_destination), &reason).await;
+            fail_after_submit(deps, &request_key, Some(&upload_destination), &reason).await;
             return Err(GenerateError::Vast(VastSubmitError::RequestFailed(reason)));
         }
         Err(error) => {
-            fail_after_rate_limit(
+            fail_after_submit(
                 deps,
                 &request_key,
                 Some(&upload_destination),
@@ -715,16 +681,14 @@ async fn generate_inner<D: GenerateDeps>(
     })
 }
 
-async fn fail_after_rate_limit<D: GenerateDeps>(
+/// Release upload destination on a failed submit (replaces the old
+/// `fail_after_rate_limit` which also called canister status updates).
+async fn fail_after_submit<D: GenerateDeps>(
     deps: &D,
     request_key: &RateLimiterRequestKey,
     upload_destination: Option<&UploadDestination>,
-    reason: &str,
+    _reason: &str,
 ) {
-    let _ = deps.mark_rate_limit_failed(request_key, reason).await;
-    let _ = deps
-        .decrement_rate_limit(request_key, VIDEOGEN_PROPERTY)
-        .await;
     if let Some(destination) = upload_destination {
         let _ = deps
             .release_upload_destination(request_key, destination)
@@ -760,15 +724,6 @@ fn fingerprint_input(request: &GenerateRequest) -> Result<RequestFingerprintInpu
             Some(ImageSource::Base64(image)) => ImageIdentityInput::Base64(image.data.clone()),
         },
     })
-}
-
-fn rate_limiter_token_type(token_type: GenerateTokenType) -> RateLimiterTokenType {
-    match token_type {
-        GenerateTokenType::Free => RateLimiterTokenType::Free,
-        GenerateTokenType::Sats => RateLimiterTokenType::Sats,
-        GenerateTokenType::Dolr => RateLimiterTokenType::Dolr,
-        GenerateTokenType::YralProSubscription => RateLimiterTokenType::YralProSubscription,
-    }
 }
 
 fn operation_id(key: &RateLimiterRequestKey) -> String {
@@ -1018,83 +973,6 @@ impl GenerateDeps for RuntimeGenerateDeps {
             "moderation failed after all retries [MOD_RETRIES_EXHAUSTED]: NSFW API unreachable"
         );
         Err(err)
-    }
-
-    async fn create_rate_limit(
-        &self,
-        request: &GenerateRequest,
-        options: RateLimiterCreateOptions,
-    ) -> Result<RateLimiterRequestKey, RateLimiterError> {
-        let principal = Principal::from_text(&options.request_key.principal)
-            .map_err(|error| RateLimiterError::Rejected(error.to_string()))?;
-        let token_type = match options.token_type {
-            RateLimiterTokenType::Free => CanisterTokenType::Free,
-            RateLimiterTokenType::Sats => CanisterTokenType::Sats,
-            RateLimiterTokenType::Dolr => CanisterTokenType::Dolr,
-            RateLimiterTokenType::YralProSubscription => CanisterTokenType::YralProSubscription,
-        };
-        let payment_amount = options.payment_amount.map(|amount| amount.to_string());
-        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
-        let result = rate_limits
-            .create_video_generation_request_v_2(
-                principal,
-                request.model_id.clone(),
-                request.prompt.clone(),
-                VIDEOGEN_PROPERTY.to_string(),
-                token_type,
-                true,
-                options.is_paid,
-                payment_amount,
-            )
-            .await
-            .map_err(|error| RateLimiterError::Unavailable(error.to_string()))?;
-        match result {
-            CanisterCreateResult::Ok(key) => Ok(RateLimiterRequestKey {
-                principal: key.principal.to_string(),
-                counter: key.counter,
-            }),
-            CanisterCreateResult::Err(error)
-                if error.contains("Rate limit exceeded")
-                    || error.contains("Property rate limit exceeded") =>
-            {
-                Err(RateLimiterError::Limited(error))
-            }
-            CanisterCreateResult::Err(error) => Err(RateLimiterError::Rejected(error)),
-        }
-    }
-
-    async fn mark_rate_limit_failed(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        reason: &str,
-    ) -> Result<(), RateLimiterError> {
-        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
-        let key = to_canister_request_key(request_key)?;
-        match rate_limits
-            .update_video_generation_status(key, VideoGenRequestStatus::Failed(reason.to_string()))
-            .await
-            .map_err(|error| RateLimiterError::Unavailable(error.to_string()))?
-        {
-            CanisterResult::Ok => Ok(()),
-            CanisterResult::Err(error) => Err(RateLimiterError::Rejected(error)),
-        }
-    }
-
-    async fn decrement_rate_limit(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        property: &str,
-    ) -> Result<(), RateLimiterError> {
-        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.ic_agent);
-        let key = to_canister_request_key(request_key)?;
-        match rate_limits
-            .decrement_video_generation_counter_v_1(key, property.to_string())
-            .await
-            .map_err(|error| RateLimiterError::Unavailable(error.to_string()))?
-        {
-            CanisterResult::Ok => Ok(()),
-            CanisterResult::Err(error) => Err(RateLimiterError::Rejected(error)),
-        }
     }
 
     async fn reserve_upload_destination(
