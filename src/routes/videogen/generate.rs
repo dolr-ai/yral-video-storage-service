@@ -34,6 +34,13 @@ const UPLOAD_URL_REFRESH_ENABLED_ENV: &str = "VIDEOGEN_UPLOAD_URL_REFRESH_ENABLE
 const VAST_GENERATE_URL_ENV: &str = "VIDEOGEN_VAST_GENERATE_URL";
 const VAST_API_KEY_ENV: &str = "VAST_API_KEY";
 
+/// Upper bound on prompt length. The request store persists prompts, and with the
+/// rate limiter canister gone nothing else caps how often a caller can generate, so an
+/// unbounded prompt inside the 10 MB body limit is a way to grow the table (and the
+/// daily pg_dump) at will. Mobile's own input caps at 500 chars, so this leaves ample
+/// headroom for any legitimate caller.
+const MAX_PROMPT_CHARS: usize = 2000;
+
 /// Total moderation attempts before giving up (1 initial + retries).
 const MODERATION_MAX_ATTEMPTS: u32 = 3;
 /// Base backoff between moderation retries; doubles each attempt.
@@ -520,6 +527,11 @@ async fn generate_inner<D: GenerateDeps>(
         return Err(GenerateError::InvalidInput(
             "Prompt must not be empty".to_string(),
         ));
+    }
+    if request.prompt.chars().count() > MAX_PROMPT_CHARS {
+        return Err(GenerateError::InvalidInput(format!(
+            "Prompt must be at most {MAX_PROMPT_CHARS} characters"
+        )));
     }
 
     let fingerprint = compute_request_fingerprint(&fingerprint_input(&request)?)
@@ -1373,6 +1385,7 @@ mod tests {
     #[derive(Default)]
     struct FakeDeps {
         calls: Arc<Mutex<Vec<Call>>>,
+        moderated_prompts: Arc<Mutex<Vec<String>>>,
         moderation: Option<ModerationDecision>,
         moderation_fails: bool,
         release_fails: bool,
@@ -1393,6 +1406,10 @@ mod tests {
 
         fn calls(&self) -> Vec<Call> {
             self.calls.lock().unwrap().clone()
+        }
+
+        fn moderated_prompts(&self) -> Vec<String> {
+            self.moderated_prompts.lock().unwrap().clone()
         }
     }
 
@@ -1415,7 +1432,9 @@ mod tests {
             &self,
             input: ModerationInput,
         ) -> Result<ModerationDecision, ModerationError> {
-            assert_eq!(input.prompt, "make a sunrise over mountains");
+            // Recorded rather than asserted inline so tests can drive other prompts
+            // (e.g. the length boundary) without tripping a fixed expectation.
+            self.moderated_prompts.lock().unwrap().push(input.prompt);
             self.push(Call::Moderate);
             if self.moderation_fails {
                 return Err(ModerationError::RequestFailed(
@@ -1604,6 +1623,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_prompt_is_rejected_before_the_store_is_touched() {
+        // Prompts are persisted and nothing rate-limits generation, so an unbounded
+        // prompt must not reach the store. Rejected before moderation too, so it costs
+        // no downstream calls.
+        let deps = FakeDeps::with_calls();
+        let mut request = request();
+        request.prompt = "a".repeat(MAX_PROMPT_CHARS + 1);
+
+        let err = generate_with_dependencies(request, &deps, config())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(matches!(err.error, VideoGenError::InvalidInput(_)));
+        assert_eq!(deps.calls(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn prompt_at_the_length_limit_is_accepted() {
+        // The bound is inclusive — exactly MAX_PROMPT_CHARS must still generate.
+        let deps = FakeDeps::with_calls();
+        let mut request = request();
+        request.prompt = "a".repeat(MAX_PROMPT_CHARS);
+
+        let response = generate_with_dependencies(request, &deps, config())
+            .await
+            .expect("a limit-length prompt is valid");
+
+        assert!(response.operation_id.starts_with("aaaaa-aa_"));
+        assert_eq!(
+            deps.moderated_prompts()[0].chars().count(),
+            MAX_PROMPT_CHARS
+        );
+    }
+
+    #[tokio::test]
     async fn nsfw_returns_invalid_input_without_vast() {
         let deps = FakeDeps {
             moderation: Some(ModerationDecision::Unsafe),
@@ -1763,6 +1818,11 @@ mod tests {
         assert_eq!(response.request_key.principal, "aaaaa-aa");
         assert_eq!(response.request_key.counter, FAKE_COUNTER);
         assert_eq!(response.operation_id, format!("aaaaa-aa_{FAKE_COUNTER}"));
+        // The prompt reaches moderation verbatim.
+        assert_eq!(
+            deps.moderated_prompts(),
+            vec!["make a sunrise over mountains".to_string()]
+        );
         assert_eq!(
             deps.calls(),
             vec![
