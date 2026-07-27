@@ -1,4 +1,3 @@
-use candid::Principal;
 use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicI64, AtomicUsize};
 

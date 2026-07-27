@@ -6,5 +6,6 @@ pub mod identity_crypto;
 pub mod moderation;
 pub mod rabbitmq;
 pub mod rate_limiter;
+pub mod request_store;
 pub mod upload_destination;
 pub mod vast;

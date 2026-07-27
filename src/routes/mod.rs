@@ -1,6 +1,7 @@
 pub mod chain;
 pub mod duplicate;
 pub mod duplicate_hls;
+pub mod identity_auth;
 pub mod media;
 pub mod mirror;
 pub mod move2nsfw;

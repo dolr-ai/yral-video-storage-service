@@ -2,17 +2,22 @@ use axum::{extract::State, http::StatusCode, Json};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use candid::Principal;
 use chrono::{DateTime, Duration, Utc};
-use ic_agent::identity::{DelegatedIdentity, Identity};
 use ic_agent::Agent;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, fmt, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::HashMap,
+    fmt,
+    str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use utoipa::ToSchema;
 use uuid::Uuid;
 use yral_types::delegated_identity::DelegatedIdentityWire;
 
 use crate::{
+    routes::identity_auth::verify_delegated_identity,
     videogen::{
         config::{ModerationMode, VideogenConfig},
         fingerprint::{compute_request_fingerprint, ImageIdentityInput, RequestFingerprintInput},
@@ -239,8 +244,6 @@ pub struct UploadDestinationRequest {
     pub user_principal: String,
 }
 
-pub use crate::videogen::rate_limiter::RateLimiterError;
-
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum UploadDestinationError {
     #[error("upload destination unavailable: {0}")]
@@ -268,6 +271,12 @@ pub enum WorkflowError {
 pub trait GenerateDeps: Send + Sync {
     async fn moderate(&self, input: ModerationInput)
         -> Result<ModerationDecision, ModerationError>;
+    /// Persist the submitted request and return its store-assigned counter.
+    /// `None` = not persisted (store unreachable); generation continues regardless.
+    async fn record_pending(&self, request: &GenerateRequest, request_id: &str) -> Option<u64>;
+    /// Close a recorded request as failed. Best-effort; a request that was never
+    /// recorded has nothing to close.
+    async fn mark_request_failed(&self, request_key: &RateLimiterRequestKey, reason: &str);
     async fn reserve_upload_destination(
         &self,
         request: UploadDestinationRequest,
@@ -371,8 +380,7 @@ impl From<GenerateError> for GenerateHttpError {
     responses(
         (status = 200, description = "Video generation submitted", body = GenerateResponse),
         (status = 400, description = "Invalid input", body = VideoGenError),
-        (status = 401, description = "Invalid or mismatched identity", body = VideoGenError),
-        (status = 429, description = "Rate limit exceeded", body = VideoGenError),
+        (status = 401, description = "Unverified, anonymous, or mismatched delegated identity", body = VideoGenError),
         (status = 503, description = "Provider unavailable", body = VideoGenError),
     )
 )]
@@ -411,16 +419,24 @@ pub async fn generate_video(
 }
 
 impl GenerateVideoRequest {
+    /// Authentication gate for video generation: the call is allowed only if the
+    /// supplied `DelegatedIdentityWire` is chain-verified (see
+    /// [`crate::routes::identity_auth`]) and resolves to a non-anonymous principal.
+    /// Anything else is `IdentityMismatch` → 401, so generation never runs for an
+    /// unauthenticated caller. `generate_inner` then enforces
+    /// `identity_principal == user_id`.
     fn try_into_generate_request(self) -> Result<GenerateRequest, GenerateError> {
         let delegated_identity_wire = self.delegated_identity.clone();
-        let identity: DelegatedIdentity = self
-            .delegated_identity
-            .try_into()
-            .map_err(|_error: k256::elliptic_curve::Error| GenerateError::IdentityMismatch)?;
-        let identity_principal = identity
-            .sender()
-            .map_err(|_| GenerateError::IdentityMismatch)?
-            .to_string();
+        let (_identity, sender) =
+            verify_delegated_identity(&delegated_identity_wire).map_err(|error| {
+                tracing::warn!(error = %error, "rejected unverified delegated identity");
+                GenerateError::IdentityMismatch
+            })?;
+        if sender == Principal::anonymous() {
+            tracing::warn!("rejected anonymous principal for video generation");
+            return Err(GenerateError::IdentityMismatch);
+        }
+        let identity_principal = sender.to_string();
 
         Ok(GenerateRequest {
             user_id: self.request.user_id,
@@ -474,7 +490,7 @@ pub async fn generate_with_dependencies<D: GenerateDeps>(
 }
 
 async fn generate_inner<D: GenerateDeps>(
-    request: GenerateRequest,
+    mut request: GenerateRequest,
     deps: &D,
     config: GenerateConfig,
 ) -> Result<GenerateResponse, GenerateError> {
@@ -483,6 +499,12 @@ async fn generate_inner<D: GenerateDeps>(
     if request.identity_principal != claimed_principal.to_string() {
         return Err(GenerateError::IdentityMismatch);
     }
+    // Canonicalize AFTER the identity check (never before — that would make the check
+    // vacuous). `Principal::from_text` parses case-insensitively, so "AAAAA-AA" and
+    // "aaaaa-aa" are one principal but two distinct strings; keying the request store,
+    // the Storj staging prefix and every downstream echo of `user_id` on the raw input
+    // would split one user across two key spaces.
+    request.user_id = claimed_principal.to_string();
 
     if request.upload_handling != VideoUploadHandling::ServerDraft {
         return Err(GenerateError::InvalidInput(
@@ -563,13 +585,21 @@ async fn generate_inner<D: GenerateDeps>(
         ));
     }
 
-    // Generate a local request key (replaces the canister's create_video_generation_request_v_2).
+    // Vast's correlation id. Minted before the request is recorded so the stored row
+    // can be tied back to the Vast submission in logs.
+    let request_id = Uuid::new_v4().to_string();
+
+    // Record the request locally (replaces the canister's
+    // create_video_generation_request_v_2) and take the DB-assigned counter. If the
+    // store is unreachable the request is NOT persisted — generation still proceeds on
+    // a clock-derived counter, it just will not show up in /drafts/in-progress.
+    let counter = match deps.record_pending(&request, &request_id).await {
+        Some(counter) => counter,
+        None => fallback_counter(),
+    };
     let request_key = RateLimiterRequestKey {
         principal: request.user_id.clone(),
-        counter: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64,
+        counter,
     };
     let operation_id = operation_id(&request_key);
 
@@ -588,7 +618,8 @@ async fn generate_inner<D: GenerateDeps>(
             Ok(Some((url, key))) => (Some(url), key),
             Ok(None) => (None, None),
             Err(error) => {
-                fail_after_submit(deps, &request_key, None, "image staging failed").await;
+                let reason = format!("image staging failed: {error}");
+                fail_after_submit(deps, &request_key, None, &reason).await;
                 return Err(error.into());
             }
         }
@@ -600,7 +631,8 @@ async fn generate_inner<D: GenerateDeps>(
     {
         Ok(workflow_json) => workflow_json,
         Err(error) => {
-            fail_after_submit(deps, &request_key, None, "workflow selection failed").await;
+            let reason = format!("workflow selection failed: {error}");
+            fail_after_submit(deps, &request_key, None, &reason).await;
             return Err(error.into());
         }
     };
@@ -613,7 +645,8 @@ async fn generate_inner<D: GenerateDeps>(
     {
         Ok(destination) => destination,
         Err(error) => {
-            fail_after_submit(deps, &request_key, None, "upload destination failed").await;
+            let reason = format!("upload destination reservation failed: {error}");
+            fail_after_submit(deps, &request_key, None, &reason).await;
             return Err(error.into());
         }
     };
@@ -633,7 +666,6 @@ async fn generate_inner<D: GenerateDeps>(
             }
         };
 
-    let request_id = Uuid::new_v4().to_string();
     let vast_request = VastSubmitRequest {
         request_id: request_id.clone(),
         request_key: request_key.clone(),
@@ -663,13 +695,8 @@ async fn generate_inner<D: GenerateDeps>(
             return Err(GenerateError::Vast(VastSubmitError::RequestFailed(reason)));
         }
         Err(error) => {
-            fail_after_submit(
-                deps,
-                &request_key,
-                Some(&upload_destination),
-                "Vast submit failed",
-            )
-            .await;
+            let reason = format!("Vast submit failed: {error}");
+            fail_after_submit(deps, &request_key, Some(&upload_destination), &reason).await;
             return Err(error.into());
         }
     }
@@ -683,17 +710,48 @@ async fn generate_inner<D: GenerateDeps>(
 
 /// Release upload destination on a failed submit (replaces the old
 /// `fail_after_rate_limit` which also called canister status updates).
+///
+/// `reason` names the stage that failed. With the canister gone there is no stored
+/// request record to attach it to, so this log line is the only trace — it is emitted
+/// at ERROR so sentry-tracing turns it into an event (see `main.rs` event_filter).
+/// A failed release means a reserved destination is leaked and needs manual cleanup,
+/// so it is reported rather than discarded.
 async fn fail_after_submit<D: GenerateDeps>(
     deps: &D,
     request_key: &RateLimiterRequestKey,
     upload_destination: Option<&UploadDestination>,
-    _reason: &str,
+    reason: &str,
 ) {
-    if let Some(destination) = upload_destination {
-        let _ = deps
+    deps.mark_request_failed(request_key, reason).await;
+
+    let released = match upload_destination {
+        None => "not_reserved",
+        Some(destination) => match deps
             .release_upload_destination(request_key, destination)
-            .await;
-    }
+            .await
+        {
+            Ok(()) => "released",
+            Err(error) => {
+                tracing::error!(
+                    principal = %request_key.principal,
+                    counter = request_key.counter,
+                    video_id = %destination.video_id,
+                    object_key = %destination.object_key,
+                    error = %error,
+                    "videogen submit rollback: release_upload_destination failed, destination leaked"
+                );
+                "leaked"
+            }
+        },
+    };
+
+    tracing::error!(
+        principal = %request_key.principal,
+        counter = request_key.counter,
+        reason = reason,
+        upload_destination = released,
+        "videogen generate failed before submit completed"
+    );
 }
 
 fn fingerprint_input(request: &GenerateRequest) -> Result<RequestFingerprintInput, GenerateError> {
@@ -730,6 +788,18 @@ fn operation_id(key: &RateLimiterRequestKey) -> String {
     format!("{}_{}", key.principal, key.counter)
 }
 
+/// Counter used when the request store could not assign one. Clock-derived, so it is
+/// unique in practice and cannot collide with the store's `BIGSERIAL` sequence, which
+/// counts up from 1. Never 0: a zeroed counter would collide across every caller whose
+/// clock read failed.
+fn fallback_counter() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos() as u64)
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
+
 fn vast_input(request: &GenerateRequest, staged_image_url: Option<&str>) -> Value {
     let mut input = json!({
         "prompt": request.prompt,
@@ -758,6 +828,8 @@ struct RuntimeGenerateDeps {
     ic_agent: Agent,
     config: VideogenConfig,
     http: reqwest::Client,
+    /// For the videogen request store (in-progress tracking).
+    db_url: String,
 }
 
 impl RuntimeGenerateDeps {
@@ -766,6 +838,7 @@ impl RuntimeGenerateDeps {
             ic_agent: state.ic_agent,
             config,
             http: reqwest::Client::new(),
+            db_url: state.db_url,
         }
     }
 
@@ -885,6 +958,30 @@ impl RuntimeGenerateDeps {
 
 #[async_trait::async_trait]
 impl GenerateDeps for RuntimeGenerateDeps {
+    async fn record_pending(&self, request: &GenerateRequest, request_id: &str) -> Option<u64> {
+        crate::videogen::request_store::record_pending_best_effort(
+            &self.db_url,
+            crate::videogen::request_store::NewRequest {
+                principal: &request.user_id,
+                request_id,
+                model_id: &request.model_id,
+                prompt: &request.prompt,
+            },
+        )
+        .await
+        .map(|counter| counter as u64)
+    }
+
+    async fn mark_request_failed(&self, request_key: &RateLimiterRequestKey, reason: &str) {
+        crate::videogen::request_store::record_terminal_best_effort(
+            &self.db_url,
+            &request_key.principal,
+            request_key.counter,
+            crate::videogen::request_store::Terminal::Failed { reason },
+        )
+        .await;
+    }
+
     async fn moderate(
         &self,
         input: ModerationInput,
@@ -1245,35 +1342,42 @@ fn image_extension(mime_type: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::upload::test_support::signed_wire_with_sender;
     use crate::videogen::{
-        moderation::{ModerationDecision, ModerationError, ModerationInput, ModerationSubject},
-        rate_limiter::{RateLimiterCreateOptions, RateLimiterRequestKey},
+        moderation::{ModerationDecision, ModerationError, ModerationInput},
+        rate_limiter::RateLimiterRequestKey,
         upload_destination::UploadDestination,
         vast::{VastSubmitAccepted, VastSubmitError, VastSubmitRequest},
     };
     use chrono::{DateTime, Utc};
+    use ic_agent::{identity::Secp256k1Identity, Identity};
+    use k256::{elliptic_curve::rand_core::OsRng, SecretKey};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Call {
         Moderate,
-        RateLimiterCreate,
+        RecordPending,
         ReserveUpload,
         StageImage,
         WorkflowJson,
         VastSubmit,
-        RateLimiterFailed,
-        RateLimiterDecrement,
+        MarkRequestFailed,
         ReleaseUpload,
     }
+
+    /// Counter the fake store hands out, so `operation_id` is assertable.
+    const FAKE_COUNTER: u64 = 17;
 
     #[derive(Default)]
     struct FakeDeps {
         calls: Arc<Mutex<Vec<Call>>>,
         moderation: Option<ModerationDecision>,
         moderation_fails: bool,
-        rate_limit: Option<Result<RateLimiterRequestKey, RateLimiterError>>,
+        release_fails: bool,
+        /// `true` = request store unreachable, so no counter is assigned.
+        store_unavailable: bool,
         stage_image: Option<Result<Option<(String, Option<String>)>, ImageStageError>>,
         vast: Option<Result<VastSubmitAccepted, String>>,
     }
@@ -1294,6 +1398,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl GenerateDeps for FakeDeps {
+        async fn record_pending(
+            &self,
+            _request: &GenerateRequest,
+            _request_id: &str,
+        ) -> Option<u64> {
+            self.push(Call::RecordPending);
+            (!self.store_unavailable).then_some(FAKE_COUNTER)
+        }
+
+        async fn mark_request_failed(&self, _request_key: &RateLimiterRequestKey, _reason: &str) {
+            self.push(Call::MarkRequestFailed);
+        }
+
         async fn moderate(
             &self,
             input: ModerationInput,
@@ -1306,33 +1423,6 @@ mod tests {
                 ));
             }
             Ok(self.moderation.unwrap_or(ModerationDecision::Safe))
-        }
-
-        async fn create_rate_limit(
-            &self,
-            _request: &GenerateRequest,
-            _options: RateLimiterCreateOptions,
-        ) -> Result<RateLimiterRequestKey, RateLimiterError> {
-            self.push(Call::RateLimiterCreate);
-            self.rate_limit.clone().unwrap_or_else(|| Ok(request_key()))
-        }
-
-        async fn mark_rate_limit_failed(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-            _reason: &str,
-        ) -> Result<(), RateLimiterError> {
-            self.push(Call::RateLimiterFailed);
-            Ok(())
-        }
-
-        async fn decrement_rate_limit(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-            _property: &str,
-        ) -> Result<(), RateLimiterError> {
-            self.push(Call::RateLimiterDecrement);
-            Ok(())
         }
 
         async fn reserve_upload_destination(
@@ -1349,6 +1439,11 @@ mod tests {
             _destination: &UploadDestination,
         ) -> Result<(), UploadDestinationError> {
             self.push(Call::ReleaseUpload);
+            if self.release_fails {
+                return Err(UploadDestinationError::Unavailable(
+                    "release endpoint down".to_string(),
+                ));
+            }
             Ok(())
         }
 
@@ -1446,13 +1541,6 @@ mod tests {
         }
     }
 
-    fn request_key() -> RateLimiterRequestKey {
-        RateLimiterRequestKey {
-            principal: "aaaaa-aa".to_string(),
-            counter: 17,
-        }
-    }
-
     fn upload_destination() -> UploadDestination {
         UploadDestination {
             video_id: "video-17".to_string(),
@@ -1484,7 +1572,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_server_draft_returns_bad_request_before_moderation_and_rate_limiter() {
+    async fn non_server_draft_returns_bad_request_before_moderation() {
         let deps = FakeDeps::with_calls();
         let mut request = request();
         request.upload_handling = VideoUploadHandling::Client;
@@ -1499,7 +1587,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_model_returns_bad_request_before_moderation_and_rate_limiter() {
+    async fn unsupported_model_returns_bad_request_before_moderation() {
         let deps = FakeDeps::with_calls();
         let mut request = request();
         request.model_id = "wan2_5".to_string();
@@ -1516,7 +1604,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nsfw_returns_invalid_input_without_rate_limiter() {
+    async fn nsfw_returns_invalid_input_without_vast() {
         let deps = FakeDeps {
             moderation: Some(ModerationDecision::Unsafe),
             ..FakeDeps::with_calls()
@@ -1531,7 +1619,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn moderation_failure_returns_invalid_input_prompt_without_rate_limiter() {
+    async fn moderation_failure_returns_invalid_input_prompt_without_vast() {
         let deps = FakeDeps {
             moderation_fails: true,
             ..FakeDeps::with_calls()
@@ -1549,23 +1637,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rate_limiter_rejection_returns_too_many_requests_without_vast() {
-        let deps = FakeDeps {
-            rate_limit: Some(Err(RateLimiterError::Limited("limit reached".to_string()))),
-            ..FakeDeps::with_calls()
-        };
-
-        let result = generate_with_dependencies(request(), &deps, config()).await;
-
-        assert_eq!(
-            result.unwrap_err().status,
-            axum::http::StatusCode::TOO_MANY_REQUESTS
-        );
-        assert_eq!(deps.calls(), vec![Call::Moderate, Call::RateLimiterCreate]);
-    }
-
-    #[tokio::test]
-    async fn image_staging_timeout_marks_rate_limiter_failed_without_vast() {
+    async fn image_staging_timeout_returns_service_unavailable_without_vast() {
         let deps = FakeDeps {
             stage_image: Some(Err(ImageStageError::Timeout)),
             ..FakeDeps::with_calls()
@@ -1581,16 +1653,15 @@ mod tests {
             deps.calls(),
             vec![
                 Call::Moderate,
-                Call::RateLimiterCreate,
+                Call::RecordPending,
                 Call::StageImage,
-                Call::RateLimiterFailed,
-                Call::RateLimiterDecrement,
+                Call::MarkRequestFailed,
             ]
         );
     }
 
     #[tokio::test]
-    async fn workflow_failure_marks_rate_limiter_failed_without_vast() {
+    async fn workflow_failure_returns_service_unavailable_without_vast() {
         struct WorkflowFailingDeps(FakeDeps);
 
         #[async_trait::async_trait]
@@ -1602,28 +1673,16 @@ mod tests {
                 self.0.moderate(input).await
             }
 
-            async fn create_rate_limit(
+            async fn record_pending(
                 &self,
                 request: &GenerateRequest,
-                options: RateLimiterCreateOptions,
-            ) -> Result<RateLimiterRequestKey, RateLimiterError> {
-                self.0.create_rate_limit(request, options).await
+                request_id: &str,
+            ) -> Option<u64> {
+                self.0.record_pending(request, request_id).await
             }
 
-            async fn mark_rate_limit_failed(
-                &self,
-                request_key: &RateLimiterRequestKey,
-                reason: &str,
-            ) -> Result<(), RateLimiterError> {
-                self.0.mark_rate_limit_failed(request_key, reason).await
-            }
-
-            async fn decrement_rate_limit(
-                &self,
-                request_key: &RateLimiterRequestKey,
-                property: &str,
-            ) -> Result<(), RateLimiterError> {
-                self.0.decrement_rate_limit(request_key, property).await
+            async fn mark_request_failed(&self, request_key: &RateLimiterRequestKey, reason: &str) {
+                self.0.mark_request_failed(request_key, reason).await
             }
 
             async fn reserve_upload_destination(
@@ -1683,11 +1742,10 @@ mod tests {
             deps.0.calls(),
             vec![
                 Call::Moderate,
-                Call::RateLimiterCreate,
+                Call::RecordPending,
                 Call::StageImage,
                 Call::WorkflowJson,
-                Call::RateLimiterFailed,
-                Call::RateLimiterDecrement,
+                Call::MarkRequestFailed,
             ]
         );
     }
@@ -1700,14 +1758,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.operation_id, "aaaaa-aa_17");
+        // The counter comes from the request store, so operation_id is deterministic.
         assert_eq!(response.provider, "Ltx2");
-        assert_eq!(response.request_key, request_key());
+        assert_eq!(response.request_key.principal, "aaaaa-aa");
+        assert_eq!(response.request_key.counter, FAKE_COUNTER);
+        assert_eq!(response.operation_id, format!("aaaaa-aa_{FAKE_COUNTER}"));
         assert_eq!(
             deps.calls(),
             vec![
                 Call::Moderate,
-                Call::RateLimiterCreate,
+                Call::RecordPending,
                 Call::StageImage,
                 Call::WorkflowJson,
                 Call::ReserveUpload,
@@ -1724,12 +1784,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.operation_id, "aaaaa-aa_17");
+        assert!(response.operation_id.starts_with("aaaaa-aa_"));
         assert!(deps.calls().contains(&Call::VastSubmit));
     }
 
     #[tokio::test]
-    async fn rabbitmq_submit_failure_rolls_back_rate_limiter() {
+    async fn rabbitmq_submit_failure_releases_upload_destination() {
         let deps = FakeDeps {
             vast: Some(Err("RabbitMQ publish timed out".to_string())),
             ..FakeDeps::with_calls()
@@ -1744,15 +1804,165 @@ mod tests {
             deps.calls(),
             vec![
                 Call::Moderate,
-                Call::RateLimiterCreate,
+                Call::RecordPending,
                 Call::StageImage,
                 Call::WorkflowJson,
                 Call::ReserveUpload,
                 Call::VastSubmit,
-                Call::RateLimiterFailed,
-                Call::RateLimiterDecrement,
+                Call::MarkRequestFailed,
                 Call::ReleaseUpload,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn failed_rollback_release_does_not_mask_the_submit_error() {
+        // The destination is leaked (release itself failed); the caller must still see
+        // the original submit failure, not the rollback failure.
+        let deps = FakeDeps {
+            vast: Some(Err("RabbitMQ publish timed out".to_string())),
+            release_fails: true,
+            ..FakeDeps::with_calls()
+        };
+
+        let err = generate_with_dependencies(request(), &deps, config())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(matches!(err.error, VideoGenError::NetworkError(_)));
+        assert_eq!(*deps.calls().last().unwrap(), Call::ReleaseUpload);
+    }
+
+    #[tokio::test]
+    async fn generation_proceeds_when_request_store_is_unavailable() {
+        // The store is a tracking dependency, not a gate: a DB outage must not block
+        // generation. The request just gets a locally minted counter and never shows
+        // up in /drafts/in-progress.
+        let deps = FakeDeps {
+            store_unavailable: true,
+            ..FakeDeps::with_calls()
+        };
+
+        let response = generate_with_dependencies(request(), &deps, config())
+            .await
+            .unwrap();
+
+        assert_ne!(response.request_key.counter, 0);
+        assert_ne!(response.request_key.counter, FAKE_COUNTER);
+        assert!(deps.calls().contains(&Call::VastSubmit));
+    }
+
+    #[tokio::test]
+    async fn request_key_uses_the_canonical_principal_not_the_raw_user_id() {
+        // `Principal::from_text` parses case-insensitively, so an uppercase user_id
+        // authenticates fine. It must still be stored/echoed in canonical form, or the
+        // request store row and /drafts/in-progress lookup land in different key
+        // spaces for the same user.
+        let mut request = request();
+        request.user_id = "AAAAA-AA".to_string();
+        request.identity_principal = "aaaaa-aa".to_string();
+        let deps = FakeDeps::with_calls();
+
+        let response = generate_with_dependencies(request, &deps, config())
+            .await
+            .unwrap();
+
+        assert_eq!(response.request_key.principal, "aaaaa-aa");
+        assert_eq!(response.operation_id, format!("aaaaa-aa_{FAKE_COUNTER}"));
+    }
+
+    #[test]
+    fn fallback_counter_is_never_zero() {
+        // A zeroed counter would collide across every caller, so the clock fallback
+        // must floor at 1 even if the clock read fails.
+        assert!(fallback_counter() >= 1);
+    }
+
+    // ─── Authentication gate (chain-verified delegated identity) ─────────────
+
+    fn video_request_with(wire: DelegatedIdentityWire, user_id: &str) -> GenerateVideoRequest {
+        GenerateVideoRequest {
+            request: GenerateVideoRequestBody {
+                user_id: user_id.to_string(),
+                prompt: "make a sunrise over mountains".to_string(),
+                model_id: "ltx2".to_string(),
+                token_type: None,
+                negative_prompt: None,
+                image: None,
+                aspect_ratio: None,
+                duration_seconds: None,
+                resolution: None,
+                generate_audio: None,
+                seed: None,
+                extra_params: Default::default(),
+            },
+            delegated_identity: wire,
+            upload_handling: Some(VideoUploadHandling::ServerDraft),
+        }
+    }
+
+    #[test]
+    fn verified_identity_sets_identity_principal_to_chain_sender() {
+        let (wire, expected) = signed_wire_with_sender();
+
+        let request = video_request_with(wire, &expected.to_string())
+            .try_into_generate_request()
+            .expect("chain-verified wire is accepted");
+
+        assert_eq!(request.identity_principal, expected.to_string());
+        assert_eq!(request.user_id, expected.to_string());
+    }
+
+    #[test]
+    fn forged_from_key_is_rejected_as_unauthorized() {
+        // Attack: claim the victim's public key as the delegation root while keeping a
+        // chain signed by the attacker's own root. `new_unchecked` would accept this and
+        // report the victim's principal; chain verification must reject it.
+        let (mut wire, _) = signed_wire_with_sender();
+        let victim = Secp256k1Identity::from_private_key(SecretKey::random(&mut OsRng));
+        wire.from_key = victim.public_key().expect("pubkey");
+        let victim_principal = victim.sender().expect("sender").to_string();
+
+        let error = video_request_with(wire, &victim_principal)
+            .try_into_generate_request()
+            .expect_err("forged from_key must not authenticate");
+
+        assert!(matches!(error, GenerateError::IdentityMismatch));
+        assert_eq!(
+            GenerateHttpError::from(error).status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn unsigned_wire_is_rejected_as_unauthorized() {
+        // Empty delegation chain + junk from_key: no proof of key possession at all.
+        let error = video_request_with(dummy_identity_wire(), "aaaaa-aa")
+            .try_into_generate_request()
+            .expect_err("unsigned wire must not authenticate");
+
+        assert!(matches!(error, GenerateError::IdentityMismatch));
+    }
+
+    #[tokio::test]
+    async fn verified_identity_for_another_user_is_rejected_as_unauthorized() {
+        // Chain verifies, but the caller claims someone else's user_id.
+        let (wire, sender) = signed_wire_with_sender();
+        let request = video_request_with(wire, &sender.to_string())
+            .try_into_generate_request()
+            .expect("chain-verified wire is accepted");
+        let request = GenerateRequest {
+            user_id: "aaaaa-aa".to_string(),
+            ..request
+        };
+        let deps = FakeDeps::with_calls();
+
+        let err = generate_with_dependencies(request, &deps, config())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(deps.calls(), vec![]);
     }
 }

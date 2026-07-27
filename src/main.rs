@@ -254,6 +254,9 @@ async fn run_server() -> anyhow::Result<()> {
     media_index::init_schema(&db_client)
         .await
         .context("Failed to init media index schema")?;
+    videogen::request_store::init_schema(&db_client)
+        .await
+        .context("Failed to init videogen request store schema")?;
     drop(db_client); // jobs create their own connections
 
     let storj_client = storj_s3_client::StorjS3Client::new().await;
