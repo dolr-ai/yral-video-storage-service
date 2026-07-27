@@ -1,19 +1,14 @@
 //! Delegated-identity authorization for the public upload routes.
 //!
-//! SECURITY: the shared `yral_types::DelegatedIdentityWire`'s `TryFrom` builds the
-//! identity via `DelegatedIdentity::new_unchecked`, which does NOT verify the
-//! delegation chain. Using that for an auth check is a spoofing hole: a caller could
-//! set `from_key` to a victim's public key with a bogus chain and `.sender()` would
-//! return the victim's principal. We instead reconstruct via `DelegatedIdentity::new`
-//! (ic-agent), which verifies the chain signatures and the `delegated_principal ==
-//! to.sender()` link, matching the original upload-service behavior.
+//! The chain-verifying reconstruction lives in [`crate::routes::identity_auth`] (shared
+//! with the videogen routes); this module only maps its error into `AppError`. See that
+//! module for why `DelegatedIdentityWire::try_into` must never be used on an auth path.
 
 use candid::Principal;
-use ic_agent::{
-    identity::{DelegatedIdentity, Secp256k1Identity},
-    Identity,
-};
+use ic_agent::identity::DelegatedIdentity;
 use yral_types::delegated_identity::DelegatedIdentityWire;
+
+use crate::routes::identity_auth::verify_delegated_identity;
 
 use super::types::AppError;
 
@@ -24,19 +19,7 @@ use super::types::AppError;
 pub fn verified_identity(
     wire: &DelegatedIdentityWire,
 ) -> Result<(DelegatedIdentity, Principal), AppError> {
-    let to_secret = k256::SecretKey::from_jwk(&wire.to_secret)
-        .map_err(|e| AppError::InvalidDelegatedIdentity(e.to_string()))?;
-    let to_identity = Secp256k1Identity::from_private_key(to_secret);
-    let identity = DelegatedIdentity::new(
-        wire.from_key.clone(),
-        Box::new(to_identity),
-        wire.delegation_chain.clone(),
-    )
-    .map_err(|e| AppError::InvalidDelegatedIdentity(e.to_string()))?;
-    let sender = identity
-        .sender()
-        .map_err(AppError::InvalidDelegatedIdentity)?;
-    Ok((identity, sender))
+    verify_delegated_identity(wire).map_err(AppError::InvalidDelegatedIdentity)
 }
 
 /// Chain-verified sender principal only. Used by the update-video-metadata and
@@ -49,7 +32,7 @@ pub fn verified_sender(wire: &DelegatedIdentityWire) -> Result<Principal, AppErr
 mod tests {
     use super::*;
     use crate::routes::upload::test_support::signed_wire_with_sender;
-    use ic_agent::identity::Secp256k1Identity;
+    use ic_agent::{identity::Secp256k1Identity, Identity};
     use k256::{elliptic_curve::rand_core::OsRng, SecretKey};
 
     #[test]

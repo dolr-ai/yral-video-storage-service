@@ -1,13 +1,11 @@
 use axum::{extract::State, http::StatusCode, Json};
-use chrono::{DateTime, Utc};
-use ic_agent::identity::{DelegatedIdentity, Identity};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use utoipa::ToSchema;
-use yral_canisters_client::rate_limits::{RateLimits, VideoGenRequestStatus};
 use yral_types::delegated_identity::DelegatedIdentityWire;
 
-use crate::consts::RATE_LIMITS_CANISTER_ID;
+use crate::routes::identity_auth::verify_delegated_identity;
+use crate::videogen::request_store;
 use crate::AppState;
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -38,8 +36,24 @@ pub struct InProgressDraftsResponse {
     pub items: Vec<InProgressDraftItem>,
 }
 
-/// Returns "in_progress" drafts for the authenticated user.
-/// Queries the IC rate_limits canister for Pending/Processing video generation requests.
+/// Error bodies here stay plain strings, matching what this endpoint returned before
+/// the store was wired in. Its sibling videogen endpoints use a typed `{code, message}`
+/// envelope, but this one is polled by mobile and the migration contract is explicit
+/// that error bodies must not change shape (see
+/// `docs/superpowers/specs/2026-05-27-lean-videogen-migration-design.md`).
+fn err(status: StatusCode, message: impl Into<String>) -> (StatusCode, String) {
+    (status, message.into())
+}
+
+/// Returns "in_progress" video generations for the authenticated user.
+///
+/// Source of truth is the local `videogen_requests` store, written at `/generate`
+/// and closed by the `/complete` callback — it replaced the IC rate_limits canister,
+/// which used to be the only record of an in-flight generation.
+///
+/// Requests whose completion callback never arrived are swept to `failed` on read
+/// (`VIDEOGEN_REQUEST_STALE_SECS`, default 30 min) so an abandoned generation cannot
+/// spin in the UI forever.
 #[utoipa::path(
     post,
     path = "/api/v2/videogen/drafts/in-progress",
@@ -47,211 +61,104 @@ pub struct InProgressDraftsResponse {
     request_body = InProgressDraftsRequest,
     responses(
         (status = 200, description = "In-progress drafts", body = InProgressDraftsResponse),
-        (status = 401, description = "Invalid or mismatched identity"),
+        (status = 401, description = "Unverified, anonymous, or mismatched delegated identity"),
         (status = 400, description = "Invalid user_id principal"),
-        (status = 502, description = "Canister query failed"),
+        (status = 503, description = "Request store unavailable"),
     )
 )]
 pub async fn get_in_progress_drafts(
     State(state): State<AppState>,
     Json(request): Json<InProgressDraftsRequest>,
 ) -> Result<Json<InProgressDraftsResponse>, (StatusCode, String)> {
-    // Validate delegated identity and extract principal
-    let identity: DelegatedIdentity =
-        request
-            .delegated_identity
-            .try_into()
-            .map_err(|e: k256::elliptic_curve::Error| {
-                tracing::warn!("Invalid delegated identity: {e}");
-                (
-                    StatusCode::UNAUTHORIZED,
-                    "Invalid delegated identity".into(),
-                )
-            })?;
+    // Chain-verified: this endpoint returns another user's prompts if the identity can
+    // be spoofed, so `try_into` (new_unchecked) is not acceptable here.
+    let (_identity, identity_principal) = verify_delegated_identity(&request.delegated_identity)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "rejected unverified delegated identity");
+            err(StatusCode::UNAUTHORIZED, "Invalid delegated identity")
+        })?;
 
-    let identity_principal = identity.sender().map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            "Failed to derive principal".into(),
-        )
-    })?;
-
-    // Verify user_id matches the identity
     let claimed_principal = candid::Principal::from_str(&request.user_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid user_id: {e}")))?;
+        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("Invalid user_id: {e}")))?;
 
     crate::sentry_utils::set_sentry_user(&request.user_id, None);
 
     if identity_principal != claimed_principal {
-        return Err((
+        return Err(err(
             StatusCode::UNAUTHORIZED,
-            "user_id does not match delegated identity".into(),
+            "user_id does not match delegated identity",
+        ));
+    }
+    if identity_principal == candid::Principal::anonymous() {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "anonymous identity cannot list drafts",
         ));
     }
 
-    let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &state.ic_agent);
+    // Key on the canonical principal text, never the raw `user_id`: `from_text` parses
+    // case-insensitively, so "AAAAA-AA" and "aaaaa-aa" are the same principal but
+    // would be two different store keys. `/generate` records rows under the same
+    // canonical form.
+    let principal = claimed_principal.to_string();
 
-    let requests = rate_limits
-        .get_user_video_generation_requests(claimed_principal, None, None)
+    let client = crate::db::connect(&state.db_url).await.map_err(|e| {
+        tracing::error!(error = %e, "in-progress drafts: db connect failed");
+        err(StatusCode::SERVICE_UNAVAILABLE, "Request store unavailable")
+    })?;
+
+    // Sweep + purge this caller's rows before reading: abandoned requests must not be
+    // reported as in progress, and terminal rows must not be kept past retention.
+    // Both are best-effort — a failure only risks a stale row or a late delete.
+    if let Err(e) = request_store::expire_stale_for_principal(
+        &client,
+        &principal,
+        request_store::stale_after_secs(),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "in-progress drafts: stale sweep failed (best-effort)");
+    }
+    if let Err(e) =
+        request_store::purge_for_principal(&client, &principal, request_store::retention_days())
+            .await
+    {
+        tracing::warn!(error = %e, "in-progress drafts: retention purge failed (best-effort)");
+    }
+
+    let rows = request_store::list_pending(&client, &principal)
         .await
         .map_err(|e| {
-            tracing::error!("Canister query failed: {e}");
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to fetch generation requests: {e}"),
-            )
+            tracing::error!(error = %e, "in-progress drafts: query failed");
+            err(StatusCode::SERVICE_UNAVAILABLE, "Request store unavailable")
         })?;
 
-    let items = requests
+    Ok(Json(to_response(&principal, rows)))
+}
+
+/// Shape store rows into the API response. Split out from the handler so it is
+/// testable without an `AppState`/live DB.
+fn to_response(
+    principal: &str,
+    rows: Vec<request_store::InProgressRow>,
+) -> InProgressDraftsResponse {
+    let items = rows
         .into_iter()
-        .filter(|(_, req)| {
-            matches!(
-                req.status,
-                VideoGenRequestStatus::Pending | VideoGenRequestStatus::Processing
-            )
-        })
-        .map(|(key, req)| InProgressDraftItem {
-            operation_id: format!("{}_{}", key.principal, key.counter),
+        .map(|row| InProgressDraftItem {
+            operation_id: format!("{principal}_{}", row.counter),
             status: "in_progress".to_string(),
-            created_at: ns_to_iso(req.created_at),
-            provider: provider_from_model_id(&req.model_name),
-            model_id: req.model_name,
-            prompt: req.prompt,
+            created_at: row.created_at,
+            provider: provider_from_model_id(&row.model_id),
+            model_id: row.model_id,
+            prompt: row.prompt,
             thumbnail_url: None,
         })
         .collect();
-
-    Ok(Json(InProgressDraftsResponse { items }))
+    InProgressDraftsResponse { items }
 }
 
-// #[derive(Debug, Serialize, ToSchema)]
-// pub struct AllStatusItem {
-//     pub operation_id: String,
-//     /// "in_progress" | "complete: <url>" | "failed: <reason>"
-//     pub status: String,
-//     pub created_at: String,
-//     pub provider: Option<String>,
-//     pub model_id: String,
-//     pub prompt: String,
-//     pub thumbnail_url: Option<String>,
-// }
-
-// #[derive(Debug, Serialize, ToSchema)]
-// pub struct AllStatusResponse {
-//     pub items: Vec<AllStatusItem>,
-// }
-
-// Returns in-progress video generations for a principal (no auth required).
-// #[utoipa::path(
-//     get,
-//     path = "/api/v2/videogen/in-progress/{principal}",
-//     tag = "videogen",
-//     params(("principal" = String, Path, description = "User principal ID")),
-//     responses(
-//         (status = 200, description = "In-progress items", body = InProgressDraftsResponse),
-//         (status = 400, description = "Invalid principal"),
-//         (status = 502, description = "Canister query failed"),
-//     )
-// )]
-// pub async fn get_in_progress_by_principal(
-//     State(state): State<AppState>,
-//     Path(principal): Path<String>,
-// ) -> Result<Json<InProgressDraftsResponse>, (StatusCode, String)> {
-//     let user_principal = candid::Principal::from_str(&principal)
-//         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid principal: {e}")))?;
-
-//     let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &state.ic_agent);
-
-//     let requests = rate_limits
-//         .get_user_video_generation_requests(user_principal, None, None)
-//         .await
-//         .map_err(|e| {
-//             tracing::error!("Canister query failed: {e}");
-//             (
-//                 StatusCode::BAD_GATEWAY,
-//                 format!("Failed to fetch generation requests: {e}"),
-//             )
-//         })?;
-
-//     let items = requests
-//         .into_iter()
-//         .filter(|(_, req)| {
-//             matches!(
-//                 req.status,
-//                 VideoGenRequestStatus::Pending | VideoGenRequestStatus::Processing
-//             )
-//         })
-//         .map(|(key, req)| InProgressDraftItem {
-//             operation_id: format!("{}_{}", key.principal, key.counter),
-//             status: "in_progress".to_string(),
-//             created_at: ns_to_iso(req.created_at),
-//             provider: provider_from_model_id(&req.model_name),
-//             model_id: req.model_name,
-//             prompt: req.prompt,
-//             thumbnail_url: None,
-//         })
-//         .collect();
-
-//     Ok(Json(InProgressDraftsResponse { items }))
-// }
-
-// Returns all video generation statuses for a principal (no auth required).
-// #[utoipa::path(
-//     get,
-//     path = "/api/v2/videogen/status/{principal}/all",
-//     tag = "videogen",
-//     params(("principal" = String, Path, description = "User principal ID")),
-//     responses(
-//         (status = 200, description = "All statuses", body = AllStatusResponse),
-//         (status = 400, description = "Invalid principal"),
-//         (status = 502, description = "Canister query failed"),
-//     )
-// )]
-// pub async fn get_all_status_by_principal(
-//     State(state): State<AppState>,
-//     Path(principal): Path<String>,
-// ) -> Result<Json<AllStatusResponse>, (StatusCode, String)> {
-//     let user_principal = candid::Principal::from_str(&principal)
-//         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid principal: {e}")))?;
-
-//     let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &state.ic_agent);
-
-//     let requests = rate_limits
-//         .get_user_video_generation_requests(user_principal, None, None)
-//         .await
-//         .map_err(|e| {
-//             tracing::error!("Canister query failed: {e}");
-//             (
-//                 StatusCode::BAD_GATEWAY,
-//                 format!("Failed to fetch generation requests: {e}"),
-//             )
-//         })?;
-
-//     let items = requests
-//         .into_iter()
-//         .map(|(key, req)| {
-//             let status = match req.status {
-//                 VideoGenRequestStatus::Pending => "in_progress".to_string(),
-//                 VideoGenRequestStatus::Processing => "in_progress".to_string(),
-//                 VideoGenRequestStatus::Complete(url) => format!("complete: {url}"),
-//                 VideoGenRequestStatus::Failed(reason) => format!("failed: {reason}"),
-//             };
-//             AllStatusItem {
-//                 operation_id: format!("{}_{}", key.principal, key.counter),
-//                 status,
-//                 created_at: ns_to_iso(req.created_at),
-//                 provider: provider_from_model_id(&req.model_name),
-//                 model_id: req.model_name,
-//                 prompt: req.prompt,
-//                 thumbnail_url: None,
-//             }
-//         })
-//         .collect();
-
-//     Ok(Json(AllStatusResponse { items }))
-// }
-
-/// Maps the model_id stored in the canister to its compute provider string.
+/// Maps a stored `model_id` to its compute provider string. Unknown ids yield `None`
+/// rather than a guess — the client treats provider as optional display metadata.
 fn provider_from_model_id(model_id: &str) -> Option<String> {
     let provider = match model_id {
         "lumalabs" => "LumaLabs",
@@ -266,10 +173,52 @@ fn provider_from_model_id(model_id: &str) -> Option<String> {
     Some(provider.to_string())
 }
 
-/// Converts an IC nanosecond timestamp to an ISO 8601 string.
-fn ns_to_iso(ns: u64) -> String {
-    let secs = (ns / 1_000_000_000) as i64;
-    DateTime::<Utc>::from_timestamp(secs, 0)
-        .unwrap_or_default()
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_is_mapped_for_known_models_and_none_otherwise() {
+        assert_eq!(provider_from_model_id("ltx2").as_deref(), Some("Ltx2"));
+        assert_eq!(
+            provider_from_model_id("speech_to_video").as_deref(),
+            Some("SpeechToVideo")
+        );
+        assert_eq!(provider_from_model_id("unknown-model"), None);
+    }
+
+    #[test]
+    fn rows_map_to_items_with_generate_compatible_operation_id() {
+        let response = to_response(
+            "aaaaa-aa",
+            vec![request_store::InProgressRow {
+                counter: 17,
+                model_id: "ltx2".to_string(),
+                prompt: "a sunrise".to_string(),
+                created_at: "2026-07-27T10:00:00Z".to_string(),
+            }],
+        );
+
+        let item = &response.items[0];
+        // Must match what /generate returned for the same request.
+        assert_eq!(item.operation_id, "aaaaa-aa_17");
+        assert_eq!(item.status, "in_progress");
+        assert_eq!(item.created_at, "2026-07-27T10:00:00Z");
+        assert_eq!(item.provider.as_deref(), Some("Ltx2"));
+        assert_eq!(item.prompt, "a sunrise");
+        assert!(item.thumbnail_url.is_none());
+    }
+
+    #[test]
+    fn empty_store_yields_empty_items() {
+        assert!(to_response("aaaaa-aa", vec![]).items.is_empty());
+    }
+
+    #[test]
+    fn error_bodies_stay_plain_strings_for_the_mobile_contract() {
+        // Mobile polls this endpoint; the body shape must not become JSON.
+        let (status, body) = err(StatusCode::UNAUTHORIZED, "Invalid delegated identity");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, "Invalid delegated identity");
+    }
 }

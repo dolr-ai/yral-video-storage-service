@@ -1,4 +1,3 @@
-use candid::Principal;
 use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicI64, AtomicUsize};
 
@@ -144,13 +143,6 @@ pub static MAX_PHASH_RETRIES: Lazy<i32> = Lazy::new(|| {
 });
 pub static TEMP_KEY_PREFIX: Lazy<String> =
     Lazy::new(|| std::env::var("TEMP_KEY_PREFIX").unwrap_or_else(|_| "_pending/".to_string()));
-
-// IC canister IDs
-pub static RATE_LIMITS_CANISTER_ID: Lazy<Principal> = Lazy::new(|| {
-    "h2jgv-ayaaa-aaaas-qbh4a-cai"
-        .parse()
-        .expect("Rate limits canister ID to be valid")
-});
 
 // IC network URL
 pub static IC_URL: Lazy<String> =

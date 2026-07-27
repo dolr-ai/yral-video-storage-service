@@ -8,17 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    consts::{self, RATE_LIMITS_CANISTER_ID},
+    consts,
     videogen::{
         config::VideogenConfig,
         draft::{DraftCreationRequest, DraftServiceError},
         hmac::{body_sha256_hex, verify_completion_signature, HmacError, HmacKeyRegistry},
-        rate_limiter::{to_canister_request_key, RateLimiterRequestKey},
+        rate_limiter::RateLimiterRequestKey,
     },
     AppState,
-};
-use yral_canisters_client::rate_limits::{
-    RateLimits, Result1 as CanisterResult, VideoGenRequestStatus,
 };
 
 // ─── Request / response types ────────────────────────────────────────────────
@@ -105,22 +102,6 @@ pub trait CompletionDeps: Send + Sync {
     /// Allowed timestamp skew in seconds.
     fn hmac_skew_secs(&self) -> i64;
 
-    /// Notify the rate limiter that generation completed successfully (best-effort).
-    async fn mark_rate_limit_complete(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        bucket_url: &str,
-    ) -> Result<(), String>;
-
-    async fn mark_rate_limit_failed(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        reason: &str,
-    ) -> Result<(), String>;
-
-    async fn decrement_rate_limit(&self, request_key: &RateLimiterRequestKey)
-        -> Result<(), String>;
-
     async fn release_upload_destination(
         &self,
         request_key: &RateLimiterRequestKey,
@@ -133,6 +114,24 @@ pub trait CompletionDeps: Send + Sync {
     /// Register a completed video into the master table for steady-state pHash.
     /// Best-effort; default no-op so test fakes need no change.
     async fn register_ingested(&self, _video_id: &str, _bucket_url: &str) {}
+
+    /// Close the videogen request store row for this request (the source of
+    /// `/drafts/in-progress`). Implementations are best-effort internally, but the
+    /// method has no default: it is load-bearing for a user-visible list, so a new
+    /// impl must decide explicitly rather than silently stop closing requests.
+    async fn close_request(&self, request_key: &RateLimiterRequestKey, outcome: RequestOutcome<'_>);
+}
+
+/// Terminal outcome reported by the completion callback.
+#[derive(Debug, Clone, Copy)]
+pub enum RequestOutcome<'a> {
+    Complete {
+        video_id: &'a str,
+        bucket_url: &'a str,
+    },
+    Failed {
+        reason: &'a str,
+    },
 }
 
 // ─── Core logic (testable) ───────────────────────────────────────────────────
@@ -239,13 +238,19 @@ async fn handle_success_completion<D: CompletionDeps>(
         )
     })?;
 
-    // Notify rate limiter of success (best-effort)
-    if let Err(e) = deps.mark_rate_limit_complete(request_key, bucket_url).await {
-        tracing::warn!("mark_rate_limit_complete failed (best-effort): {e}");
-    }
-
     // Register into master table for steady-state pHash (best-effort; swallows its own errors)
     deps.register_ingested(video_id, bucket_url).await;
+
+    // Close the in-progress row only after the draft exists, so the request never
+    // disappears from /drafts/in-progress before it is visible as a draft.
+    deps.close_request(
+        request_key,
+        RequestOutcome::Complete {
+            video_id,
+            bucket_url,
+        },
+    )
+    .await;
 
     tracing::info!(
         principal = %request_key.principal,
@@ -267,18 +272,15 @@ async fn handle_failure_completion<D: CompletionDeps>(
         .as_deref()
         .unwrap_or("unknown failure reason");
 
-    // Best-effort side effects
-    if let Err(e) = deps.mark_rate_limit_failed(request_key, reason).await {
-        tracing::warn!("mark_rate_limit_failed failed: {e}");
-    }
-    if let Err(e) = deps.decrement_rate_limit(request_key).await {
-        tracing::warn!("decrement_rate_limit failed: {e}");
-    }
+    // Best-effort: release upload destination
     let vid = req.video_id.as_deref();
     let key = req.object_key.as_deref();
     if let Err(e) = deps.release_upload_destination(request_key, vid, key).await {
         tracing::warn!("release_upload_destination failed: {e}");
     }
+
+    deps.close_request(request_key, RequestOutcome::Failed { reason })
+        .await;
 
     tracing::info!(
         principal = %request_key.principal,
@@ -433,9 +435,8 @@ pub async fn complete_video(
 
 struct RuntimeCompletionDeps {
     config: VideogenConfig,
-    // Hold the whole AppState: the rate-limiter calls need `ic_agent`, the in-process
-    // draft client (Phase 2) needs the shared agent + upload deps, and register_ingested
-    // (steady-state pHash) needs `db_url`.
+    // Hold the whole AppState: the in-process draft client needs the shared
+    // agent + upload deps, and register_ingested (steady-state pHash) needs `db_url`.
     state: AppState,
 }
 
@@ -463,59 +464,6 @@ impl CompletionDeps for RuntimeCompletionDeps {
 
     fn hmac_skew_secs(&self) -> i64 {
         self.config.completion_hmac_skew_secs as i64
-    }
-
-    async fn mark_rate_limit_complete(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        bucket_url: &str,
-    ) -> Result<(), String> {
-        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.state.ic_agent);
-        let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
-        match rate_limits
-            .update_video_generation_status(
-                key,
-                VideoGenRequestStatus::Complete(bucket_url.to_string()),
-            )
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            CanisterResult::Ok => Ok(()),
-            CanisterResult::Err(e) => Err(e),
-        }
-    }
-
-    async fn mark_rate_limit_failed(
-        &self,
-        request_key: &RateLimiterRequestKey,
-        reason: &str,
-    ) -> Result<(), String> {
-        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.state.ic_agent);
-        let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
-        match rate_limits
-            .update_video_generation_status(key, VideoGenRequestStatus::Failed(reason.to_string()))
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            CanisterResult::Ok => Ok(()),
-            CanisterResult::Err(e) => Err(e),
-        }
-    }
-
-    async fn decrement_rate_limit(
-        &self,
-        request_key: &RateLimiterRequestKey,
-    ) -> Result<(), String> {
-        let rate_limits = RateLimits(*RATE_LIMITS_CANISTER_ID, &self.state.ic_agent);
-        let key = to_canister_request_key(request_key).map_err(|e| e.to_string())?;
-        match rate_limits
-            .decrement_video_generation_counter_v_1(key, "VIDEOGEN".to_string())
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            CanisterResult::Ok => Ok(()),
-            CanisterResult::Err(e) => Err(e),
-        }
     }
 
     async fn release_upload_destination(
@@ -560,6 +508,31 @@ impl CompletionDeps for RuntimeCompletionDeps {
 
     async fn register_ingested(&self, video_id: &str, bucket_url: &str) {
         crate::jobs::ingest::on_video_ingested(&self.state.db_url, video_id, bucket_url).await;
+    }
+
+    async fn close_request(
+        &self,
+        request_key: &RateLimiterRequestKey,
+        outcome: RequestOutcome<'_>,
+    ) {
+        use crate::videogen::request_store::Terminal;
+        let terminal = match outcome {
+            RequestOutcome::Complete {
+                video_id,
+                bucket_url,
+            } => Terminal::Complete {
+                video_id,
+                bucket_url,
+            },
+            RequestOutcome::Failed { reason } => Terminal::Failed { reason },
+        };
+        crate::videogen::request_store::record_terminal_best_effort(
+            &self.state.db_url,
+            &request_key.principal,
+            request_key.counter,
+            terminal,
+        )
+        .await;
     }
 }
 
@@ -641,11 +614,10 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Call {
-        MarkRateLimitComplete,
-        MarkRateLimitFailed,
-        DecrementRateLimit,
         ReleaseUploadDestination,
         CreateDraft,
+        CloseRequestComplete,
+        CloseRequestFailed,
     }
 
     #[derive(Clone)]
@@ -682,6 +654,17 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CompletionDeps for FakeCompletionDeps {
+        async fn close_request(
+            &self,
+            _request_key: &RateLimiterRequestKey,
+            outcome: RequestOutcome<'_>,
+        ) {
+            self.push(match outcome {
+                RequestOutcome::Complete { .. } => Call::CloseRequestComplete,
+                RequestOutcome::Failed { .. } => Call::CloseRequestFailed,
+            });
+        }
+
         fn hmac_registry(&self) -> Result<HmacKeyRegistry, String> {
             match &self.hmac_keys {
                 Some(keys) => HmacKeyRegistry::parse(keys).map_err(|e| e.to_string()),
@@ -691,32 +674,6 @@ mod tests {
 
         fn hmac_skew_secs(&self) -> i64 {
             120
-        }
-
-        async fn mark_rate_limit_complete(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-            _bucket_url: &str,
-        ) -> Result<(), String> {
-            self.push(Call::MarkRateLimitComplete);
-            Ok(())
-        }
-
-        async fn mark_rate_limit_failed(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-            _reason: &str,
-        ) -> Result<(), String> {
-            self.push(Call::MarkRateLimitFailed);
-            Ok(())
-        }
-
-        async fn decrement_rate_limit(
-            &self,
-            _request_key: &RateLimiterRequestKey,
-        ) -> Result<(), String> {
-            self.push(Call::DecrementRateLimit);
-            Ok(())
         }
 
         async fn release_upload_destination(
@@ -856,7 +813,7 @@ mod tests {
     // ── Success completion tests ──
 
     #[tokio::test]
-    async fn success_callback_creates_draft_and_marks_rate_limit_complete() {
+    async fn success_callback_creates_draft() {
         let deps = FakeCompletionDeps::new();
         let body = success_body();
         let ts = now_ts();
@@ -865,16 +822,18 @@ mod tests {
         let result = complete_with_dependencies(&deps, &headers, &body, COMPLETE_PATH).await;
 
         assert_eq!(result.unwrap(), StatusCode::OK);
+        // Draft first, then the in-progress row closes — never the other way round, or
+        // the request would vanish from /drafts/in-progress before the draft exists.
         assert_eq!(
             deps.calls(),
-            vec![Call::CreateDraft, Call::MarkRateLimitComplete,]
+            vec![Call::CreateDraft, Call::CloseRequestComplete]
         );
     }
 
     // ── Failure completion tests ──
 
     #[tokio::test]
-    async fn failure_callback_marks_rate_limiter_and_releases_upload() {
+    async fn failure_callback_skips_release_without_video_id_or_object_key() {
         let deps = FakeCompletionDeps::new();
         let body = failure_body();
         let ts = now_ts();
@@ -883,10 +842,8 @@ mod tests {
         let result = complete_with_dependencies(&deps, &headers, &body, COMPLETE_PATH).await;
 
         assert_eq!(result.unwrap(), StatusCode::OK);
-        let calls = deps.calls();
-        assert!(calls.contains(&Call::MarkRateLimitFailed));
-        assert!(calls.contains(&Call::DecrementRateLimit));
-        // failure_body has no video_id/object_key so release is skipped
-        assert!(!calls.contains(&Call::ReleaseUploadDestination));
+        // failure_body has no video_id/object_key so release is skipped, but the
+        // in-progress row must still be closed or the UI spins until the sweep.
+        assert_eq!(deps.calls(), vec![Call::CloseRequestFailed]);
     }
 }
