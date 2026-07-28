@@ -877,7 +877,7 @@ impl RuntimeGenerateDeps {
 
         let url = format!(
             "{}{}",
-            crate::consts::MODERATION_SERVICE_URL.trim_end_matches('/'),
+            self.config.moderation_service_url.trim_end_matches('/'),
             path
         );
         tracing::debug!(path, subject_url, "calling moderation service");

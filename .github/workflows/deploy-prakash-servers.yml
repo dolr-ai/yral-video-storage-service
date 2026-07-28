@@ -233,6 +233,7 @@ jobs:
                 export VIDEOGEN_VAST_SUBMIT_TRANSPORT='rabbitmq'; \
                 export VIDEOGEN_UPLOAD_SERVICE_URL='https://upload.yral.com'; \
                 export MODERATION_MODE='remote'; \
+                export MODERATION_SERVICE_URL='https://moderation.prakash.yral.com'; \
                 export VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD='${VIDEOGEN_RABBITMQ_PUBLISHER_PASSWORD}'; \
                 export VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64='${VIDEOGEN_RABBITMQ_TLS_CA_CERT_PEM_B64}'; \
                 export VIDEOGEN_SERVICE_AUTH_TOKEN='${VIDEOGEN_SERVICE_AUTH_TOKEN}'; \
