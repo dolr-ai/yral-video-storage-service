@@ -46,6 +46,7 @@ impl VastSubmitTransport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideogenConfig {
+    pub moderation_service_url: String,
     pub moderation_timeout_ms: u64,
     pub generate_dedupe_window_secs: u64,
     pub vast_submit_timeout_secs: u64,
@@ -84,6 +85,11 @@ pub enum VideogenConfigError {
 impl VideogenConfig {
     pub fn from_env() -> Result<Self, VideogenConfigError> {
         let cfg = Self {
+            moderation_service_url: std::env::var(consts::MODERATION_SERVICE_URL)
+                .ok()
+                .map(|v| v.trim().trim_end_matches('/').to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| consts::DEFAULT_MODERATION_SERVICE_URL.to_string()),
             moderation_timeout_ms: read_u64(consts::MODERATION_TIMEOUT_MS, 60000)?,
             generate_dedupe_window_secs: read_u64(
                 consts::VIDEOGEN_GENERATE_DEDUPE_WINDOW_SECS,
@@ -159,6 +165,7 @@ impl VideogenConfig {
     #[cfg(test)]
     pub fn test_defaults() -> Self {
         Self {
+            moderation_service_url: consts::DEFAULT_MODERATION_SERVICE_URL.to_string(),
             moderation_timeout_ms: 3000,
             generate_dedupe_window_secs: 120,
             vast_submit_timeout_secs: 10,

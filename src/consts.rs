@@ -4,7 +4,12 @@ use std::sync::atomic::{AtomicI64, AtomicUsize};
 pub const ENVIRONMENT: &str = "ENVIRONMENT";
 pub const MODERATION_MODE: &str = "MODERATION_MODE";
 pub const MODERATION_TIMEOUT_MS: &str = "MODERATION_TIMEOUT_MS";
-pub const MODERATION_SERVICE_URL: &str = "https://nsfw.ansuman.yral.com";
+/// Env var name for overriding the moderation service base URL.
+pub const MODERATION_SERVICE_URL: &str = "MODERATION_SERVICE_URL";
+/// Fallback base URL when `MODERATION_SERVICE_URL` is unset.
+/// Branch default points at the new moderation deployment for testing;
+/// legacy service is `https://nsfw.ansuman.yral.com`.
+pub const DEFAULT_MODERATION_SERVICE_URL: &str = "https://moderation.prakash.yral.com";
 pub const VIDEOGEN_GENERATE_DEDUPE_WINDOW_SECS: &str = "VIDEOGEN_GENERATE_DEDUPE_WINDOW_SECS";
 pub const VIDEOGEN_VAST_SUBMIT_TIMEOUT_SECS: &str = "VIDEOGEN_VAST_SUBMIT_TIMEOUT_SECS";
 pub const VIDEOGEN_UPLOAD_DESTINATION_TIMEOUT_SECS: &str =
