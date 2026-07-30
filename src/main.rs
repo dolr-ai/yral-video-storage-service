@@ -245,9 +245,18 @@ async fn run_server() -> anyhow::Result<()> {
     let s3_client = s3_client::S3Client::new().await;
 
     // Init DB schema at startup
-    let db_client = db::connect(consts::DATABASE_URL.as_str())
+    let mut db_client = db::connect(consts::DATABASE_URL.as_str())
         .await
         .context("Failed to connect to postgres")?;
+    // Versioned migrations own the schema. On a database that predates refinery
+    // this stamps the baseline as applied rather than re-running it.
+    storj_interface::migrations::run_migrations(&mut db_client)
+        .await
+        .context("Failed to run migrations")?;
+    // The three legacy init_schema calls are transitional: they are idempotent
+    // and now redundant with V1__baseline.sql, but the docker-based tests still
+    // call them directly. Retired in the plan's Task 23 Step 4 — see
+    // docs/superpowers/plans/2026-07-29-canister-data-migration-phase1.md.
     db::init_schema(&db_client)
         .await
         .context("Failed to init DB schema")?;

@@ -3,6 +3,7 @@ pub mod consts;
 pub mod db;
 pub mod jobs;
 pub mod media_index;
+pub mod migrations;
 pub mod storj_s3_client;
 pub mod videogen;
 
