@@ -58,6 +58,14 @@ pub(crate) struct AppState {
     pub media_job_cancel: Arc<Mutex<CancellationToken>>,
     pub job_media_phash_running: Arc<AtomicBool>,
     pub job_chain_snapshot_running: Arc<AtomicBool>,
+    /// Pooled connections for the posts API and the outbox worker. The existing
+    /// jobs keep their own per-run `db::connect()` connections — converting them
+    /// is out of scope. See `db::build_pool` for the pgbouncer constraint.
+    // allow(dead_code): first consumed by the posts read API (plan Task 21) and
+    // the outbox worker (Task 12). Built now so Milestone A leaves a complete
+    // foundation rather than a half-wired one.
+    #[allow(dead_code)]
+    pub pool: deadpool_postgres::Pool,
     pub ic_agent: Agent,
     /// Optional best-effort upload side-effect clients (offchain events + push
     /// notifications). Each is independently `None` when its token is unset; the
@@ -268,6 +276,11 @@ async fn run_server() -> anyhow::Result<()> {
         .context("Failed to init videogen request store schema")?;
     drop(db_client); // jobs create their own connections
 
+    // Pool for the posts API + outbox worker. Built after migrations so nothing
+    // can serve a request against a half-migrated schema.
+    let pool = db::build_pool(consts::DATABASE_URL.as_str(), db::pool_max_size())
+        .context("Failed to build postgres connection pool")?;
+
     let storj_client = storj_s3_client::StorjS3Client::new().await;
     let ic_agent = {
         let mut builder = Agent::builder().with_url(consts::IC_URL.as_str());
@@ -313,6 +326,7 @@ async fn run_server() -> anyhow::Result<()> {
         media_job_cancel: Arc::new(Mutex::new(CancellationToken::new())),
         job_media_phash_running: Arc::new(AtomicBool::new(false)),
         job_chain_snapshot_running: Arc::new(AtomicBool::new(false)),
+        pool,
         ic_agent,
         upload,
     };

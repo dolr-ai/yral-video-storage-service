@@ -140,6 +140,36 @@ pub async fn init_schema(client: &Client) -> Result<(), tokio_postgres::Error> {
     client.batch_execute(SCHEMA_SQL).await
 }
 
+/// Default pool size; override with `POSTS_POOL_MAX_SIZE`.
+const DEFAULT_POOL_MAX_SIZE: usize = 16;
+
+pub fn pool_max_size() -> usize {
+    std::env::var("POSTS_POOL_MAX_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_POOL_MAX_SIZE)
+}
+
+/// Build a connection pool for the posts API and the outbox worker.
+///
+/// The ~20 existing `connect()` call sites open a fresh connection per job or
+/// request. Batch jobs absorb that; a read API on the mobile hot path cannot.
+///
+/// `NoTls` matches the rest of this repo — Postgres TLS is a separate track.
+///
+/// **pgbouncer runs in transaction pooling mode in the HA deploy**, so nothing
+/// here may depend on session state surviving across acquires: no `SET` that
+/// must persist, no `LISTEN`, no reliance on a cached prepared statement.
+/// Every acquire must be self-contained.
+pub fn build_pool(url: &str, max_size: usize) -> anyhow::Result<deadpool_postgres::Pool> {
+    let mut cfg = deadpool_postgres::Config::new();
+    cfg.url = Some(url.to_string());
+    cfg.pool = Some(deadpool_postgres::PoolConfig::new(max_size));
+    let pool = cfg.create_pool(Some(deadpool_postgres::Runtime::Tokio1), NoTls)?;
+    Ok(pool)
+}
+
 // --- Job 0: Scan Storj ---
 
 pub async fn upsert_storj_key(
@@ -737,6 +767,70 @@ mod tests {
                 .status()
                 .ok();
         }
+    }
+
+    async fn backend_pid(pool: &deadpool_postgres::Pool) -> i32 {
+        let c = pool.get().await.unwrap();
+        c.query_one("SELECT pg_backend_pid()", &[])
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    #[tokio::test]
+    async fn pool_reuses_the_same_backend_connection() {
+        let (pg, url) = PgContainer::spawn().await;
+        let pool = build_pool(&url, 4).unwrap();
+        // Sequential acquires must land on the same server connection; if the
+        // pool were reconnecting per acquire the pid would change.
+        assert_eq!(backend_pid(&pool).await, backend_pid(&pool).await);
+        drop(pg);
+    }
+
+    #[tokio::test]
+    async fn pool_is_bounded_by_max_size() {
+        let (pg, url) = PgContainer::spawn().await;
+        let pool = build_pool(&url, 1).unwrap();
+        let _held = pool.get().await.unwrap();
+        // The single slot is occupied, so a second acquire must not succeed by
+        // quietly opening an extra connection.
+        let second = tokio::time::timeout(std::time::Duration::from_millis(300), pool.get()).await;
+        assert!(second.is_err(), "max_size must actually cap the pool");
+        drop(pg);
+    }
+
+    /// The repo layer commits a post, its event row and its outbox row in one
+    /// transaction, so a pooled client must support `transaction()`.
+    #[tokio::test]
+    async fn pooled_client_supports_transactions() {
+        let (pg, url) = PgContainer::spawn().await;
+        let pool = build_pool(&url, 2).unwrap();
+        let mut c = pool.get().await.unwrap();
+
+        let tx = c.transaction().await.unwrap();
+        tx.batch_execute("CREATE TABLE t (x INT)").await.unwrap();
+        tx.execute("INSERT INTO t VALUES (1)", &[]).await.unwrap();
+        tx.rollback().await.unwrap();
+
+        let exists: bool = c
+            .query_one("SELECT to_regclass('public.t') IS NOT NULL AS ok", &[])
+            .await
+            .unwrap()
+            .get("ok");
+        assert!(!exists, "rollback must undo the transaction");
+        drop(pg);
+    }
+
+    #[test]
+    fn pool_max_size_reads_env_and_rejects_zero() {
+        // Serialized implicitly: this is the only test touching this var.
+        std::env::set_var("POSTS_POOL_MAX_SIZE", "7");
+        assert_eq!(pool_max_size(), 7);
+        std::env::set_var("POSTS_POOL_MAX_SIZE", "0");
+        assert_eq!(pool_max_size(), DEFAULT_POOL_MAX_SIZE, "0 is not a pool");
+        std::env::set_var("POSTS_POOL_MAX_SIZE", "nonsense");
+        assert_eq!(pool_max_size(), DEFAULT_POOL_MAX_SIZE);
+        std::env::remove_var("POSTS_POOL_MAX_SIZE");
     }
 
     #[tokio::test]
