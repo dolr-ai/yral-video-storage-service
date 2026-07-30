@@ -386,9 +386,15 @@ Then, outside any transaction, call the canister per claimed row. Phase 2 is a s
 
 **Videogen draft path** ([draft_client.rs](../../../src/routes/upload/draft_client.rs)) — unchanged; it goes through `update_metadata_impl` and inherits the new behavior. `draft_post_details` keeps producing a `PostDetailsFromFrontendV1`; only its consumer changes.
 
-**`/get-upload-url`** — **keeps its canister call.** The endpoint is unauthenticated: `GetUploadUrlReq` is `{ publisher_user_id }` with no identity ([get_upload_url.rs:24](../../../src/routes/upload/get_upload_url.rs#L24)), and `get_user_profile_details_v_6` is the only thing stopping anyone minting upload URLs for arbitrary principals. It cannot be replaced by a local lookup: registration happens in `user_info_service`, so a legitimately new user has no `users` row here and a local check would reject them. This is a `user_info_service` concern and follows that service's migration, not this one.
+**`/get-upload-url`** — **accepts an optional delegated identity; the canister call becomes the legacy fallback.** (Revised 2026-07-29 — this was originally deferred as a `user_info_service` concern. It is not: the fix needs no `user_info_service` data at all.)
 
-  Worth flagging separately: the residual exposure is bounded — an attacker who mints a URL can park bytes under someone else's prefix, but publishing requires `/update-video-metadata`, which *is* chain-verified. Requiring a delegated identity on `/get-upload-url` would close it properly and is a better fix than either the canister call or a local table. Out of scope here; recorded as a follow-up.
+The endpoint is unauthenticated today: `GetUploadUrlReq` is `{ publisher_user_id }` with no identity ([get_upload_url.rs:24](../../../src/routes/upload/get_upload_url.rs#L24)), and `get_user_profile_details_v_6` is the only thing stopping anyone minting upload URLs for arbitrary principals. It does that job poorly — it proves the principal *exists*, never that the caller *is* that principal.
+
+A verified delegated identity proves both, so requiring one is simultaneously stricter and canister-free. It ships additively: `delegated_identity_wire` is optional; present → verify the chain, assert `sender == publisher_user_id`, skip the canister; absent → today's behavior unchanged. A present-but-invalid identity is a 401 and must **never** fall through to the legacy path, or the check is bypassable by sending garbage.
+
+The videogen internal caller (`reserve_upload_destination` → `get_upload_url_core`) passes a verified principal directly: `/generate` already rejects anonymous senders and asserts `identity_principal == user_id` ([generate.rs:442](../../../src/routes/videogen/generate.rs#L442), [:504](../../../src/routes/videogen/generate.rs#L504)), so the canister round-trip it pays today buys nothing.
+
+Residual exposure until the legacy arm is deleted is bounded and unchanged from today — an attacker minting a URL can park bytes under someone else's prefix, but publishing requires `/update-video-metadata`, which is chain-verified. The legacy arm is removed in Phase 2 once mobile sends the identity, at which point **`user_info_service` is gone from the post path entirely** and only `/profile-image` still touches it.
 
 **`/profile-image`** ([profile_image.rs](../../../src/routes/user/profile_image.rs)) — **keeps its inline canister write, and must.** The write runs as the *user*, signed by their delegated identity. Outboxing it would mean persisting a user credential in a database row so a worker could replay it later — an unacceptable expansion of what a leaked database backup is worth. The handler additionally upserts `users.profile_picture_url` locally. If the canister write fails the request still fails, exactly as today.
 
@@ -615,7 +621,7 @@ Rollback at any step is the flag. Flipping `POSTS_DUAL_WRITE` back to `false` le
 | Phase | Repo | Work |
 |---|---|---|
 | 1 | this repo | Everything above. Canister still written, via the outbox. Nothing deleted. |
-| 2 | yral-mobile | Replace the three `rust-agent-uniffi` post reads with HTTP calls, including the error mapping below. Ship, wait for adoption. Old installs keep reading the canister and keep working — that is what the outbox buys. |
+| 2 | yral-mobile | Replace the three `rust-agent-uniffi` post reads with HTTP calls, including the error mapping below. **Also send `delegated_identity_wire` on `/get-upload-url`** (the app already holds one for `/update-video-metadata`) — that retires the last `user_info_service` call on the post path. Ship, wait for adoption. Old installs keep reading the canister and keep working — that is what the outbox buys. |
 | 3 | off-chain-agent | Route `delete_post`, ban, `update_post_add_view_details`, and account-deletion enumeration to this service's API instead of the canister. Needs write endpoints this spec does not define. Note `delete_post` signs as the **user**, not an admin identity, so it cannot be outboxed the way our post writes can — its endpoint must carry the delegated identity and act synchronously. `backfill_video_counts` and `canister/health.rs` retire with it. |
 | 3b | hot-or-not-web-leptos-ssr | One call site, `ssr/src/utils/src/profile.rs`. |
 | 4 | this repo | Delete `ic_sync.rs`, `post_outbox_worker.rs`, `post_outbox`, `tests/canister_symbols_guard.rs`, `AppState.ic_agent`, `BACKEND_ADMIN_IDENTITY`, `AppError::CanisterError`, and the `yral-canisters-client` dependency. Keep `ic-agent`, `candid`, `k256` for identity verification. |
@@ -660,7 +666,7 @@ Two smaller notes: `post_events` should get a retention policy once volume is kn
 - Rebuilding chain-coverage-audit without a chain. Carved out to its own spec; Phase 4b is blocked on it.
 - Migrating the ~20 existing `db::connect()` call sites to the pool.
 - Retention/archival for `post_events`.
-- Requiring a delegated identity on `/get-upload-url` (recorded as a follow-up above).
+- Deleting `/get-upload-url`'s legacy unauthenticated arm. Accepting an identity is now **in** scope (see § `/get-upload-url`); removing the fallback is Phase 2, gated on mobile adoption.
 - The analytics `canister_id` field rename.
 
 ---
