@@ -111,15 +111,54 @@ mod tests {
             BASELINE_TABLES,
             "V1 must create every table the old init_schema pair created"
         );
-        assert_eq!(applied_versions(&c).await, vec![1]);
+        // Deliberately not pinned to an exact list — that would need editing on
+        // every future migration. What matters is that the baseline ran.
+        assert!(applied_versions(&c).await.contains(&1));
     }
 
     #[tokio::test]
     async fn migrations_are_idempotent() {
         let (_pg, mut c) = test_client().await;
+        let first = {
+            super::run_migrations(&mut c).await.unwrap();
+            applied_versions(&c).await
+        };
         super::run_migrations(&mut c).await.unwrap();
+        assert_eq!(applied_versions(&c).await, first);
+    }
+
+    /// The test that distinguishes a correct adoption from a catastrophic one.
+    ///
+    /// `Target::Fake` stamps EVERY pending migration as applied without running
+    /// it. On a fresh database that is indistinguishable from `FakeVersion(1)`,
+    /// so only this path — old schema present, V2 pending — catches it. With
+    /// unbounded `Fake`, production would record V2 as applied and create none
+    /// of its tables, surfacing later as a missing relation.
+    #[tokio::test]
+    async fn adoption_stamps_only_the_baseline_and_still_runs_v2() {
+        let (_pg, mut c) = test_client().await;
+        crate::db::init_schema(&c).await.unwrap();
+        crate::media_index::init_schema(&c).await.unwrap();
+        crate::videogen::request_store::init_schema(&c)
+            .await
+            .unwrap();
+
         super::run_migrations(&mut c).await.unwrap();
-        assert_eq!(applied_versions(&c).await, vec![1]);
+
+        let posts_exists: bool = c
+            .query_one("SELECT to_regclass('public.posts') IS NOT NULL AS ok", &[])
+            .await
+            .unwrap()
+            .get("ok");
+        assert!(
+            posts_exists,
+            "V2 must EXECUTE on an adopted database, not merely be stamped"
+        );
+        assert_eq!(
+            applied_versions(&c).await,
+            vec![1, 2],
+            "both versions recorded: V1 faked, V2 actually run"
+        );
     }
 
     /// The production path: a database that already ran the old constants must
@@ -140,7 +179,10 @@ mod tests {
 
         super::run_migrations(&mut c).await.unwrap();
 
-        assert_eq!(applied_versions(&c).await, vec![1]);
+        assert!(
+            applied_versions(&c).await.contains(&1),
+            "the baseline must be recorded as applied"
+        );
         assert!(
             !super::needs_baseline_adoption(&c).await.unwrap(),
             "adoption must be a one-time transition"
