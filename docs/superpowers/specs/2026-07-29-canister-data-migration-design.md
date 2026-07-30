@@ -209,18 +209,32 @@ CREATE TABLE post_likes (
 CREATE INDEX idx_post_likes_principal ON post_likes (principal);
 ```
 
-`posts.like_count` is a denormalized counter maintained by an `AFTER INSERT OR DELETE ON post_likes` trigger, following the `media_job_failures_touch_updated_at` trigger pattern already in the repo. Denormalizing is worth it: `like_count` is read on every post render, `post_likes` will be the largest table here, and the trigger makes the counter impossible to forget.
+`posts.like_count` is a denormalized counter maintained by an `AFTER INSERT OR DELETE ON post_likes` trigger, following the `media_job_failures_touch_updated_at` trigger pattern already in the repo. Denormalizing is worth it: `like_count` is read on every post render, and the trigger makes the counter impossible to forget.
 
-**Volume, and why the backfill needs a bulk path.** `Post.likes` is an unbounded `HashSet<Principal>` in the canister — no cap, no pagination. Against ~583k posts in the master corpus, `post_likes` plausibly lands in the tens of millions of rows, making it by an order of magnitude the largest table this service owns. Two consequences the backfill must handle:
+**Volume — measured, not estimated (2026-07-29).** `Post.likes` is an unbounded `HashSet<Principal>`, so this section originally assumed the worst and specified a bulk-load path around it. The pre-flight walk (`src/bin/likes_sizing.rs`, 300 pages / 30,000 posts) shows that assumption was wrong by roughly three orders of magnitude:
 
-- **The per-row trigger is the wrong tool for bulk load.** Firing `UPDATE posts SET like_count = like_count + 1` once per like row during a corpus-wide import is millions of redundant row updates and the resulting bloat. The backfill instead runs with the trigger disabled (`ALTER TABLE post_likes DISABLE TRIGGER ...`), bulk-inserts via `COPY`, then recomputes every counter in a single `UPDATE posts SET like_count = (SELECT count(*) ...)` pass and re-enables. Steady-state writes keep the trigger.
+| Measure | Value |
+|---|---|
+| posts sampled | 30,000 |
+| total likes | 890 |
+| mean likes/post | 0.03 |
+| p50 / p95 / p99 | 0 / 0 / 1 |
+| posts with zero likes | 29,572 (98.6%) |
+| max likes on one post | 39 |
+| max likes in a 100-post page | 40 |
+| **projected `post_likes` rows** | **~17,000** |
 
-  **This is only safe because the backfill runs before dual-write is enabled** (rollout step 1 precedes step 3), so nothing else is writing `post_likes` while the trigger is off. `DISABLE TRIGGER` is table-wide, not session-scoped — a concurrent writer during that window would silently skip its counter update and leave a permanently wrong `like_count`. If the rollout steps are ever reordered, this breaks silently. Guard it: the backfill should refuse to disable the trigger when `POSTS_DUAL_WRITE` is on.
+`post_likes` is therefore the **smallest** table in this design, not the largest. That corroborates a finding already in § "Who else touches this data": nothing in the working set calls `update_post_toggle_like_status_by_caller`. Liking is close to a dead feature.
 
-- **Build `post_likes` indexes after the load, not before.** `idx_post_likes_principal` and the PK maintained incrementally across a multi-million-row `COPY` is substantially slower than one bulk build afterwards. Same for the FK: it is checked per row on insert, so `post_likes` is created without it, loaded, then the constraint added with a single validating pass (or added `NOT VALID` and validated separately if the lock window matters).
-- **`fetch_posts` page size becomes a memory hazard.** Each `Post` in a page carries its entire likes set, so a page of 100 posts is not a bounded payload — one viral post can dominate it. The walk should reduce `PAGE` (currently 100, [chain_snapshot.rs:58](../../../src/jobs/chain_snapshot.rs#L58)) for the backfill pass and treat a page-decode failure as a signal to halve it, rather than assuming the existing constant transfers.
+**Retracted as unnecessary complexity:**
 
-A pre-flight measurement — walk a few hundred pages and record the like-set size distribution — should run before the full backfill, so the row estimate is a number rather than a guess. If it comes back far larger than expected, storing only `like_count` and deferring per-principal rows to Phase 3 is a legitimate reduction in scope.
+- ~~Bulk `COPY` with the `like_count` trigger disabled.~~ 17k trigger firings is nothing — insert normally, trigger armed throughout. This also removes a real hazard rather than merely simplifying: `DISABLE TRIGGER` is table-wide, not session-scoped, so it opened a window in which any concurrent writer silently left a permanently wrong `like_count`, and it forced a rollout-ordering constraint purely to protect that window. Both are gone.
+- ~~Building `post_likes` indexes and the FK after the load.~~ Irrelevant at this size.
+- ~~Reducing the walk's `PAGE` because a page carries whole like-sets.~~ The worst page observed carried 40 principals. `PAGE = 100` is safe; there is no page-size hazard.
+
+**What survives:** the reconcile cardinality gate (§ "Why `post_likes` cannot simply be overwritten") — but for a different reason than first given. See that section.
+
+**Caveat on the sample.** It is the head of the corpus in cursor order, not uniform, so it may under-represent older or more-engaged posts. The margin absorbs that: even a 100× error lands under 2M rows, still comfortably inside "insert normally".
 
 ```sql
 CREATE TABLE post_outbox (
@@ -475,13 +489,15 @@ Backfill inserts must not enqueue outbox rows — these posts are already on the
 | `post_likes` | canister | **diffed only when `like_count` disagrees** — see below |
 | rows absent locally | canister | inserted with `origin='chain_reconcile'` |
 
-**Why `post_likes` cannot simply be "overwritten".** The other canister-owned fields are scalar column writes. Likes are a *set*: reconciling them means diffing the chain's `HashSet<Principal>` against our rows, per post. Doing that unconditionally would re-diff tens of millions of rows on every reconcile pass over the full corpus — operationally impossible, and the naive reading of "always overwritten" in the table above.
+**Why `post_likes` cannot simply be "overwritten".** The other canister-owned fields are scalar column writes. Likes are a *set*: reconciling them means diffing the chain's `HashSet<Principal>` against our rows, per post.
 
-The cheap discriminator is already in hand: the chain page carries `likes`, so `likes.len()` compared against our stored `like_count` is an O(1) check per post. So:
+*(Reason revised 2026-07-29 after the sizing measurement.)* The original argument was that an unconditional diff would churn tens of millions of like rows. That is not true — there are only ~17k of them. The gate is still right, but the cost it avoids is **statements, not rows**: the reconcile pass walks the full 583k-post corpus, so diffing unconditionally means a DELETE plus an INSERT per post — over a million statements per pass — to reconcile a table with 17k rows in it. The waste is per-*post* overhead, not per-*like* volume.
+
+The cheap discriminator is already in hand: the chain page carries `likes`, so `likes.len()` compared against our stored `like_count` is a free in-memory check per post, and 98.6% of posts have zero on both sides. So:
 
 > Reconcile compares `likes.len()` to `posts.like_count`. Equal → skip the post's likes entirely. Unequal → diff that post's set and apply the delta (`INSERT ... ON CONFLICT DO NOTHING` for additions, `DELETE ... WHERE principal = ANY($removed)` for removals), then let the trigger correct `like_count`.
 
-Cardinality equality does not strictly prove set equality — a simultaneous like and unlike between passes is invisible. That residual is acceptable: likes are not a correctness-critical quantity, the next real change re-syncs the post, and the alternative costs a full-corpus set diff per run. State the limitation rather than pretending the check is exact.
+Cardinality equality does not strictly prove set equality — a simultaneous like and unlike between passes is invisible. That residual is acceptable: likes are not a correctness-critical quantity, the next real change re-syncs the post, and the alternative costs a write per post per pass. State the limitation rather than pretending the check is exact.
 
 **Reconcile writes `post_events` only on actual change.** A `reconciled` event per *examined* post would add one row per post per pass — the log would outgrow the data it describes within days. Only a row that actually moved gets an event.
 
@@ -580,7 +596,7 @@ Following the repo pattern — pure functions unit-tested inline, stateful behav
 - **drift is zero for a post whose only difference from the chain is `created_at`** — the dual-write case, which must not be counted
 - a partial (cancelled or limited) walk performs no destructive step, matching `limited_snapshot_stops_early_and_is_partial`
 
-**Backfill:** run against a mock `PostPageSource` and assert `posts`, `post_likes`, and view stats all populate; `created_at` is the chain value and not `now()`; `like_count` after the bulk recompute equals `post_likes` cardinality; and **no outbox rows are produced**. Separately, assert the backfill refuses to disable the `like_count` trigger when `POSTS_DUAL_WRITE` is on.
+**Backfill:** run against a mock `PostPageSource` and assert `posts`, `post_likes`, and view stats all populate; `created_at` is the chain value and not `now()`; `like_count` matches `post_likes` cardinality per post (the trigger stays armed — there is no recompute pass); and **no outbox rows are produced**.
 
 **Rollout flags:** `POSTS_READ_LOCAL=true` with `POSTS_DUAL_WRITE=false` is rejected at startup; so is `POSTS_DUAL_WRITE=true` with `BACKEND_ADMIN_IDENTITY` unset.
 
@@ -608,7 +624,7 @@ The flags are independent, but `POSTS_DUAL_WRITE=true` with `POSTS_READ_LOCAL=fa
 
 **`RUN_POST_OUTBOX_WORKER` must be enabled before `POSTS_DUAL_WRITE`, not with it.** Once dual-write is on, the outbox is the *only* path to the canister. The inline kick alone would deliver the happy path, but nothing would ever retry a failure — a single transient IC error would strand a post permanently. Enable the worker on all nodes (the lease elects one) and confirm it is draining an empty queue before flipping the write flag. A startup check cannot enforce this, because the worker flag is per-node and the write flag is global; it is a runbook step and should be written down as one.
 
-1. **Schema + backfill.** Migrations applied; `chain_snapshot` extended to dual-write. Run the like-set sizing pre-flight, then the full walk on production. Verify: `posts` count matches non-stale `yral_posts` count; spot-check fields the snapshot never carried; `like_count` recomputation matches `post_likes` cardinality; drift = 0.
+1. **Schema + backfill.** Migrations applied; `chain_snapshot` extended to dual-write. Run the full walk on production (the sizing pre-flight is already done — see § Volume). Verify: `posts` count matches non-stale `yral_posts` count; spot-check fields the snapshot never carried; `like_count` matches `post_likes` cardinality per post; drift = 0.
 2. **Outbox worker on.** `RUN_POST_OUTBOX_WORKER=true` on every node. Queue is empty; confirm the lease is held by exactly one and the drain loop is idle-healthy.
 3. **Outbox writes on.** `POSTS_DUAL_WRITE=true`. Canister readers are unaffected because the outbox lands the same call — but delivery is now asynchronous, so this is the step that needs watching: `oldest_pending_age_secs` and the dead-letter count, for several days, before proceeding.
 4. **Local reads on.** `POSTS_READ_LOCAL=true`. Reversible instantly.
@@ -654,7 +670,7 @@ Moving this data off-chain makes Postgres the durability story for user content.
 
 Two smaller notes: `post_events` should get a retention policy once volume is known — start unbounded, revisit. And when Phase 4 removes `yral-canisters-client`, check whether `candid` can be narrowed to its principal types rather than the full crate; the dependency is currently pulled in whole for `Principal` and a handful of error conversions.
 
-**Capacity.** This lands on a database that already holds ~585k master rows and ~1.17M hash rows and runs the phash pipeline. `posts` adds roughly one row per master row; `post_likes` is the unknown and potentially adds tens of millions (see the sizing pre-flight). Disk headroom on the Patroni volumes, and the effect of the bulk load on replication lag, should be checked before the backfill rather than discovered during it. The backfill is resumable via `media_job_runs` and can be run in slices.
+**Capacity.** This lands on a database that already holds ~585k master rows and ~1.17M hash rows and runs the phash pipeline. `posts` adds roughly one row per master row (~583k); `post_likes` adds ~17k (measured, § Volume); `post_events` grows with write volume. So the dominant addition is `posts` itself, at well under half the size of the existing hash table — no capacity concern, and the earlier worry about bulk-load replication lag is moot. The backfill remains resumable via `media_job_runs` and can be run in slices.
 
 ---
 
@@ -673,7 +689,7 @@ Two smaller notes: `post_events` should get a retention policy once volume is kn
 
 ## Open questions
 
-1. **Does `post_likes` earn its place in Phase 1?** Contingent on the sizing pre-flight. If the corpus carries tens of millions of likes, deferring per-principal rows and shipping only `like_count` is the better trade — `liked_by_me` then stays on the canister until Phase 3, which is where the like *writer* migrates anyway.
+1. ~~**Does `post_likes` earn its place in Phase 1?**~~ **ANSWERED 2026-07-29 — yes.** The sizing pre-flight projects ~17k rows (§ Volume), so per-principal likes cost essentially nothing and stay in Phase 1. The bulk-load machinery that motivated the question is retracted. Residual observation worth carrying forward: 98.6% of posts have zero likes and no repo calls the like *writer*, so if liking is being deprecated as a product feature, this table and `liked_by_me` could be dropped entirely — a product question, not a schema one.
 2. **Is refinery adopted now, or is the DDL-constant pattern extended once more?** The migration debt is real either way; this spec recommends paying it here, while the new schema is the only thing that needs converting.
 3. **How long must Phase 2 adoption run before Phase 4?** A product call on installed-app support, not an engineering one — but it determines how long the outbox is load-bearing.
 4. **Does the weaker post-Phase-4 audit guarantee need a storage-side independent witness before the canister is decommissioned?** See "Consequence for chain-coverage-audit".

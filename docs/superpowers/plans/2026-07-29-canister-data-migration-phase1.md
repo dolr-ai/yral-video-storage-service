@@ -20,17 +20,26 @@ When a task says *"per spec § X"*, open that section and implement exactly what
 
 **Sequencing constraints the spec imposes** (violating these breaks things silently, not loudly):
 
-1. Backfill (Milestone E) completes **before** `POSTS_DUAL_WRITE` is enabled — spec § "The per-row trigger is the wrong tool for bulk load". `DISABLE TRIGGER` is table-wide; a concurrent writer during the backfill window leaves permanently wrong `like_count`.
-2. `RUN_POST_OUTBOX_WORKER` is enabled **before** `POSTS_DUAL_WRITE` — spec § Rollout. Otherwise nothing retries a failed delivery and a transient IC error strands a post forever.
-3. `mark_post_as_published` cannot read locally until backfill lands — spec § Rewritten handlers.
+1. `RUN_POST_OUTBOX_WORKER` is enabled **before** `POSTS_DUAL_WRITE` — spec § Rollout. Otherwise nothing retries a failed delivery and a transient IC error strands a post forever.
+2. `mark_post_as_published` cannot read locally until backfill lands — spec § Rewritten handlers.
+
+> A third constraint — "backfill must precede dual-write because `DISABLE TRIGGER` is table-wide" — was **removed 2026-07-29**. Task 0 measured the like corpus at ~17k rows, so there is no bulk-load path and no trigger-disable window. Backfill and dual-write ordering is now a preference (backfill first still makes `mark_post_as_published` simpler), not a silent-corruption hazard. Spec § Volume.
 
 Build order below is *not* rollout order. Build A→F; roll out per spec § Rollout.
 
-## Open question that changes this plan
+## Open question — RESOLVED 2026-07-29
 
-**Task 0 decides whether Tasks 7 and 19 survive.** Spec Open Question 1: if the like corpus is far larger than estimated, `post_likes` is deferred and only `like_count` ships. Run Task 0 first and report the number before starting Milestone A.
+**Task 0 is done. `post_likes` stays in Phase 1; Tasks 7 and 19 both survive.**
 
-If deferred, the exact edit set is: drop Task 7 (`post_likes` write helpers) and Task 19 (like reconciliation); in Task 2 keep the `post_likes` table but skip its trigger; in Task 17 populate `posts.like_count` from `likes.len()` and skip the bulk like load; in Task 21 hardcode `liked_by_me: null` and note it stays canister-served until Phase 3. **Task 20 (drift) survives either way** — it compares `like_count`, which exists in both worlds.
+Measured over 30,000 posts: 890 likes total, mean 0.03/post, p95 = 0, 98.6% of posts have zero likes, worst single post 39, worst 100-post page 40 principals. Projection **~17,000 rows** — three orders of magnitude below the spec's original guess of "tens of millions".
+
+Consequences already applied to this plan and the spec:
+
+- Task 17 loses its bulk-load path (no `COPY`, no trigger disable, no build-indexes-after, no reduced `PAGE`).
+- Sequencing constraint #1 is deleted — it existed solely to protect the trigger-disable window.
+- Task 19's cardinality gate **stays**, but its justification changed: it saves a write *per post* across a 583k-post walk, not per *like*. Spec § "Why `post_likes` cannot simply be overwritten".
+
+Carry forward as a product question, not an engineering one: nothing calls the like *writer* and 98.6% of posts have no likes. If liking is being retired, this table and `liked_by_me` could go away entirely.
 
 ---
 
@@ -63,32 +72,16 @@ crate::migrations::run_migrations(&mut client).await.unwrap();
 
 ---
 
-## Task 0: Like-corpus sizing pre-flight
+## Task 0: Like-corpus sizing pre-flight — ✅ DONE 2026-07-29
 
-Spec § "Volume, and why the backfill needs a bulk path" — the `post_likes` row estimate is currently a guess.
+Answered spec Open Question 1 and retracted the bulk-load path. See "Open question — RESOLVED" above for the numbers and consequences.
 
-**Files:**
-- Create: `src/bin/likes_sizing.rs`
+- [x] **Step 1: Write the sizing binary** — `src/bin/likes_sizing.rs`. Walks `fetch_posts` via the existing `LivePostSource` / `walk_step`, reports mean, p50/p95/p99, max-per-post, max-per-page, and projects rows against the 583k corpus.
+- [x] **Step 2: Run against prod** — `PAGES=300 PAGE_SIZE=100 cargo run --bin likes_sizing`. No `BACKEND_ADMIN_IDENTITY` needed: `fetch_posts` is an unguarded candid `query`, so an anonymous agent suffices. Read-only.
+- [x] **Step 3: Record and decide** — numbers written into spec § Volume; Open Question 1 marked answered; bulk-load machinery struck from spec and from Task 17.
+- [x] **Step 4: Commit**
 
-- [ ] **Step 1: Write a throwaway binary that walks `fetch_posts` and reports the like distribution**
-
-Reuse `jobs::chain_snapshot::PostPageSource` / `LivePostSource`. Walk 300 pages at `PAGE=100`. Accumulate: total posts, total likes, max likes on a single post, p50/p95/p99 of `likes.len()`, and the largest single-page payload seen.
-
-- [ ] **Step 2: Run against prod**
-
-Run: `BACKEND_ADMIN_IDENTITY=... cargo run --bin likes_sizing`
-Expected: a printed distribution. Extrapolate total rows as `mean_likes × 583_000`.
-
-- [ ] **Step 3: Decide and record**
-
-Write the numbers into spec § Open Questions as the answer to Q1. If the extrapolation exceeds ~50M rows or p99 is pathological, **stop and re-scope** per the edit set in "Open question that changes this plan" above — drop Tasks 7 and **19** (not 20; drift survives either way), keep `like_count` as a plain column fed from `likes.len()`, and mark `liked_by_me` as canister-served until Phase 3.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/bin/likes_sizing.rs docs/superpowers/specs/2026-07-29-canister-data-migration-design.md
-git commit -m "chore: add like-corpus sizing pre-flight and record result"
-```
+> **Delete `src/bin/likes_sizing.rs` before the branch merges.** It is a throwaway whose only output is a number now recorded in the spec. Leaving it turns a one-off measurement into a permanent binary that compiles on every build and will rot the first time `PostPageSource` changes shape.
 
 ---
 
@@ -903,8 +896,9 @@ Against the existing `MockSource` — reuse it, it already exists at `chain_snap
 #[tokio::test] async fn backfill_still_writes_yral_posts_unchanged() {
     // the audit contract must not move — spec § Consequence for chain-coverage-audit
 }
-#[tokio::test] async fn backfill_refuses_to_disable_trigger_when_dual_write_on() {
-    // spec § "This is only safe because the backfill runs before dual-write"
+#[tokio::test] async fn backfill_keeps_like_count_consistent_with_post_likes() {
+    // trigger stays armed through the backfill, so this is just the trigger
+    // doing its job — no recompute pass to verify
 }
 ```
 
@@ -912,7 +906,7 @@ Against the existing `MockSource` — reuse it, it already exists at `chain_snap
 
 Write both destinations from one page. Preserve: `media_job_runs` tracking, `MAX_ITERS`, cancellation, and the partial-run rule that only a complete walk marks stale.
 
-Bulk path per spec: `post_likes` loaded without indexes/FK, built after; `like_count` trigger disabled during load then one recompute pass; `PAGE` reduced for the backfill because a page carries whole like-sets.
+Insert `post_likes` normally with the `like_count` trigger armed — no `COPY`, no trigger disable, no deferred index build, and `PAGE` stays at 100. The bulk-load path this task originally specified was retracted after Task 0 measured the corpus at ~17k like rows (spec § Volume).
 
 - [ ] **Step 5: Commit**
 
